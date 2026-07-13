@@ -31,7 +31,7 @@ GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 NAVER_CLIENT_ID = st.secrets.get("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
 
-# --- [데이터베이스 설정] ---
+# --- [데이터베이스 설정 및 스키마 업데이트] ---
 conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
 c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS scrapbook 
@@ -42,7 +42,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS oauth_store (state TEXT, verifier TEXT)'
 c.execute('''CREATE TABLE IF NOT EXISTS oauth_creds (creds TEXT)''')
 conn.commit()
 
-# 기존 포트폴리오 테이블에 신규 컬럼 강제 추가 (스키마 업데이트)
+# 기존 포트폴리오 및 스크랩북 테이블 신규 컬럼 강제 추가 (트래킹 기능용)
 try: c.execute("ALTER TABLE portfolio ADD COLUMN search_query TEXT")
 except sqlite3.OperationalError: pass
 try: c.execute("ALTER TABLE portfolio ADD COLUMN ticker TEXT")
@@ -52,6 +52,15 @@ except sqlite3.OperationalError: pass
 try: c.execute("ALTER TABLE portfolio ADD COLUMN avg_price REAL DEFAULT 0.0")
 except sqlite3.OperationalError: pass
 try: c.execute("ALTER TABLE portfolio ADD COLUMN quantity INTEGER DEFAULT 0")
+except sqlite3.OperationalError: pass
+
+try: c.execute("ALTER TABLE scrapbook ADD COLUMN stock_name TEXT")
+except sqlite3.OperationalError: pass
+try: c.execute("ALTER TABLE scrapbook ADD COLUMN ticker TEXT")
+except sqlite3.OperationalError: pass
+try: c.execute("ALTER TABLE scrapbook ADD COLUMN saved_price REAL DEFAULT 0.0")
+except sqlite3.OperationalError: pass
+try: c.execute("ALTER TABLE scrapbook ADD COLUMN target_price REAL DEFAULT 0.0")
 except sqlite3.OperationalError: pass
 conn.commit()
 
@@ -225,7 +234,6 @@ def get_stock_current_price(ticker):
     try:
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
-            # HTML 스크래핑 대신 모바일 전용 JSON API 호출 (UI 변경에 강건함)
             code = code_match.group()
             url = f"https://m.stock.naver.com/api/stock/{code}/basic"
             headers = {'User-Agent': 'Mozilla/5.0'}
@@ -355,7 +363,6 @@ def get_financial_data(ticker):
     try:
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
-            # HTML 스크래핑(BeautifulSoup) 제거 및 JSON API 직접 통신 적용
             code = code_match.group()
             url = f"https://m.stock.naver.com/api/stock/{code}/basic"
             headers = {'User-Agent': 'Mozilla/5.0'}
@@ -459,7 +466,9 @@ def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quanti
               f"2. 🌐 최신 뉴스 및 거시 지표(환율/지수 등) 파급력 종합 분석\n"
               f"3. 📊 사용자 맞춤형 포트폴리오 진단 (사용자의 매수 단가, 수량, 현재 수익률을 구체적으로 언급하며 진단)\n"
               f"4. 🎯 최종 투자의견 (매수/보유/매도 중 택 1) 및 객관적 근거 제시\n"
-              f"5. 💰 적정 목표가 및 손절가 (현재가 대비 객관적 산출 근거를 포함하여 구체적인 가격 제시)")
+              f"5. 💰 적정 목표가 및 손절가 (현재가 대비 객관적 산출 근거를 포함하여 구체적인 가격 제시)\n"
+              f"6. 👥 동종 업계(Peer Group) 비교 (국내외 주요 경쟁사 1~2곳과 비교한 강약점 및 밸류에이션 평가)\n\n"
+              f"※ 중요: 반드시 리포트 맨 마지막 줄에 'TARGET_PRICE: 숫자' 형태로 단기 목표가격을 숫자로만 기재하십시오. (예: TARGET_PRICE: 85000)")
     try: return call_gemini_with_fallback(prompt)
     except Exception as e: return f"분석 오류: {e}"
 
@@ -469,7 +478,6 @@ def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quanti
 st.title("📊 Project2_Stock")
 market_data = get_market_data()
 
-# AI 프롬프트 주입용 실시간 시장 지표 문자열 생성
 market_data_str = ", ".join([f"{k}: {v['current']:,.2f}({v['diff_pct']:+.2f}%)" for k, v in market_data.items() if v.get('current', 0) > 0])
 
 cols = st.columns(len(market_data))
@@ -516,7 +524,6 @@ with tab1:
             st.markdown(f"**현재 AI 시장 심리 지수: {score} / 100 ({sentiment_label})**")
             st.progress(score / 100.0)
             
-            # 아코디언 UI 적용
             with st.expander("📝 AI 거시 환경 브리핑 전체 보기", expanded=True):
                 st.markdown(st.session_state.overall_analysis['text'])
         
@@ -534,8 +541,8 @@ with tab1:
                     with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
                         st.write(st.session_state.analysis_results[news['link']])
                         if st.button("💾 이 리포트 스크랩하기", key=f"t1_scrap_{news['link']}"):
-                            c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
-                                      (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
+                            c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                      (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
                             conn.commit()
                             st.success("스크랩북 저장 완료")
                 st.divider()
@@ -593,8 +600,8 @@ with tab2:
                         with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
                             st.write(st.session_state.analysis_results[news['link']])
                             if st.button("💾 스크랩", key=f"t2_scrap_{news['link']}"):
-                                c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
-                                          (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
+                                c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                          (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
                                 conn.commit()
                                 st.success("저장 완료")
         else:
@@ -607,12 +614,10 @@ with tab3:
     
     if st.button("🚀 오늘의 추천종목 발굴 실행", type="primary", use_container_width=True):
         with st.spinner("유망 종목 관련 최신 뉴스를 수집 및 분석 중입니다..."):
-            # 쿼리 범위를 넓혀 빈 결과 방지
             rec_query = "특징주|목표가|수주|흑자|실적"
             rec_news = get_naver_news(rec_query, display=50, start=1)
             recent_rec_news = [n for n in rec_news if is_within_7_days(n['published'])]
             
-            # 폴백(Fallback): 그래도 없으면 매우 넓은 범위로 재검색
             if not recent_rec_news:
                 fallback_rec_news = get_naver_news("주식 추천|특징주", display=50, start=1)
                 recent_rec_news = [n for n in fallback_rec_news if is_within_7_days(n['published'])]
@@ -626,8 +631,8 @@ with tab3:
         with st.expander("🎯 AI 추천종목 리포트 보기", expanded=True):
             st.write(st.session_state.today_recommendation)
             if st.button("💾 추천종목 리포트 스크랩", key="scrap_rec"):
-                c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
-                          ("🎯 오늘의 AI 추천종목", "", "실적/수주/목표가 상향 기반 추천", st.session_state.today_recommendation, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          ("🎯 오늘의 AI 추천종목", "", "실적/수주/목표가 상향 기반 추천", st.session_state.today_recommendation, datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
                 conn.commit()
                 st.success("저장 완료")
 
@@ -778,12 +783,22 @@ with tab4:
                         
             if f"deep_{p_id}" in st.session_state.analysis_results:
                 with st.expander("📊 AI 포트폴리오 심층 진단 결과", expanded=True):
-                    st.write(st.session_state.analysis_results[f"deep_{p_id}"])
-                    if st.button("💾 이 리포트 스크랩", key=f"t3_scrap_deep_{p_id}"):
-                        c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
-                                  (f"[{p_name}] 포트폴리오 심층 진단", "", "TOP 30 뉴스 및 실시간 재무 분석 기반", st.session_state.analysis_results[f"deep_{p_id}"], datetime.now().strftime("%Y-%m-%d %H:%M")))
+                    raw_report = st.session_state.analysis_results[f"deep_{p_id}"]
+                    
+                    # TARGET_PRICE 추출 및 화면 노출 시 해당 문자열 제거
+                    target_price = 0.0
+                    match = re.search(r'TARGET_PRICE:\s*([\d,]+)', raw_report)
+                    if match:
+                        target_price = float(match.group(1).replace(',', ''))
+                    clean_report = re.sub(r'TARGET_PRICE:\s*[\d,]+', '', raw_report).strip()
+                    
+                    st.write(clean_report)
+                    
+                    if st.button("💾 이 리포트 스크랩 (목표가 추적 시작)", key=f"t3_scrap_deep_{p_id}"):
+                        c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                  (f"[{p_name}] 포트폴리오 심층 진단", "", "TOP 30 뉴스 및 실시간 재무 분석 기반", clean_report, datetime.now().strftime("%Y-%m-%d %H:%M"), p_name, p_ticker, current_price, target_price))
                         conn.commit()
-                        st.success("저장 완료")
+                        st.success("저장 완료. '스크랩북' 탭에서 AI 목표가 적중률을 확인할 수 있습니다.")
             
             if is_ai_picked:
                 st.caption("✨ 직접적인 비즈니스 키워드가 포함된 뉴스가 없어 AI가 선별한 최근 7일 내 주요 뉴스입니다.")
@@ -803,17 +818,53 @@ with tab4:
                 st.info(f"'{p_name}' 관련 최근 7일 이내 뉴스가 없습니다. (새 뉴스 보기 버튼을 눌러보십시오.)")
     else: st.info("등록된 관심종목이 없습니다.")
 
-# [탭 5: 스크랩북]
+# [탭 5: 스크랩북 및 적중률 트래킹]
 with tab5:
-    st.subheader("📁 내 스크랩북 (저장된 리포트)")
-    c.execute("SELECT id, title, link, summary, analysis, scrap_date FROM scrapbook ORDER BY id DESC")
+    st.subheader("📁 내 스크랩북 및 AI 예측 트래킹")
+    c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price FROM scrapbook ORDER BY id DESC")
     scraps = c.fetchall()
-    for s_id, s_title, s_link, s_summary, s_analysis, s_date in scraps:
+    for s_id, s_title, s_link, s_summary, s_analysis, s_date, s_name, s_ticker, s_saved_price, s_target_price in scraps:
         with st.expander(f"[{s_date}] {s_title}"):
+            
+            # AI 투자의견 적중률 트래킹 UI (심층 리포트인 경우에만 표시)
+            if s_name and s_ticker and s_target_price > 0:
+                current_price = get_stock_current_price(s_ticker)
+                
+                # 저장 당시부터 현재까지의 수익률
+                actual_roi = ((current_price - s_saved_price) / s_saved_price) * 100 if s_saved_price > 0 else 0
+                # 목표가 달성률 (현재가 / 목표가)
+                achievement_rate = (current_price / s_target_price) * 100 if s_target_price > 0 else 0
+                
+                st.markdown("### 🎯 AI 예측 트래커")
+                t_col1, t_col2, t_col3, t_col4 = st.columns(4)
+                t_col1.metric("저장 당시 주가", f"{s_saved_price:,.0f}원")
+                t_col2.metric("실시간 주가", f"{current_price:,.0f}원", f"{actual_roi:+.2f}%")
+                t_col3.metric("AI 목표가", f"{s_target_price:,.0f}원")
+                t_col4.metric("목표가 달성률", f"{achievement_rate:.1f}%")
+                st.divider()
+
             if s_link: st.markdown(f"[기사 링크]({s_link})\n\n**요약:** {s_summary}\n\n**AI 분석:**\n{s_analysis}")
             else: st.markdown(f"**AI 분석:**\n{s_analysis}")
-            if st.button("🗑️ 삭제", key=f"del_scrap_{s_id}"):
-                c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,)); conn.commit(); st.rerun()
+            
+            # 다운로드 및 삭제 버튼
+            col_b1, col_b2 = st.columns([1, 1])
+            with col_b1:
+                html_content = f"""
+                <html>
+                <head><meta charset="utf-8"><title>{s_title}</title></head>
+                <body style="font-family: sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px;">
+                <h2>{s_title}</h2>
+                <p><strong>스크랩 날짜:</strong> {s_date}</p>
+                <hr>
+                <h3>요약</h3><p>{s_summary}</p>
+                <h3>AI 분석 리포트</h3><p>{s_analysis.replace(chr(10), '<br>')}</p>
+                </body>
+                </html>
+                """
+                st.download_button("📄 HTML 리포트로 저장", data=html_content, file_name=f"Report_{s_date[:10]}.html", mime="text/html", key=f"dl_{s_id}")
+            with col_b2:
+                if st.button("🗑️ 리포트 삭제", key=f"del_scrap_{s_id}"):
+                    c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,)); conn.commit(); st.rerun()
 
 # [탭 6: 데이터 백업/복구]
 with tab6:
@@ -841,8 +892,8 @@ with tab6:
             if st.button("🔌 연동 해제", use_container_width=True):
                 c.execute("DELETE FROM oauth_creds"); conn.commit(); st.rerun()
                 
-        c.execute("SELECT title, link, summary, analysis, scrap_date FROM scrapbook")
-        scrap_list = [{"title": r[0], "link": r[1], "summary": r[2], "analysis": r[3], "scrap_date": r[4]} for r in c.fetchall()]
+        c.execute("SELECT title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price FROM scrapbook")
+        scrap_list = [{"title": r[0], "link": r[1], "summary": r[2], "analysis": r[3], "scrap_date": r[4], "stock_name": r[5], "ticker": r[6], "saved_price": r[7], "target_price": r[8]} for r in c.fetchall()]
         
         c.execute("SELECT stock_name, search_query, ticker, is_owned, avg_price, quantity FROM portfolio")
         port_list = [{"stock_name": r[0], "search_query": r[1], "ticker": r[2], "is_owned": r[3], "avg_price": r[4], "quantity": r[5]} for r in c.fetchall()]
@@ -873,8 +924,8 @@ with tab6:
                     c.execute("DELETE FROM portfolio")
                     
                     for item in restore_data.get("scrapbook", []):
-                        c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
-                                  (item['title'], item['link'], item['summary'], item['analysis'], item['scrap_date']))
+                        c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                  (item['title'], item['link'], item['summary'], item['analysis'], item['scrap_date'], item.get('stock_name', ''), item.get('ticker', ''), item.get('saved_price', 0.0), item.get('target_price', 0.0)))
                     for item in restore_data.get("portfolio", []):
                         if isinstance(item, str): 
                             c.execute("INSERT INTO portfolio (stock_name) VALUES (?)", (item,))
