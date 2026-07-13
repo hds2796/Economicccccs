@@ -496,7 +496,10 @@ with tab1:
             
             st.markdown(f"**현재 AI 시장 심리 지수: {score} / 100 ({sentiment_label})**")
             st.progress(score / 100.0)
-            st.markdown(st.session_state.overall_analysis['text'])
+            
+            # 아코디언 UI 적용
+            with st.expander("📝 AI 거시 환경 브리핑 전체 보기", expanded=True):
+                st.markdown(st.session_state.overall_analysis['text'])
         
         st.markdown("---")
         
@@ -507,13 +510,15 @@ with tab1:
                 st.caption(f"{news['published']} | {news['summary']}")
                 if st.button("이 기사 심층 분석", key=f"t1_btn_{news['link']}"):
                     st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
+                
                 if news['link'] in st.session_state.analysis_results:
-                    st.info(st.session_state.analysis_results[news['link']])
-                    if st.button("💾 이 리포트 스크랩하기", key=f"t1_scrap_{news['link']}"):
-                        c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
-                                  (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
-                        conn.commit()
-                        st.success("스크랩북 저장 완료")
+                    with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
+                        st.write(st.session_state.analysis_results[news['link']])
+                        if st.button("💾 이 리포트 스크랩하기", key=f"t1_scrap_{news['link']}"):
+                            c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
+                                      (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
+                            conn.commit()
+                            st.success("스크랩북 저장 완료")
                 st.divider()
         else:
             st.info("최근 7일 이내에 보도된 뉴스가 없습니다.")
@@ -524,7 +529,7 @@ with tab2:
         "반도체": "반도체|삼성전자|SK하이닉스", 
         "2차전지": "2차전지|전기차|배터리", 
         "바이오": "바이오|제약|신약", 
-        "금융/밸류업": "금융|은행|밸류업", 
+        "금융/밸류업": "금융|은행|밸류업|증권", 
         "IT/플랫폼": "IT|플랫폼|네이버|카카오|인공지능", 
         "방산/조선": "방산|조선|K방산"
     }
@@ -553,8 +558,8 @@ with tab2:
                 st.session_state[f'sector_summary_{selected_sector}'] = analyze_sector_news(selected_sector, top_20_news)
                 
         if f'sector_summary_{selected_sector}' in st.session_state:
-            st.markdown("### 📊 섹터 종합 브리핑")
-            st.info(st.session_state[f'sector_summary_{selected_sector}'])
+            with st.expander("📊 AI 섹터 종합 브리핑", expanded=True):
+                st.write(st.session_state[f'sector_summary_{selected_sector}'])
             st.markdown("---")
             
         recent_sector_news = [n for n in sector_news if is_within_7_days(n['published'])]
@@ -564,13 +569,15 @@ with tab2:
                     st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
                     if st.button("AI 분석 실행", key=f"t2_btn_{news['link']}"):
                         st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
+                    
                     if news['link'] in st.session_state.analysis_results:
-                        st.info(st.session_state.analysis_results[news['link']])
-                        if st.button("💾 스크랩", key=f"t2_scrap_{news['link']}"):
-                            c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
-                                      (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
-                            conn.commit()
-                            st.success("저장 완료")
+                        with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
+                            st.write(st.session_state.analysis_results[news['link']])
+                            if st.button("💾 스크랩", key=f"t2_scrap_{news['link']}"):
+                                c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
+                                          (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
+                                conn.commit()
+                                st.success("저장 완료")
         else:
             st.info("최근 7일 이내에 보도된 관련 섹터 뉴스가 없습니다.")
 
@@ -581,9 +588,15 @@ with tab3:
     
     if st.button("🚀 오늘의 추천종목 발굴 실행", type="primary", use_container_width=True):
         with st.spinner("유망 종목 관련 최신 뉴스를 수집 및 분석 중입니다..."):
-            rec_query = "목표가 상향|어닝 서프라이즈|대규모 수주|흑자 전환|특징주"
+            # 쿼리 범위를 넓혀 빈 결과 방지
+            rec_query = "특징주|목표가|수주|흑자|실적"
             rec_news = get_naver_news(rec_query, display=50, start=1)
             recent_rec_news = [n for n in rec_news if is_within_7_days(n['published'])]
+            
+            # 폴백(Fallback): 그래도 없으면 매우 넓은 범위로 재검색
+            if not recent_rec_news:
+                fallback_rec_news = get_naver_news("주식 추천|특징주", display=50, start=1)
+                recent_rec_news = [n for n in fallback_rec_news if is_within_7_days(n['published'])]
             
             if recent_rec_news:
                 st.session_state.today_recommendation = analyze_recommended_stocks(recent_rec_news)
@@ -591,12 +604,13 @@ with tab3:
                 st.warning("분석할 만한 최신 유망 뉴스가 부족합니다.")
     
     if st.session_state.get('today_recommendation'):
-        st.info(st.session_state.today_recommendation)
-        if st.button("💾 추천종목 리포트 스크랩", key="scrap_rec"):
-            c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
-                      ("🎯 오늘의 AI 추천종목", "", "실적/수주/목표가 상향 기반 추천", st.session_state.today_recommendation, datetime.now().strftime("%Y-%m-%d %H:%M")))
-            conn.commit()
-            st.success("저장 완료")
+        with st.expander("🎯 AI 추천종목 리포트 보기", expanded=True):
+            st.write(st.session_state.today_recommendation)
+            if st.button("💾 추천종목 리포트 스크랩", key="scrap_rec"):
+                c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
+                          ("🎯 오늘의 AI 추천종목", "", "실적/수주/목표가 상향 기반 추천", st.session_state.today_recommendation, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                conn.commit()
+                st.success("저장 완료")
 
 # [탭 4: 관심종목 및 포트폴리오 관리]
 with tab4:
@@ -744,12 +758,13 @@ with tab4:
                         st.rerun()
                         
             if f"deep_{p_id}" in st.session_state.analysis_results:
-                st.info(st.session_state.analysis_results[f"deep_{p_id}"])
-                if st.button("💾 이 리포트 스크랩", key=f"t3_scrap_deep_{p_id}"):
-                    c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
-                              (f"[{p_name}] 포트폴리오 심층 진단", "", "TOP 30 뉴스 및 실시간 재무 분석 기반", st.session_state.analysis_results[f"deep_{p_id}"], datetime.now().strftime("%Y-%m-%d %H:%M")))
-                    conn.commit()
-                    st.success("저장 완료")
+                with st.expander("📊 AI 포트폴리오 심층 진단 결과", expanded=True):
+                    st.write(st.session_state.analysis_results[f"deep_{p_id}"])
+                    if st.button("💾 이 리포트 스크랩", key=f"t3_scrap_deep_{p_id}"):
+                        c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
+                                  (f"[{p_name}] 포트폴리오 심층 진단", "", "TOP 30 뉴스 및 실시간 재무 분석 기반", st.session_state.analysis_results[f"deep_{p_id}"], datetime.now().strftime("%Y-%m-%d %H:%M")))
+                        conn.commit()
+                        st.success("저장 완료")
             
             if is_ai_picked:
                 st.caption("✨ 직접적인 비즈니스 키워드가 포함된 뉴스가 없어 AI가 선별한 최근 7일 내 주요 뉴스입니다.")
@@ -761,8 +776,10 @@ with tab4:
                         st.write(news['summary'])
                         if st.button("이 개별 뉴스 분석", key=f"t3_btn_{p_id}_{i}"):
                             st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
+                        
                         if news['link'] in st.session_state.analysis_results:
-                            st.info(st.session_state.analysis_results[news['link']])
+                            with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
+                                st.write(st.session_state.analysis_results[news['link']])
             else:
                 st.info(f"'{p_name}' 관련 최근 7일 이내 뉴스가 없습니다. (새 뉴스 보기 버튼을 눌러보십시오.)")
     else: st.info("등록된 관심종목이 없습니다.")
