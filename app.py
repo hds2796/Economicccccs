@@ -180,6 +180,7 @@ if 'current_eco_news' not in st.session_state: st.session_state.current_eco_news
 if 'sector_starts' not in st.session_state: st.session_state.sector_starts = {}
 if 'seen_sectors' not in st.session_state: st.session_state.seen_sectors = {}
 if 'current_sector_news' not in st.session_state: st.session_state.current_sector_news = {}
+if 'port_starts' not in st.session_state: st.session_state.port_starts = {}
 
 @st.cache_data(ttl=60)
 def get_market_data():
@@ -255,12 +256,12 @@ def get_naver_news(query, display=10, start=1):
         return [{"title": clean_html(i['title']), "link": i['link'], "summary": clean_html(i['description']), "published": i['pubDate']} for i in response.json().get("items", [])]
     return []
 
-# 화면 노출용 24시간 필터링 검증 함수
-def is_within_24_hours(pub_date_str):
+# 화면 노출용 7일(일주일) 필터링 검증 함수
+def is_within_7_days(pub_date_str):
     try:
         dt = parsedate_to_datetime(pub_date_str)
         now = datetime.now(timezone.utc)
-        return (now - dt) <= timedelta(hours=24)
+        return (now - dt) <= timedelta(days=7)
     except Exception:
         return True
 
@@ -456,14 +457,22 @@ with tab1:
                 
         if st.session_state.overall_analysis:
             score = st.session_state.overall_analysis['score']
-            st.markdown(f"**현재 AI 시장 심리 지수: {score} / 100**")
+            
+            # 산출된 점수에 따른 텍스트 라벨링 조건식
+            if score >= 80: sentiment_label = "매우 강세 🔥"
+            elif score >= 60: sentiment_label = "강세 📈"
+            elif score >= 40: sentiment_label = "중립 ⚖️"
+            elif score >= 20: sentiment_label = "약세 📉"
+            else: sentiment_label = "매우 약세 ❄️"
+            
+            st.markdown(f"**현재 AI 시장 심리 지수: {score} / 100 ({sentiment_label})**")
             st.progress(score / 100.0)
             st.markdown(st.session_state.overall_analysis['text'])
         
         st.markdown("---")
         
-        # UI 출력 시 24시간 이내의 뉴스만 필터링 (분석에는 위 50개 원본 데이터 사용)
-        recent_eco_news = [n for n in st.session_state.current_eco_news if is_within_24_hours(n['published'])]
+        # UI 출력 시 최근 7일 이내의 뉴스만 필터링 (분석에는 위 50개 원본 데이터 사용)
+        recent_eco_news = [n for n in st.session_state.current_eco_news if is_within_7_days(n['published'])]
         if recent_eco_news:
             for i, news in enumerate(recent_eco_news):
                 st.markdown(f"**{i+1}. [{news['title']}]({news['link']})**")
@@ -479,7 +488,7 @@ with tab1:
                         st.success("스크랩북 저장 완료")
                 st.divider()
         else:
-            st.info("24시간 이내에 보도된 뉴스가 없습니다.")
+            st.info("최근 7일 이내에 보도된 뉴스가 없습니다.")
 
 # [탭 2: 섹터별 분석]
 with tab2:
@@ -520,8 +529,8 @@ with tab2:
             st.info(st.session_state[f'sector_summary_{selected_sector}'])
             st.markdown("---")
             
-        # UI 출력 시 24시간 이내 뉴스만 필터링
-        recent_sector_news = [n for n in sector_news if is_within_24_hours(n['published'])]
+        # UI 출력 시 최근 7일 이내 뉴스만 필터링
+        recent_sector_news = [n for n in sector_news if is_within_7_days(n['published'])]
         if recent_sector_news:
             for i, news in enumerate(recent_sector_news):
                 with st.expander(f"📰 {news['title']}"):
@@ -536,7 +545,7 @@ with tab2:
                             conn.commit()
                             st.success("저장 완료")
         else:
-            st.info("24시간 이내에 보도된 관련 섹터 뉴스가 없습니다.")
+            st.info("최근 7일 이내에 보도된 관련 섹터 뉴스가 없습니다.")
 
 # [탭 3: 관심종목 및 포트폴리오 관리]
 with tab3:
@@ -594,29 +603,60 @@ with tab3:
         for p_id, p_name, p_query, p_ticker, p_is_owned, p_avg_price, p_quantity in portfolio:
             st.markdown("---")
             
-            col_title, col_deep = st.columns([4, 2])
+            col_title, col_refresh, col_deep = st.columns([3, 1, 2])
             with col_title:
                 st.markdown(f"#### 📌 [{p_name}]")
+                
+            start_idx = st.session_state.port_starts.get(p_id, 1)
+            with col_refresh:
+                if st.button("🔄 새 뉴스 보기", key=f"ref_port_{p_id}", use_container_width=True):
+                    st.session_state.port_starts[p_id] = start_idx + 50
+                    st.rerun()
             
             current_price = get_stock_current_price(p_ticker)
             
             search_keywords = [k.strip() for k in (p_query or p_name).split(" OR ")]
             broad_query = "|".join(search_keywords)
-            raw_news = get_naver_news(broad_query, display=50) 
+            raw_news = get_naver_news(broad_query, display=50, start=start_idx) 
+            
+            # 검색 결과가 고갈되었을 경우 처음부터 다시 시작
+            if not raw_news:
+                st.session_state.port_starts[p_id] = 1
+                raw_news = get_naver_news(broad_query, display=50, start=1)
+            
+            # 먼저 최근 7일 데이터만 남김
+            raw_news = [n for n in raw_news if is_within_7_days(n['published'])]
             
             business_kws = ["주가", "실적", "목표가", "수주", "배당", "합병", "투자", "인수", "매출", "영업이익", "전망", "동향", "계약", "신제품", "개발", "수출", "공급", "M&A", "규제"]
             port_news_all = [n for n in raw_news if any(b_kw in n['title'] or b_kw in n['summary'] for b_kw in business_kws)]
             
+            is_ai_picked = False
+            # 키워드 검색 결과가 0건일 때 AI에게 주요 뉴스 10건 선별 요청 (Fallback)
             if not port_news_all and raw_news:
-                port_news_all = raw_news
-                
+                try:
+                    client = genai.Client(api_key=GEMINI_API_KEY)
+                    prompt = f"다음 뉴스 목록에서 주식 투자자 관점으로 가장 의미 있는 뉴스 최대 10개의 인덱스를 JSON 배열(예: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) 형태로만 출력하십시오.\n"
+                    for idx, n in enumerate(raw_news[:100]): # 최대 100개까지 분석 범위 확장
+                        prompt += f"[{idx}] {n['title']} : {n['summary']}\n"
+                    
+                    res = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
+                    match = re.search(r'\[.*?\]', res, re.DOTALL)
+                    if match:
+                        indices = json.loads(match.group(0))
+                        port_news_all = [raw_news[i] for i in indices if i < len(raw_news)]
+                        is_ai_picked = True
+                except Exception:
+                    port_news_all = raw_news[:10]
+                    
+            # AI 통신 실패 또는 여전히 기사가 없으면 순수 종목명으로 최종 재호출 (7일 제한 유지)
             if not port_news_all:
-                port_news_all = get_naver_news(p_name, display=30)
+                raw_news_fallback = get_naver_news(p_name, display=50, start=start_idx)
+                port_news_all = [n for n in raw_news_fallback if is_within_7_days(n['published'])][:10]
             
             with col_deep:
                 if st.button("📊 포트폴리오 심층 진단 (TOP 30)", type="primary", key=f"t3_deep_{p_id}"):
                     with st.spinner("실시간 재무 데이터 스크래핑 및 투자 의견 생성 중..."):
-                        # AI 분석에는 24시간 여부와 상관없이 수집된 전체 데이터 전달
+                        # AI 분석에는 7일 이내 수집된 전체 데이터 전달
                         st.session_state.analysis_results[f"deep_{p_id}"] = analyze_deep_dive(
                             p_name, p_ticker, port_news_all, p_is_owned, p_avg_price, p_quantity, current_price
                         )
@@ -665,10 +705,12 @@ with tab3:
                     conn.commit()
                     st.success("저장 완료")
             
-            # 개별 기사 화면 노출 시 24시간 이내 필터링 적용
-            recent_port_news = [n for n in port_news_all if is_within_24_hours(n['published'])]
-            if recent_port_news:
-                for i, news in enumerate(recent_port_news[:3]):
+            if is_ai_picked:
+                st.caption("✨ 직접적인 비즈니스 키워드가 포함된 뉴스가 없어 AI가 선별한 최근 7일 내 주요 뉴스입니다.")
+                
+            # 개별 기사 화면 노출 (최대 10개로 확장)
+            if port_news_all:
+                for i, news in enumerate(port_news_all[:10]):
                     with st.expander(f"📰 {news['title']}"):
                         st.caption(news['published'])
                         st.write(news['summary'])
@@ -677,7 +719,7 @@ with tab3:
                         if news['link'] in st.session_state.analysis_results:
                             st.info(st.session_state.analysis_results[news['link']])
             else:
-                st.info(f"'{p_name}' 관련 24시간 이내 최신 뉴스가 없습니다. (심층 분석에는 과거 뉴스가 정상 반영됩니다.)")
+                st.info(f"'{p_name}' 관련 최근 7일 이내 뉴스가 없습니다. (새 뉴스 보기 버튼을 눌러보십시오.)")
     else: st.info("등록된 관심종목이 없습니다.")
 
 # [탭 4: 스크랩북]
