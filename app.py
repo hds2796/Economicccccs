@@ -23,7 +23,7 @@ from google import genai
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 # --- [페이지 설정] ---
-st.set_page_config(page_title="AI 증시 분석 플랫폼", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Project_2 Economics", page_icon="📊", layout="wide")
 
 # --- [API 키 설정] ---
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
@@ -431,7 +431,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 경제 뉴스 & 시장 심리", "�
 # [탭 1: 경제 뉴스]
 with tab1:
     st.subheader("오늘의 핵심 경제 뉴스")
-    eco_query = "경제|증시|주식|금융"
+    eco_query = "경제|증시|주식|금융|코스피|코스닥"
     
     if not st.session_state.current_eco_news:
         fetch_unique_eco_news(eco_query)
@@ -477,7 +477,7 @@ with tab2:
         "반도체": "반도체|삼성전자|SK하이닉스", 
         "2차전지": "2차전지|전기차|배터리", 
         "바이오": "바이오|제약|신약", 
-        "금융/밸류업": "금융|은행|밸류업", 
+        "금융/밸류업": "금융|은행|밸류업|증권", 
         "IT/플랫폼": "IT|플랫폼|네이버|카카오|인공지능", 
         "방산/조선": "방산|조선|K방산"
     }
