@@ -224,7 +224,6 @@ def get_naver_news(query, display=10, start=1):
 # 중복을 피하며 무한 새로고침을 처리하는 커스텀 로직
 def fetch_unique_macro_news(query):
     unique_news = []
-    # 네이버 API 최대 start 값은 1000이므로 예외 처리 추가
     while len(unique_news) < 10 and st.session_state.macro_start <= 1000:
         batch = get_naver_news(query, display=10, start=st.session_state.macro_start)
         st.session_state.macro_start += 10
@@ -242,7 +241,6 @@ def fetch_unique_sector_news(sector_name, query):
         st.session_state.seen_sectors[sector_name] = set()
         
     unique_news = []
-    # 화면에 노출되는 기사 수를 5개에서 10개로 확장
     while len(unique_news) < 10 and st.session_state.sector_starts[sector_name] <= 1000:
         batch = get_naver_news(query, display=10, start=st.session_state.sector_starts[sector_name])
         st.session_state.sector_starts[sector_name] += 10
@@ -254,7 +252,23 @@ def fetch_unique_sector_news(sector_name, query):
             if len(unique_news) == 10: break
     st.session_state.current_sector_news[sector_name] = unique_news
 
-# --- [제미나이 AI 분석 함수] ---
+# --- [제미나이 AI 분석 함수 및 데이터] ---
+# 사전 정의: 종목명 유의어 및 야후 파이낸스 티커 매핑 (UI 이전에 정의)
+STOCK_INFO = {
+    "삼성전자": {"alias": "삼성전자", "ticker": "005930.KS"},
+    "SK하이닉스": {"alias": "SK하이닉스 OR 하이닉스", "ticker": "000660.KS"},
+    "현대차": {"alias": "현대차 OR 현대자동차", "ticker": "005380.KS"},
+    "기아": {"alias": "기아 OR 기아차 OR 기아자동차", "ticker": "000270.KS"},
+    "카카오": {"alias": "카카오 OR 카카오톡 OR 카카오페이 OR 카카오뱅크", "ticker": "035720.KS"},
+    "네이버": {"alias": "네이버 OR NAVER OR 라인", "ticker": "035420.KS"},
+    "우리금융지주": {"alias": "우리금융지주 OR 우리은행 OR 우리투자증권 OR 우리카드 OR 우리종금", "ticker": "316140.KS"},
+    "KB금융": {"alias": "KB금융 OR 국민은행 OR KB증권 OR KB국민카드", "ticker": "105560.KS"},
+    "신한지주": {"alias": "신한지주 OR 신한은행 OR 신한투자증권 OR 신한카드", "ticker": "055550.KS"},
+    "하나금융지주": {"alias": "하나금융지주 OR 하나은행 OR 하나증권 OR 하나카드", "ticker": "086790.KS"},
+    "LG에너지솔루션": {"alias": "LG에너지솔루션 OR LG엔솔", "ticker": "373220.KS"},
+    "셀트리온": {"alias": "셀트리온 OR 셀트리온제약", "ticker": "068270.KS"}
+}
+
 def analyze_single_news(title, summary):
     if not GEMINI_API_KEY: return "Gemini API 키 오류"
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -266,7 +280,6 @@ def analyze_overall_market(news_list):
     if not GEMINI_API_KEY: return "Gemini API 키 오류", 50
     client = genai.Client(api_key=GEMINI_API_KEY)
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
-    # TOP 50 기사를 분석할 수 있도록 프롬프트 개선
     prompt = f"다음 수집된 {len(news_list)}개의 주요 뉴스를 모두 종합하여 현재 증시 방향성을 브리핑하십시오.\n{combined_news}\n\n[양식]\n1. 🌐 거시 환경 종합 요약\n2. ⚖️ 증시 호악재 분석\n3. 💡 주목할 섹터\n\n반드시 마지막 줄에 'SCORE: 숫자' 형태로 시장 심리 지수를 0~100 사이로 기재하십시오."
     try:
         text = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
@@ -279,12 +292,40 @@ def analyze_sector_news(sector_name, news_list):
     if not GEMINI_API_KEY: return "Gemini API 키 오류"
     client = genai.Client(api_key=GEMINI_API_KEY)
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
-    # 분석 대상 기사 개수를 동적으로 반영하도록 프롬프트 수정
     prompt = f"다음 수집된 '{sector_name}' 섹터 관련 {len(news_list)}개의 최신 주요 뉴스를 모두 종합하여 분석하십시오.\n{combined_news}\n\n[양식]\n1. 🏭 섹터 전반적 흐름 요약\n2. 📈 주요 호재 및 악재 요인\n3. 🎯 투자 심리 및 단기 전망"
     try: return client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
     except Exception as e: return f"분석 오류: {e}"
 
-# 종목명 유의어 및 야후 파이낸스 티커 매핑 사전
+def analyze_deep_dive(stock_name, news_title, news_summary):
+    if not GEMINI_API_KEY: return "Gemini API 키 오류"
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    # 재무 데이터 스크래핑 (yfinance)
+    fin_data = "재무 데이터 조회 불가 (미지원 또는 야후 파이낸스 통신 오류)"
+    if stock_name in STOCK_INFO and STOCK_INFO[stock_name]["ticker"]:
+        try:
+            info = yf.Ticker(STOCK_INFO[stock_name]["ticker"]).info
+            market_cap = info.get('marketCap', 0)
+            market_cap_str = f"{market_cap / 1_000_000_000_000:.1f}조 원" if market_cap else "N/A"
+            
+            fin_data = (f"- 시가총액: {market_cap_str}\n"
+                        f"- PER (주가수익비율): {info.get('trailingPE', 'N/A')}\n"
+                        f"- PBR (주가순자산비율): {info.get('priceToBook', 'N/A')}\n"
+                        f"- 52주 최고/최저: {info.get('fiftyTwoWeekHigh', 'N/A')} / {info.get('fiftyTwoWeekLow', 'N/A')}")
+        except Exception: pass
+        
+    prompt = (f"[{stock_name} 심층 분석 리포트]\n\n"
+              f"[최신 핵심 뉴스]\n- 제목: {news_title}\n- 요약: {news_summary}\n\n"
+              f"[현재 재무 상태]\n{fin_data}\n\n"
+              f"위의 뉴스 데이터와 객관적 재무 상태를 종합하여 다음 양식으로 브리핑을 작성하십시오.\n"
+              f"1. 🏢 기업 펀더멘털 및 재무 요약\n"
+              f"2. 📈 뉴스가 주가에 미치는 단기/중장기 파급력\n"
+              f"3. 🎯 투자 관점 종합 의견 (매수/보유/매도 등 방향성 제시)")
+    try: return client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
+    except Exception as e: return f"분석 오류: {e}"
+
+# =======================================================
+# 4. 상단 대시보드 및 UI 구성
 # =======================================================
 st.title("📊 AI 종합 증시 분석 플랫폼")
 market_data = get_market_data()
@@ -303,7 +344,6 @@ with tab1:
     st.subheader("오늘의 핵심 거시 뉴스")
     macro_query = "증시 시황 OR 글로벌 경제 OR 주식 시장"
     
-    # 앱 구동 시 초기 데이터 로드
     if not st.session_state.current_macro_news:
         fetch_unique_macro_news(macro_query)
         
@@ -317,7 +357,6 @@ with tab1:
     if st.session_state.current_macro_news:
         if st.button("🤖 TOP 50 뉴스 기반 시장 브리핑 생성", type="primary"):
             with st.spinner("최근 50개의 핵심 뉴스를 백그라운드에서 수집 및 정밀 분석 중입니다..."):
-                # AI 분석용 데이터는 화면에 노출하지 않고 백그라운드에서 50개를 일괄 수집
                 top_50_news = get_naver_news(macro_query, display=50, start=1)
                 analysis_text, score = analyze_overall_market(top_50_news)
                 st.session_state.overall_analysis = {"text": analysis_text, "score": score}
@@ -351,7 +390,6 @@ with tab2:
     with col_s1:
         selected_sector = st.selectbox("관심 섹터 선택", list(sectors.keys()))
         
-    # 섹터 선택 변경 시 초기 데이터 로드
     if selected_sector not in st.session_state.current_sector_news:
         fetch_unique_sector_news(selected_sector, sectors[selected_sector])
         
@@ -361,19 +399,20 @@ with tab2:
             fetch_unique_sector_news(selected_sector, sectors[selected_sector])
             if f'sector_summary_{selected_sector}' in st.session_state:
                 del st.session_state[f'sector_summary_{selected_sector}']
-        sector_news = st.session_state.current_sector_news.get(selected_sector, [])
-        
-        if sector_news:
-            if st.button(f"🤖 '{selected_sector}' 섹터 종합 분석 (TOP 20 뉴스 기반)", type="primary"):
-                with st.spinner(f"{selected_sector} 섹터 동향을 분석 중입니다..."):
-                    # 화면에 보이는 10개 기사가 아닌 최신 20개 기사를 백그라운드에서 별도 수집
-                    top_20_news = get_naver_news(sectors[selected_sector], display=20, start=1)
-                    st.session_state[f'sector_summary_{selected_sector}'] = analyze_sector_news(selected_sector, top_20_news)
-                    
-            if f'sector_summary_{selected_sector}' in st.session_state:
-                st.markdown("### 📊 섹터 종합 브리핑")
-                st.info(st.session_state[f'sector_summary_{selected_sector}'])
-                st.markdown("---")
+            st.rerun()
+            
+    sector_news = st.session_state.current_sector_news.get(selected_sector, [])
+    
+    if sector_news:
+        if st.button(f"🤖 '{selected_sector}' 섹터 종합 분석 (TOP 20 뉴스 기반)", type="primary"):
+            with st.spinner(f"{selected_sector} 섹터 동향을 분석 중입니다..."):
+                top_20_news = get_naver_news(sectors[selected_sector], display=20, start=1)
+                st.session_state[f'sector_summary_{selected_sector}'] = analyze_sector_news(selected_sector, top_20_news)
+                
+        if f'sector_summary_{selected_sector}' in st.session_state:
+            st.markdown("### 📊 섹터 종합 브리핑")
+            st.info(st.session_state[f'sector_summary_{selected_sector}'])
+            st.markdown("---")
             
     for i, news in enumerate(sector_news):
         with st.expander(f"📰 {news['title']}"):
@@ -391,7 +430,7 @@ with tab2:
 # [탭 3: 관심종목]
 with tab3:
     st.subheader("⭐️ 내 관심종목 맞춤 뉴스")
-    new_stock = st.text_input("종목명 입력 (예: 카카오, 삼성전자)")
+    new_stock = st.text_input("종목명 입력 (예: 카카오, 삼성전자, 우리금융지주)")
     if st.button("➕ 등록") and new_stock.strip():
         c.execute("INSERT INTO portfolio (stock_name) VALUES (?)", (new_stock.strip(),))
         conn.commit(); st.rerun()
