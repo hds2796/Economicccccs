@@ -42,7 +42,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS oauth_creds (creds TEXT)''')
 conn.commit()
 
 # =======================================================
-# 1. 보안: 로그인 시스템 (비밀번호 확인 및 URL 파스)
+# 1. 보안: 로그인 시스템
 # =======================================================
 def check_password():
     if "pwd" in st.query_params:
@@ -69,7 +69,7 @@ if not check_password():
     st.stop()
 
 # =======================================================
-# 2. 구글 드라이브 OAuth 인증 콜백 처리
+# 2. 구글 드라이브 OAuth 인증
 # =======================================================
 def handle_oauth_callback():
     if 'code' in st.query_params and 'state' in st.query_params:
@@ -133,15 +133,9 @@ def init_drive_service():
 
 def upload_to_google_drive(json_string):
     service = init_drive_service()
-    if not service:
-        raise Exception("먼저 구글 드라이브로 로그인해야 합니다.")
-        
+    if not service: raise Exception("먼저 구글 드라이브로 로그인해야 합니다.")
     file_name = f"market_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    file_metadata = {
-        'name': file_name,
-        'parents': [st.secrets["GOOGLE_FOLDER_ID"]]
-    }
-    
+    file_metadata = {'name': file_name, 'parents': [st.secrets["GOOGLE_FOLDER_ID"]]}
     json_bytes = json_string.encode('utf-8')
     media = MediaIoBaseUpload(io.BytesIO(json_bytes), mimetype='application/json', resumable=True)
     file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
@@ -149,37 +143,31 @@ def upload_to_google_drive(json_string):
 
 def download_latest_from_google_drive():
     service = init_drive_service()
-    if not service:
-        raise Exception("먼저 구글 드라이브로 로그인해야 합니다.")
-        
+    if not service: raise Exception("먼저 구글 드라이브로 로그인해야 합니다.")
     folder_id = st.secrets["GOOGLE_FOLDER_ID"]
     query = f"'{folder_id}' in parents and mimeType = 'application/json' and trashed = false"
-    results = service.files().list(
-        q=query,
-        orderBy="modifiedTime desc",
-        pageSize=1,
-        fields="files(id, name)"
-    ).execute()
-    
+    results = service.files().list(q=query, orderBy="modifiedTime desc", pageSize=1, fields="files(id, name)").execute()
     files = results.get('files', [])
-    if not files:
-        raise Exception("구글 드라이브 폴더에 백업된 JSON 파일이 없습니다.")
-        
-    latest_file = files[0]
-    file_id = latest_file['id']
-    file_name = latest_file['name']
-    
+    if not files: raise Exception("구글 드라이브 폴더에 백업된 JSON 파일이 없습니다.")
+    file_id = files[0]['id']
     content = service.files().get_media(fileId=file_id).execute()
-    return content, file_name
+    return content, files[0]['name']
 
-
-# --- [세션 상태 관리] ---
+# =======================================================
+# 3. 데이터 상태 관리 및 핵심 로직
+# =======================================================
 if 'analysis_results' not in st.session_state: st.session_state.analysis_results = {}
 if 'overall_analysis' not in st.session_state: st.session_state.overall_analysis = None
-if 'macro_start' not in st.session_state: st.session_state.macro_start = 1
-if 'sector_starts' not in st.session_state: st.session_state.sector_starts = {}
 
-# --- [시장 지표 수집 함수] ---
+# 중복 기사 필터링을 위한 메모리 저장소 초기화
+if 'macro_start' not in st.session_state: st.session_state.macro_start = 1
+if 'seen_macro' not in st.session_state: st.session_state.seen_macro = set()
+if 'current_macro_news' not in st.session_state: st.session_state.current_macro_news = []
+
+if 'sector_starts' not in st.session_state: st.session_state.sector_starts = {}
+if 'seen_sectors' not in st.session_state: st.session_state.seen_sectors = {}
+if 'current_sector_news' not in st.session_state: st.session_state.current_sector_news = {}
+
 @st.cache_data(ttl=60)
 def get_market_data():
     results = {}
@@ -192,7 +180,7 @@ def get_market_data():
             diff = float(data['compareToPreviousClosePrice'].replace(',', ''))
             diff_pct = float(data['fluctuationsRatio'].replace(',', ''))
             
-            # API 내부의 상태 코드를 직접 추출 (1:상한, 2:상승, 3:보합, 4:하락, 5:하한)
+            # API 내부 상태 코드 명시적 판별 (4:하락, 5:하한)
             f_code = str(data.get('compareToPreviousPrice', {}).get('code', '3'))
             if f_code in ['4', '5']:
                 diff = -abs(diff)
@@ -200,10 +188,8 @@ def get_market_data():
             else:
                 diff = abs(diff)
                 diff_pct = abs(diff_pct)
-                
             return {"current": current, "diff": diff, "diff_pct": diff_pct}
-        except Exception as e: 
-            return {"current": 0, "diff": 0, "diff_pct": 0.0}
+        except Exception: return {"current": 0, "diff": 0, "diff_pct": 0.0}
 
     results["코스피 (실시간)"] = fetch_naver_realtime("KOSPI")
     results["코스닥 (실시간)"] = fetch_naver_realtime("KOSDAQ")
@@ -219,7 +205,6 @@ def get_market_data():
         except: results[name] = {"current": 0, "diff": 0, "diff_pct": 0.0}
     return results
 
-# --- [네이버 뉴스 API 수집 함수] ---
 def clean_html(raw_html):
     if not raw_html: return ""
     return BeautifulSoup(raw_html, "html.parser").get_text()
@@ -236,6 +221,38 @@ def get_naver_news(query, display=10, start=1):
         return [{"title": clean_html(i['title']), "link": i['link'], "summary": clean_html(i['description']), "published": i['pubDate']} for i in response.json().get("items", [])]
     return []
 
+# 중복을 피하며 무한 새로고침을 처리하는 커스텀 로직
+def fetch_unique_macro_news(query):
+    unique_news = []
+    # 네이버 API 최대 start 값은 1000이므로 예외 처리 추가
+    while len(unique_news) < 10 and st.session_state.macro_start <= 1000:
+        batch = get_naver_news(query, display=10, start=st.session_state.macro_start)
+        st.session_state.macro_start += 10
+        if not batch: break
+        for n in batch:
+            if n['link'] not in st.session_state.seen_macro:
+                unique_news.append(n)
+                st.session_state.seen_macro.add(n['link'])
+            if len(unique_news) == 10: break
+    st.session_state.current_macro_news = unique_news
+
+def fetch_unique_sector_news(sector_name, query):
+    if sector_name not in st.session_state.sector_starts:
+        st.session_state.sector_starts[sector_name] = 1
+        st.session_state.seen_sectors[sector_name] = set()
+        
+    unique_news = []
+    while len(unique_news) < 5 and st.session_state.sector_starts[sector_name] <= 1000:
+        batch = get_naver_news(query, display=10, start=st.session_state.sector_starts[sector_name])
+        st.session_state.sector_starts[sector_name] += 10
+        if not batch: break
+        for n in batch:
+            if n['link'] not in st.session_state.seen_sectors[sector_name]:
+                unique_news.append(n)
+                st.session_state.seen_sectors[sector_name].add(n['link'])
+            if len(unique_news) == 5: break
+    st.session_state.current_sector_news[sector_name] = unique_news
+
 # --- [제미나이 AI 분석 함수] ---
 def analyze_single_news(title, summary):
     if not GEMINI_API_KEY: return "Gemini API 키 오류"
@@ -248,7 +265,8 @@ def analyze_overall_market(news_list):
     if not GEMINI_API_KEY: return "Gemini API 키 오류", 50
     client = genai.Client(api_key=GEMINI_API_KEY)
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
-    prompt = f"다음 뉴스 10개를 종합하여 현재 증시 방향성을 브리핑하십시오.\n{combined_news}\n\n[양식]\n1. 🌐 거시 환경 종합 요약\n2. ⚖️ 증시 호악재 분석\n3. 💡 주목할 섹터\n\n반드시 마지막 줄에 'SCORE: 숫자' 형태로 시장 심리 지수를 0~100 사이로 기재하십시오."
+    # TOP 50 기사를 분석할 수 있도록 프롬프트 개선
+    prompt = f"다음 수집된 {len(news_list)}개의 주요 뉴스를 모두 종합하여 현재 증시 방향성을 브리핑하십시오.\n{combined_news}\n\n[양식]\n1. 🌐 거시 환경 종합 요약\n2. ⚖️ 증시 호악재 분석\n3. 💡 주목할 섹터\n\n반드시 마지막 줄에 'SCORE: 숫자' 형태로 시장 심리 지수를 0~100 사이로 기재하십시오."
     try:
         text = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
         match = re.search(r'SCORE:\s*(\d+)', text)
@@ -261,11 +279,12 @@ def analyze_sector_news(sector_name, news_list):
     client = genai.Client(api_key=GEMINI_API_KEY)
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
     prompt = f"다음은 '{sector_name}' 섹터와 관련된 최신 주요 뉴스입니다.\n{combined_news}\n\n[양식]\n1. 🏭 섹터 전반적 흐름 요약\n2. 📈 주요 호재 및 악재 요인\n3. 🎯 투자 심리 및 단기 전망"
-    try:
-        return client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
+    try: return client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
     except Exception as e: return f"분석 오류: {e}"
 
-# --- [상단 대시보드 출력] ---
+# =======================================================
+# 4. 상단 대시보드 및 UI 구성
+# =======================================================
 st.title("📊 AI 종합 증시 분석 플랫폼")
 market_data = get_market_data()
 cols = st.columns(len(market_data))
@@ -276,27 +295,30 @@ for i, (name, data) in enumerate(market_data.items()):
         else: st.metric(label=name, value="데이터 오류")
 st.divider()
 
-# --- [탭 구성] ---
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 거시 뉴스 & 시장 심리", "📑 섹터별 분석", "⭐️ 내 관심종목", "📁 스크랩북", "⚙️ 데이터 백업/복구"])
 
 # [탭 1: 거시 뉴스]
 with tab1:
-    st.subheader("오늘의 핵심 거시 뉴스 (Top 10)")
+    st.subheader("오늘의 핵심 거시 뉴스")
+    macro_query = "증시 시황 OR 글로벌 경제 OR 주식 시장"
     
+    # 앱 구동 시 초기 데이터 로드
+    if not st.session_state.current_macro_news:
+        fetch_unique_macro_news(macro_query)
+        
     col_m1, col_m2 = st.columns([4, 1])
     with col_m2:
-        if st.button("🔄 새로운 뉴스 보기", key="refresh_macro", use_container_width=True):
-            st.session_state.macro_start += 10
+        if st.button("🔄 완전히 새로운 뉴스 보기", key="refresh_macro", use_container_width=True):
+            fetch_unique_macro_news(macro_query)
             st.session_state.overall_analysis = None
             st.rerun()
 
-    macro_query = "증시 시황 OR 글로벌 경제 OR 주식 시장"
-    top_news = get_naver_news(macro_query, display=10, start=st.session_state.macro_start)
-    
-    if top_news:
-        if st.button("전체 기사 기반 시장 브리핑 생성", type="primary"):
-            with st.spinner("분석 중..."):
-                analysis_text, score = analyze_overall_market(top_news)
+    if st.session_state.current_macro_news:
+        if st.button("🤖 TOP 50 뉴스 기반 시장 브리핑 생성", type="primary"):
+            with st.spinner("최근 50개의 핵심 뉴스를 백그라운드에서 수집 및 정밀 분석 중입니다..."):
+                # AI 분석용 데이터는 화면에 노출하지 않고 백그라운드에서 50개를 일괄 수집
+                top_50_news = get_naver_news(macro_query, display=50, start=1)
+                analysis_text, score = analyze_overall_market(top_50_news)
                 st.session_state.overall_analysis = {"text": analysis_text, "score": score}
                 
         if st.session_state.overall_analysis:
@@ -306,14 +328,14 @@ with tab1:
             st.markdown(st.session_state.overall_analysis['text'])
         
         st.markdown("---")
-        for i, news in enumerate(top_news):
+        for i, news in enumerate(st.session_state.current_macro_news):
             st.markdown(f"**{i+1}. [{news['title']}]({news['link']})**")
             st.caption(f"{news['published']} | {news['summary']}")
-            if st.button("이 기사 심층 분석", key=f"t1_btn_{st.session_state.macro_start}_{i}"):
+            if st.button("이 기사 심층 분석", key=f"t1_btn_{news['link']}"):
                 st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
             if news['link'] in st.session_state.analysis_results:
                 st.info(st.session_state.analysis_results[news['link']])
-                if st.button("💾 이 리포트 스크랩하기", key=f"t1_scrap_{st.session_state.macro_start}_{i}"):
+                if st.button("💾 이 리포트 스크랩하기", key=f"t1_scrap_{news['link']}"):
                     c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
                               (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
                     conn.commit()
@@ -327,23 +349,23 @@ with tab2:
     col_s1, col_s2 = st.columns([4, 1])
     with col_s1:
         selected_sector = st.selectbox("관심 섹터 선택", list(sectors.keys()))
+        
+    # 섹터 선택 변경 시 초기 데이터 로드
+    if selected_sector not in st.session_state.current_sector_news:
+        fetch_unique_sector_news(selected_sector, sectors[selected_sector])
+        
     with col_s2:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🔄 다른 기사 보기", key="refresh_sector", use_container_width=True):
-            if selected_sector not in st.session_state.sector_starts:
-                st.session_state.sector_starts[selected_sector] = 1
-            st.session_state.sector_starts[selected_sector] += 5
+            fetch_unique_sector_news(selected_sector, sectors[selected_sector])
             if f'sector_summary_{selected_sector}' in st.session_state:
                 del st.session_state[f'sector_summary_{selected_sector}']
             st.rerun()
             
-    if selected_sector not in st.session_state.sector_starts:
-        st.session_state.sector_starts[selected_sector] = 1
-        
-    sector_news = get_naver_news(sectors[selected_sector], display=5, start=st.session_state.sector_starts[selected_sector])
+    sector_news = st.session_state.current_sector_news.get(selected_sector, [])
     
     if sector_news:
-        if st.button(f"🤖 '{selected_sector}' 섹터 5대 뉴스 종합 분석", type="primary"):
+        if st.button(f"🤖 '{selected_sector}' 섹터 종합 분석", type="primary"):
             with st.spinner(f"{selected_sector} 섹터 동향을 분석 중입니다..."):
                 st.session_state[f'sector_summary_{selected_sector}'] = analyze_sector_news(selected_sector, sector_news)
                 
@@ -355,11 +377,11 @@ with tab2:
     for i, news in enumerate(sector_news):
         with st.expander(f"📰 {news['title']}"):
             st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
-            if st.button("AI 분석 실행", key=f"t2_btn_{selected_sector}_{st.session_state.sector_starts[selected_sector]}_{i}"):
+            if st.button("AI 분석 실행", key=f"t2_btn_{news['link']}"):
                 st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
             if news['link'] in st.session_state.analysis_results:
                 st.info(st.session_state.analysis_results[news['link']])
-                if st.button("💾 스크랩", key=f"t2_scrap_{selected_sector}_{st.session_state.sector_starts[selected_sector]}_{i}"):
+                if st.button("💾 스크랩", key=f"t2_scrap_{news['link']}"):
                     c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
                               (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
                     conn.commit()
@@ -384,8 +406,6 @@ with tab3:
         st.write(f"🔍 **등록된 종목 관련 핵심 비즈니스 뉴스** (가십성 기사 제외)")
         for p_id, p_name in portfolio:
             st.markdown(f"#### 📌 [{p_name}] 최신 동향")
-            
-            # 주가, 실적 등 비즈니스 코어 뉴스만 검색하도록 쿼리 설정
             query = f"{p_name} 주가 OR {p_name} 실적 OR {p_name} 목표가 OR {p_name} 수주"
             port_news = get_naver_news(query, display=3)
             
@@ -414,10 +434,10 @@ with tab4:
             if st.button("🗑️ 삭제", key=f"del_scrap_{s_id}"):
                 c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,)); conn.commit(); st.rerun()
 
-# [탭 5: 데이터 백업/복구 (구글 드라이브 양방향 연동)]
+# [탭 5: 데이터 백업/복구]
 with tab5:
     st.subheader("⚙️ 데이터 백업 및 복구 관리")
-    st.write("클라우드 서버 재부팅 시 수집된 관심종목 데이터와 스크랩북 내역이 초기화될 수 있으므로, 구글 드라이브 보관소에 연동하여 영구 보관하십시오.")
+    st.write("클라우드 서버 재부팅 시 수집된 데이터가 초기화될 수 있으므로, 구글 드라이브 보관소에 연동하여 영구 보관하십시오.")
     
     c.execute("SELECT COUNT(*) FROM oauth_creds")
     is_authenticated = c.fetchone()[0] > 0
@@ -440,14 +460,10 @@ with tab5:
             if st.button("🔌 연동 해제", use_container_width=True):
                 c.execute("DELETE FROM oauth_creds"); conn.commit(); st.rerun()
                 
-        # 백업용 데이터 추출 (JSON 구조화)
         c.execute("SELECT title, link, summary, analysis, scrap_date FROM scrapbook")
-        scrap_rows = c.fetchall()
-        scrap_list = [{"title": r[0], "link": r[1], "summary": r[2], "analysis": r[3], "scrap_date": r[4]} for r in scrap_rows]
-        
+        scrap_list = [{"title": r[0], "link": r[1], "summary": r[2], "analysis": r[3], "scrap_date": r[4]} for r in c.fetchall()]
         c.execute("SELECT stock_name FROM portfolio")
-        port_rows = c.fetchall()
-        port_list = [r[0] for r in port_rows]
+        port_list = [r[0] for r in c.fetchall()]
         
         backup_dict = {"scrapbook": scrap_list, "portfolio": port_list}
         json_data = json.dumps(backup_dict, ensure_ascii=False, indent=4)
