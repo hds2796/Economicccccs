@@ -235,19 +235,21 @@ def get_stock_current_price(ticker):
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
             code = code_match.group()
-            url = f"https://finance.naver.com/item/main.naver?code={code}"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+            # HTML 스크래핑 제거 -> 안정적인 네이버 실시간 JSON Polling API로 교체
+            url = f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}"
+            headers = {'User-Agent': 'Mozilla/5.0'}
             res = requests.get(url, headers=headers, timeout=5)
-            soup = BeautifulSoup(res.text, 'html.parser')
-            
-            price_tag = soup.select_one('.no_today .blind')
-            if price_tag:
-                return float(price_tag.text.replace(',', ''))
-                
+            if res.status_code == 200:
+                data = res.json()
+                if data.get('datas'):
+                    return float(data['datas'][0]['closePrice'].replace(',', ''))
+                    
+        # 위에서 실패하거나 해외 티커인 경우 야후 파이낸스로 롤백
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             return float(data['Close'].iloc[-1])
-    except: pass
+    except Exception:
+        pass
     return 0.0
 
 def clean_html(raw_html):
@@ -340,10 +342,10 @@ def call_gemini_with_fallback(prompt, is_json=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     models_to_try = [
-        ('gemini-3.5-flash', '\n\n*(💡 3.5 모델로 작성되었습니다.)*'),
+        ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
         ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하/오류로 인해 2.5-flash가 우회 적용되었습니다.)*'),
-        ('gemini-3.1-flash-lite', '\n\n*(💡 3.5 및 2.5 모델 과부하/오류로 인해 3.1 Lite가 우회 적용되었습니다.)*'),
-        
+        ('gemini-3.1-flash-lite', '\n\n*(💡 2.5 모델 과부하/오류로 인해 3.1 Lite가 우회 적용되었습니다.)*'),
+      
     ]
     
     fallback_keywords = ["429", "resource_exhausted", "quota", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
@@ -377,34 +379,83 @@ def get_financial_data(ticker):
     
     try:
         code_match = re.search(r'\d{6}', ticker)
+        
         if code_match:
-            # HTML 스크래핑 기반 재무 데이터 수집 유지
             code = code_match.group()
-            url = f"https://finance.naver.com/item/main.naver?code={code}"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
-            res = requests.get(url, headers=headers, timeout=5)
-            soup = BeautifulSoup(res.text, 'html.parser')
             
-            market_sum = soup.select_one('#_market_sum')
-            per = soup.select_one('#_per')
-            pbr = soup.select_one('#_pbr')
+            # 1순위: 다음(Daum) 금융 JSON API (안정성 높음, Referer 검증 통과용 헤더)
+            try:
+                daum_url = f"https://finance.daum.net/api/quotes/A{code}?summary=false"
+                daum_headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Referer': 'https://finance.daum.net/'
+                }
+                res = requests.get(daum_url, headers=daum_headers, timeout=3)
+                if res.status_code == 200:
+                    data = res.json()
+                    market_cap = data.get('marketCap', 0)
+                    per = data.get('per', 'N/A')
+                    pbr = data.get('pbr', 'N/A')
+                    
+                    m_str = f"{market_cap / 100000000:,.0f}억 원" if market_cap else "N/A"
+                    per_str = f"{per}배" if per is not None and per != 'N/A' else "N/A"
+                    pbr_str = f"{pbr}배" if pbr is not None and pbr != 'N/A' else "N/A"
+                    
+                    return (f"- 시가총액: {m_str}\n"
+                            f"- PER (주가수익비율): {per_str}\n"
+                            f"- PBR (주가순자산비율): {pbr_str}")
+            except:
+                pass
+                
+            # 2순위: 네이버 모바일 JSON API (1순위 실패 시 우회)
+            try:
+                naver_url = f"https://m.stock.naver.com/api/stock/{code}/basic"
+                naver_headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                    'Referer': 'https://m.stock.naver.com/'
+                }
+                res = requests.get(naver_url, headers=naver_headers, timeout=3)
+                if res.status_code == 200:
+                    data = res.json()
+                    market_sum = data.get('marketValue', 'N/A')
+                    per = data.get('per', 'N/A')
+                    pbr = data.get('pbr', 'N/A')
+                    
+                    return (f"- 시가총액: {market_sum}억 원\n"
+                            f"- PER (주가수익비율): {per}배\n"
+                            f"- PBR (주가순자산비율): {pbr}배")
+            except:
+                pass
+
+        # 3순위: 국내 종목 API 모두 실패하거나 해외 티커인 경우 yfinance 사용
+        info = {}
+        if code_match:
+            code = code_match.group()
+            yf_ticker = yf.Ticker(f"{code}.KS")
+            info = yf_ticker.info
             
-            m_str = market_sum.text.strip() + "억원" if market_sum else "N/A"
-            per_str = per.text.strip() + "배" if per else "N/A"
-            pbr_str = pbr.text.strip() + "배" if pbr else "N/A"
+            if not info or info.get('marketCap') is None:
+                yf_ticker = yf.Ticker(f"{code}.KQ")
+                info = yf_ticker.info
+        else:
+            yf_ticker = yf.Ticker(ticker)
+            info = yf_ticker.info
             
-            fin_data = (f"- 시가총액: {m_str}\n"
+        market_cap = info.get('marketCap')
+        per = info.get('trailingPE', 'N/A')
+        pbr = info.get('priceToBook', 'N/A')
+        
+        market_cap_str = f"{market_cap / 1_000_000_000_000:.2f}조 원" if market_cap else "N/A"
+        per_str = f"{per:.2f}배" if isinstance(per, (int, float)) else "N/A"
+        pbr_str = f"{pbr:.2f}배" if isinstance(pbr, (int, float)) else "N/A"
+        
+        if market_cap_str != "N/A" or per_str != "N/A" or pbr_str != "N/A":
+            fin_data = (f"- 시가총액: {market_cap_str}\n"
                         f"- PER (주가수익비율): {per_str}\n"
                         f"- PBR (주가순자산비율): {pbr_str}")
-        else:
-            info = yf.Ticker(ticker).info
-            market_cap = info.get('marketCap', 0)
-            market_cap_str = f"{market_cap / 1_000_000_000_000:.1f}조" if market_cap else "N/A"
-            fin_data = (f"- 시가총액: {market_cap_str}\n"
-                        f"- PER: {info.get('trailingPE', 'N/A')}\n"
-                        f"- PBR: {info.get('priceToBook', 'N/A')}")
     except Exception:
         pass
+        
     return fin_data
 
 def analyze_single_news(title, summary, market_data_str):
