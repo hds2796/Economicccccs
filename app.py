@@ -17,6 +17,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from bs4 import BeautifulSoup
+from google import genai
 
 # 구글 드라이브 파일 접근 권한 범위
 SCOPES = ['https://www.googleapis.com/auth/drive']
@@ -261,7 +262,8 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 거시 뉴스 & 시장 심리", "�
 # [탭 1: 거시 뉴스]
 with tab1:
     st.subheader("오늘의 핵심 거시 뉴스 (Top 10)")
-    macro_query = "(정치 OR 사회 OR 국제 OR 정책) AND (증시 OR 주식 OR 주가 OR 경제 OR 환율)"
+    # NCP 검색 API가 정상적으로 인식할 수 있도록 검색 쿼리 단순화
+    macro_query = "증시 시황 OR 글로벌 경제 OR 주식 시장"
     top_news = get_naver_news(macro_query, display=10)
     
     if top_news:
