@@ -172,6 +172,7 @@ def download_latest_from_google_drive():
 # =======================================================
 if 'analysis_results' not in st.session_state: st.session_state.analysis_results = {}
 if 'overall_analysis' not in st.session_state: st.session_state.overall_analysis = None
+if 'today_recommendation' not in st.session_state: st.session_state.today_recommendation = None
 
 if 'eco_start' not in st.session_state: st.session_state.eco_start = 1
 if 'seen_eco' not in st.session_state: st.session_state.seen_eco = set()
@@ -256,7 +257,6 @@ def get_naver_news(query, display=10, start=1):
         return [{"title": clean_html(i['title']), "link": i['link'], "summary": clean_html(i['description']), "published": i['pubDate']} for i in response.json().get("items", [])]
     return []
 
-# 화면 노출용 7일(일주일) 필터링 검증 함수
 def is_within_7_days(pub_date_str):
     try:
         dt = parsedate_to_datetime(pub_date_str)
@@ -325,7 +325,29 @@ def fetch_unique_sector_news(sector_name, query):
             
     st.session_state.current_sector_news[sector_name] = unique_news
 
-# --- [제미나이 AI 분석 함수 및 재무 스크래핑 로직] ---
+# --- [제미나이 AI 분석 함수 및 예외 처리(Fallback) 로직] ---
+def call_gemini_with_fallback(prompt, is_json=False):
+    if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    try:
+        return client.models.generate_content(model='gemini-3.5-flash', contents=prompt).text
+    except Exception as e1:
+        if "429" in str(e1) or "RESOURCE_EXHAUSTED" in str(e1) or "quota" in str(e1).lower() or "not found" in str(e1).lower() or "404" in str(e1):
+            try:
+                res = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
+                if not is_json: res += "\n\n*(💡 3.5 모델 오류/한도로 인해 2.5-flash가 우회 적용되었습니다.)*"
+                return res
+            except Exception as e2:
+                if "429" in str(e2) or "RESOURCE_EXHAUSTED" in str(e2) or "quota" in str(e2).lower() or "not found" in str(e2).lower() or "404" in str(e2):
+                    try:
+                        res = client.models.generate_content(model='gemini-1.5-flash', contents=prompt).text
+                        if not is_json: res += "\n\n*(💡 3.5 및 2.5 모델 한도 초과로 1.5-flash가 최종 우회 적용되었습니다.)*"
+                        return res
+                    except Exception as e3:
+                        raise Exception(f"최종 우회 모델(1.5) 호출 실패: {e3}")
+                raise e2
+        raise e1
 
 def get_financial_data(ticker):
     fin_data = "재무 데이터 조회 불가 (통신 오류 또는 티커 누락)"
@@ -358,41 +380,49 @@ def get_financial_data(ticker):
             fin_data = (f"- 시가총액: {market_cap_str}\n"
                         f"- PER: {info.get('trailingPE', 'N/A')}\n"
                         f"- PBR: {info.get('priceToBook', 'N/A')}")
-    except Exception as e:
+    except Exception:
         pass
     return fin_data
 
 def analyze_single_news(title, summary):
-    if not GEMINI_API_KEY: return "Gemini API 키 오류"
-    client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = f"아래 뉴스가 주식 시장에 미칠 영향을 분석하십시오.\n[제목]: {title}\n[요약]: {summary}\n1. 💡 사건 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"
-    try: return client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
+    try: return call_gemini_with_fallback(prompt)
     except Exception as e: return f"분석 오류: {e}"
 
 def analyze_overall_market(news_list):
-    if not GEMINI_API_KEY: return "Gemini API 키 오류", 50
-    client = genai.Client(api_key=GEMINI_API_KEY)
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
     prompt = f"다음 수집된 {len(news_list)}개의 주요 뉴스를 모두 종합하여 현재 증시 방향성을 브리핑하십시오.\n{combined_news}\n\n[양식]\n1. 🌐 거시 환경 종합 요약\n2. ⚖️ 증시 호악재 분석\n3. 💡 주목할 섹터\n\n반드시 마지막 줄에 'SCORE: 숫자' 형태로 시장 심리 지수를 0~100 사이로 기재하십시오."
     try:
-        text = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
+        text = call_gemini_with_fallback(prompt)
         match = re.search(r'SCORE:\s*(\d+)', text)
         score = int(match.group(1)) if match else 50
         return re.sub(r'SCORE:\s*\d+', '', text).strip(), score
     except Exception as e: return f"분석 오류: {e}", 50
 
 def analyze_sector_news(sector_name, news_list):
-    if not GEMINI_API_KEY: return "Gemini API 키 오류"
-    client = genai.Client(api_key=GEMINI_API_KEY)
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
     prompt = f"다음 수집된 '{sector_name}' 섹터 관련 {len(news_list)}개의 최신 주요 뉴스를 모두 종합하여 분석하십시오.\n{combined_news}\n\n[양식]\n1. 🏭 섹터 전반적 흐름 요약\n2. 📈 주요 호재 및 악재 요인\n3. 🎯 투자 심리 및 단기 전망"
-    try: return client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
+    try: return call_gemini_with_fallback(prompt)
+    except Exception as e: return f"분석 오류: {e}"
+
+def analyze_recommended_stocks(news_list):
+    combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list[:30]])
+    prompt = (f"다음은 최근 실적 개선, 목표가 상향, 대규모 수주 등과 관련된 시장 핵심 뉴스 30건입니다.\n{combined_news}\n\n"
+              f"위 뉴스를 바탕으로 단기적으로 가장 유망해 보이는 '추천종목 3개'를 선정하십시오.\n\n"
+              f"[양식]\n"
+              f"1. 🥇 추천종목 1: [종목명]\n"
+              f"- 선정 근거: (뉴스를 바탕으로 객관적 작성)\n"
+              f"- 투자 전략: (진입 시점 및 단기 목표가 등)\n\n"
+              f"2. 🥈 추천종목 2: [종목명]\n"
+              f"- 선정 근거: ...\n"
+              f"- 투자 전략: ...\n\n"
+              f"3. 🥉 추천종목 3: [종목명]\n"
+              f"- 선정 근거: ...\n"
+              f"- 투자 전략: ...")
+    try: return call_gemini_with_fallback(prompt)
     except Exception as e: return f"분석 오류: {e}"
 
 def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price):
-    if not GEMINI_API_KEY: return "Gemini API 키 오류"
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    
     fin_data = get_financial_data(ticker)
         
     user_portfolio_status = "미보유 관심종목 (관망 중)"
@@ -413,8 +443,9 @@ def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quanti
               f"1. 🏢 기업 펀더멘털 및 재무 요약\n"
               f"2. 🌐 최신 뉴스 파급력 종합 분석\n"
               f"3. 📊 사용자 맞춤형 포트폴리오 진단 (사용자의 매수 단가, 수량, 현재 수익률을 구체적으로 언급하며 진단할 것)\n"
-              f"4. 🎯 최종 투자의견 (매수/보유/매도 중 택 1) 및 객관적 근거 제시")
-    try: return client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
+              f"4. 🎯 최종 투자의견 (매수/보유/매도 중 택 1) 및 객관적 근거 제시\n"
+              f"5. 💰 적정 목표가 및 손절가 (객관적 산출 근거를 포함하여 구체적인 가격 제시)")
+    try: return call_gemini_with_fallback(prompt)
     except Exception as e: return f"분석 오류: {e}"
 
 # =======================================================
@@ -430,12 +461,11 @@ for i, (name, data) in enumerate(market_data.items()):
         else: st.metric(label=name, value="데이터 오류")
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 경제 뉴스 & 시장 심리", "📑 섹터별 분석", "⭐️ 내 관심종목", "📁 스크랩북", "⚙️ 데이터 백업/복구"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔥 경제 뉴스 & 시장 심리", "📑 섹터별 분석", "🎯 오늘의 추천종목", "⭐️ 내 관심종목", "📁 스크랩북", "⚙️ 데이터 백업/복구"])
 
 # [탭 1: 경제 뉴스]
 with tab1:
     st.subheader("오늘의 핵심 경제 뉴스")
-    # 검색어에 코스피, 코스닥 추가 반영
     eco_query = "경제|증시|주식|금융|코스피|코스닥"
     
     if not st.session_state.current_eco_news:
@@ -458,7 +488,6 @@ with tab1:
         if st.session_state.overall_analysis:
             score = st.session_state.overall_analysis['score']
             
-            # 산출된 점수에 따른 텍스트 라벨링 조건식
             if score >= 80: sentiment_label = "매우 강세 🔥"
             elif score >= 60: sentiment_label = "강세 📈"
             elif score >= 40: sentiment_label = "중립 ⚖️"
@@ -471,7 +500,6 @@ with tab1:
         
         st.markdown("---")
         
-        # UI 출력 시 최근 7일 이내의 뉴스만 필터링 (분석에는 위 50개 원본 데이터 사용)
         recent_eco_news = [n for n in st.session_state.current_eco_news if is_within_7_days(n['published'])]
         if recent_eco_news:
             for i, news in enumerate(recent_eco_news):
@@ -529,7 +557,6 @@ with tab2:
             st.info(st.session_state[f'sector_summary_{selected_sector}'])
             st.markdown("---")
             
-        # UI 출력 시 최근 7일 이내 뉴스만 필터링
         recent_sector_news = [n for n in sector_news if is_within_7_days(n['published'])]
         if recent_sector_news:
             for i, news in enumerate(recent_sector_news):
@@ -547,8 +574,32 @@ with tab2:
         else:
             st.info("최근 7일 이내에 보도된 관련 섹터 뉴스가 없습니다.")
 
-# [탭 3: 관심종목 및 포트폴리오 관리]
+# [탭 3: 오늘의 추천종목]
 with tab3:
+    st.subheader("🎯 AI 오늘의 추천종목 발굴")
+    st.write("실적 개선, 목표가 상향, 대규모 수주 등의 핵심 키워드를 바탕으로 시장 최신 뉴스를 분석하여 가장 유망한 종목 3가지를 추천합니다.")
+    
+    if st.button("🚀 오늘의 추천종목 발굴 실행", type="primary", use_container_width=True):
+        with st.spinner("유망 종목 관련 최신 뉴스를 수집 및 분석 중입니다..."):
+            rec_query = "목표가 상향|어닝 서프라이즈|대규모 수주|흑자 전환|특징주"
+            rec_news = get_naver_news(rec_query, display=50, start=1)
+            recent_rec_news = [n for n in rec_news if is_within_7_days(n['published'])]
+            
+            if recent_rec_news:
+                st.session_state.today_recommendation = analyze_recommended_stocks(recent_rec_news)
+            else:
+                st.warning("분석할 만한 최신 유망 뉴스가 부족합니다.")
+    
+    if st.session_state.get('today_recommendation'):
+        st.info(st.session_state.today_recommendation)
+        if st.button("💾 추천종목 리포트 스크랩", key="scrap_rec"):
+            c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
+                      ("🎯 오늘의 AI 추천종목", "", "실적/수주/목표가 상향 기반 추천", st.session_state.today_recommendation, datetime.now().strftime("%Y-%m-%d %H:%M")))
+            conn.commit()
+            st.success("저장 완료")
+
+# [탭 4: 관심종목 및 포트폴리오 관리]
+with tab4:
     st.subheader("⭐️ 내 관심종목 및 포트폴리오 맞춤 뉴스")
     
     with st.form("add_stock_form"):
@@ -569,7 +620,6 @@ with tab3:
         
         if submitted and new_stock.strip():
             with st.spinner(f"AI가 '{new_stock.strip()}'의 종목 코드와 연관 검색어를 분석 중입니다..."):
-                client = genai.Client(api_key=GEMINI_API_KEY)
                 prompt = f"""사용자가 한국 주식 '{new_stock.strip()}'을 관심종목에 추가했습니다.
                 1. 야후 파이낸스 티커: 코스피는 '6자리숫자.KS', 코스닥은 '6자리숫자.KQ'. (모르면 빈 문자열 "")
                 2. 검색어: 뉴스 검색 시 유용한 핵심 계열사, 지주사, 자회사, 대표 브랜드, 영문명 등 종목과 관련된 폭넓은 유의어 포함 (예: {new_stock.strip()} OR 영문명 OR 지주사명 OR 주요자회사)
@@ -579,13 +629,14 @@ with tab3:
                 ticker = ""
                 search_query = new_stock.strip()
                 try:
-                    res = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
+                    res = call_gemini_with_fallback(prompt, is_json=True)
                     match = re.search(r'\{.*\}', res, re.DOTALL)
                     if match:
                         data = json.loads(match.group(0))
                         ticker = data.get("ticker", "")
                         search_query = data.get("search_query", new_stock.strip())
-                except: pass
+                except Exception as e:
+                    pass
                 
                 is_owned_int = 1 if is_owned_ui == "실제 보유중" else 0
                 c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?, ?, ?, ?, ?, ?)", 
@@ -619,27 +670,24 @@ with tab3:
             broad_query = "|".join(search_keywords)
             raw_news = get_naver_news(broad_query, display=50, start=start_idx) 
             
-            # 검색 결과가 고갈되었을 경우 처음부터 다시 시작
             if not raw_news:
                 st.session_state.port_starts[p_id] = 1
                 raw_news = get_naver_news(broad_query, display=50, start=1)
             
-            # 먼저 최근 7일 데이터만 남김
             raw_news = [n for n in raw_news if is_within_7_days(n['published'])]
             
             business_kws = ["주가", "실적", "목표가", "수주", "배당", "합병", "투자", "인수", "매출", "영업이익", "전망", "동향", "계약", "신제품", "개발", "수출", "공급", "M&A", "규제"]
             port_news_all = [n for n in raw_news if any(b_kw in n['title'] or b_kw in n['summary'] for b_kw in business_kws)]
             
             is_ai_picked = False
-            # 키워드 검색 결과가 0건일 때 AI에게 주요 뉴스 10건 선별 요청 (Fallback)
+            
             if not port_news_all and raw_news:
                 try:
-                    client = genai.Client(api_key=GEMINI_API_KEY)
                     prompt = f"다음 뉴스 목록에서 주식 투자자 관점으로 가장 의미 있는 뉴스 최대 10개의 인덱스를 JSON 배열(예: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) 형태로만 출력하십시오.\n"
-                    for idx, n in enumerate(raw_news[:100]): # 최대 100개까지 분석 범위 확장
+                    for idx, n in enumerate(raw_news[:50]): 
                         prompt += f"[{idx}] {n['title']} : {n['summary']}\n"
                     
-                    res = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
+                    res = call_gemini_with_fallback(prompt, is_json=True)
                     match = re.search(r'\[.*?\]', res, re.DOTALL)
                     if match:
                         indices = json.loads(match.group(0))
@@ -648,7 +696,6 @@ with tab3:
                 except Exception:
                     port_news_all = raw_news[:10]
                     
-            # AI 통신 실패 또는 여전히 기사가 없으면 순수 종목명으로 최종 재호출 (7일 제한 유지)
             if not port_news_all:
                 raw_news_fallback = get_naver_news(p_name, display=50, start=start_idx)
                 port_news_all = [n for n in raw_news_fallback if is_within_7_days(n['published'])][:10]
@@ -656,7 +703,6 @@ with tab3:
             with col_deep:
                 if st.button("📊 포트폴리오 심층 진단 (TOP 30)", type="primary", key=f"t3_deep_{p_id}"):
                     with st.spinner("실시간 재무 데이터 스크래핑 및 투자 의견 생성 중..."):
-                        # AI 분석에는 7일 이내 수집된 전체 데이터 전달
                         st.session_state.analysis_results[f"deep_{p_id}"] = analyze_deep_dive(
                             p_name, p_ticker, port_news_all, p_is_owned, p_avg_price, p_quantity, current_price
                         )
@@ -708,7 +754,6 @@ with tab3:
             if is_ai_picked:
                 st.caption("✨ 직접적인 비즈니스 키워드가 포함된 뉴스가 없어 AI가 선별한 최근 7일 내 주요 뉴스입니다.")
                 
-            # 개별 기사 화면 노출 (최대 10개로 확장)
             if port_news_all:
                 for i, news in enumerate(port_news_all[:10]):
                     with st.expander(f"📰 {news['title']}"):
@@ -722,8 +767,8 @@ with tab3:
                 st.info(f"'{p_name}' 관련 최근 7일 이내 뉴스가 없습니다. (새 뉴스 보기 버튼을 눌러보십시오.)")
     else: st.info("등록된 관심종목이 없습니다.")
 
-# [탭 4: 스크랩북]
-with tab4:
+# [탭 5: 스크랩북]
+with tab5:
     st.subheader("📁 내 스크랩북 (저장된 리포트)")
     c.execute("SELECT id, title, link, summary, analysis, scrap_date FROM scrapbook ORDER BY id DESC")
     scraps = c.fetchall()
@@ -734,8 +779,8 @@ with tab4:
             if st.button("🗑️ 삭제", key=f"del_scrap_{s_id}"):
                 c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,)); conn.commit(); st.rerun()
 
-# [탭 5: 데이터 백업/복구]
-with tab5:
+# [탭 6: 데이터 백업/복구]
+with tab6:
     st.subheader("⚙️ 데이터 백업 및 복구 관리")
     st.write("클라우드 서버 재부팅 시 수집된 데이터가 초기화될 수 있으므로, 구글 드라이브 보관소에 연동하여 영구 보관하십시오.")
     
