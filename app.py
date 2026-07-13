@@ -293,14 +293,36 @@ def fetch_unique_realtime_news(query):
                 st.session_state.seen_realtime.add(n['link'])
             if len(unique_news) == 20: break
             
-    if not unique_news:
+    # 뉴스가 3개 이하일 경우 구체적인 경제/시사 관련 용어로 검색어 확장
+    if len(unique_news) <= 3:
         st.session_state.realtime_start = 1
         st.session_state.seen_realtime = set()
-        batch = get_naver_news(query, display=20, start=1, sort_type="date")
-        st.session_state.realtime_start = 21
-        for n in (batch or []):
-            unique_news.append(n)
-            st.session_state.seen_realtime.add(n['link'])
+        try:
+            prompt = f"'{query}' 검색어로 최신 뉴스가 3개 이하로 부족합니다. '경제'나 '시사' 같은 카테고리 명칭 대신, 현재 뉴스에 자주 등장하는 구체적인 '경제 관련 핵심 용어'와 '시사 관련 핵심 용어' 5개를 '|' 기호로 연결하여 출력하십시오. (예: 금리|환율|물가|부동산|선거)"
+            expanded_query_raw = call_gemini_with_fallback(prompt, is_json=True)
+            expanded_query = re.sub(r'[^가-힣a-zA-Z0-9|]', '', expanded_query_raw).strip()
+            
+            # AI가 빈 값을 반환할 경우 최후의 수단(하드코딩) 적용
+            if not expanded_query or len(expanded_query) < 2:
+                expanded_query = "금리|환율|물가|수출|부동산"
+            
+            batch = get_naver_news(expanded_query, display=20, start=1, sort_type="date")
+            st.session_state.realtime_start = 21
+            for n in (batch or []):
+                if n['link'] not in st.session_state.seen_realtime:
+                    unique_news.append(n)
+                    st.session_state.seen_realtime.add(n['link'])
+                if len(unique_news) >= 10: break
+        except Exception:
+            # AI 호출 자체가 실패하더라도 뉴스가 비지 않도록 안전망 작동
+            fallback_query = "금리|환율|물가|수출|부동산"
+            batch = get_naver_news(fallback_query, display=20, start=1, sort_type="date")
+            st.session_state.realtime_start = 21
+            for n in (batch or []):
+                if n['link'] not in st.session_state.seen_realtime:
+                    unique_news.append(n)
+                    st.session_state.seen_realtime.add(n['link'])
+                if len(unique_news) >= 10: break
             
     st.session_state.current_realtime_news = unique_news
 
@@ -370,7 +392,7 @@ def call_gemini_with_fallback(prompt, is_json=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     models_to_try = [
-        ('gemini-3.5-flash', ''),
+        ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
         ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하/오류로 인해 2.5-flash가 우회 적용되었습니다.)*'),
         ('gemini-3.1-flash-lite', '\n\n*(💡 2.5 모델 과부하/오류로 인해 3.1 Flash Lite가 우회 적용되었습니다.)*')
     ]
@@ -605,7 +627,7 @@ with tab1:
     st.subheader("📰 실시간 경제·시사 뉴스 분석")
     st.write("네이버 뉴스에 방금 송고된 최신 경제, 시사, 정치 기사를 실시간(최신순)으로 수집하고 트렌드를 분석합니다.")
     
-    realtime_query = "경제|시사|증시|금융|정책|코스피|코스닥"
+    realtime_query = "증시|금융|정책|코스피|코스닥|환율|물가|부동산|인플레이션|유가|코인|실업|규제|법안|세금|협상"
     
     if not st.session_state.current_realtime_news:
         fetch_unique_realtime_news(realtime_query)
@@ -659,7 +681,7 @@ with tab1:
 with tab2:
     st.subheader("오늘의 핵심 경제 뉴스")
     st.write("주식 시장과 연관성이 높은 핵심 경제 기사를 정확도순으로 수집합니다.")
-    eco_query = "경제|증시|주식|금융|코스피|코스닥"
+    eco_query = "경제|증시|주식|금융|코스피|코스닥|금리|환율|인플레이션|수출|실적|정책|규제|법안|세금|예산|협상"
     
     if not st.session_state.current_eco_news:
         fetch_unique_eco_news(eco_query)
@@ -722,7 +744,7 @@ with tab3:
         "반도체": "반도체|삼성전자|SK하이닉스", 
         "2차전지": "2차전지|전기차|배터리", 
         "바이오": "바이오|제약|신약", 
-        "금융/밸류업": "금융|은행|밸류업|증권", 
+        "금융/밸류업": "금융|은행|밸류업|증권|금리", 
         "IT/플랫폼": "IT|플랫폼|네이버|카카오|인공지능", 
         "방산/조선": "방산|조선|K방산"
     }
