@@ -220,7 +220,20 @@ def get_market_data():
 def get_stock_current_price(ticker):
     if not ticker: return 0.0
     try:
-        # yfinance history는 비교적 매우 안정적이므로 주가 호출에 사용
+        # 한국 주식(6자리 코드)인 경우 네이버 금융에서 실시간 현재가를 직접 크롤링 (yfinance 오류 우회)
+        code_match = re.search(r'\d{6}', ticker)
+        if code_match:
+            code = code_match.group()
+            url = f"https://finance.naver.com/item/main.naver?code={code}"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            res = requests.get(url, headers=headers, timeout=3)
+            soup = BeautifulSoup(res.text, 'html.parser')
+            
+            price_tag = soup.select_one('.no_today .blind')
+            if price_tag:
+                return float(price_tag.text.replace(',', ''))
+                
+        # 미국 주식 등 6자리 코드가 없는 경우 기존 yfinance 사용
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             return float(data['Close'].iloc[-1])
