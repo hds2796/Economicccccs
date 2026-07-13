@@ -42,15 +42,16 @@ c.execute('''CREATE TABLE IF NOT EXISTS oauth_creds (creds TEXT)''')
 conn.commit()
 
 # 기존 포트폴리오 테이블에 신규 컬럼 강제 추가 (스키마 업데이트)
-try:
-    c.execute("ALTER TABLE portfolio ADD COLUMN search_query TEXT")
-except sqlite3.OperationalError:
-    pass
-
-try:
-    c.execute("ALTER TABLE portfolio ADD COLUMN ticker TEXT")
-except sqlite3.OperationalError:
-    pass
+try: c.execute("ALTER TABLE portfolio ADD COLUMN search_query TEXT")
+except sqlite3.OperationalError: pass
+try: c.execute("ALTER TABLE portfolio ADD COLUMN ticker TEXT")
+except sqlite3.OperationalError: pass
+try: c.execute("ALTER TABLE portfolio ADD COLUMN is_owned INTEGER DEFAULT 0")
+except sqlite3.OperationalError: pass
+try: c.execute("ALTER TABLE portfolio ADD COLUMN avg_price REAL DEFAULT 0.0")
+except sqlite3.OperationalError: pass
+try: c.execute("ALTER TABLE portfolio ADD COLUMN quantity INTEGER DEFAULT 0")
+except sqlite3.OperationalError: pass
 conn.commit()
 
 # =======================================================
@@ -171,7 +172,7 @@ def download_latest_from_google_drive():
 if 'analysis_results' not in st.session_state: st.session_state.analysis_results = {}
 if 'overall_analysis' not in st.session_state: st.session_state.overall_analysis = None
 
-# 중복 기사 필터링을 위한 메모리 저장소 초기화 (거시 -> 경제 변수명 변경)
+# 중복 기사 필터링을 위한 메모리 저장소 초기화 
 if 'eco_start' not in st.session_state: st.session_state.eco_start = 1
 if 'seen_eco' not in st.session_state: st.session_state.seen_eco = set()
 if 'current_eco_news' not in st.session_state: st.session_state.current_eco_news = []
@@ -192,7 +193,6 @@ def get_market_data():
             diff = float(data['compareToPreviousClosePrice'].replace(',', ''))
             diff_pct = float(data['fluctuationsRatio'].replace(',', ''))
             
-            # API 내부 상태 코드 명시적 판별 (4:하락, 5:하한)
             f_code = str(data.get('compareToPreviousPrice', {}).get('code', '3'))
             if f_code in ['4', '5']:
                 diff = -abs(diff)
@@ -217,11 +217,20 @@ def get_market_data():
         except: results[name] = {"current": 0, "diff": 0, "diff_pct": 0.0}
     return results
 
+@st.cache_data(ttl=300)
+def get_stock_current_price(ticker):
+    if not ticker: return 0.0
+    try:
+        data = yf.Ticker(ticker).history(period="1d")
+        if not data.empty:
+            return float(data['Close'].iloc[-1])
+    except: pass
+    return 0.0
+
 def clean_html(raw_html):
     if not raw_html: return ""
     return BeautifulSoup(raw_html, "html.parser").get_text()
 
-# API 캐시 유지 시간을 30분에서 5분으로 단축하여 새로고침 효율 최적화
 @st.cache_data(ttl=300)
 def get_naver_news(query, display=10, start=1):
     if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET: return []
@@ -234,11 +243,9 @@ def get_naver_news(query, display=10, start=1):
         return [{"title": clean_html(i['title']), "link": i['link'], "summary": clean_html(i['description']), "published": i['pubDate']} for i in response.json().get("items", [])]
     return []
 
-# 중복을 피하며 무한 새로고침을 처리하는 커스텀 로직 (경제 뉴스용)
 def fetch_unique_eco_news(query):
     unique_news = []
     attempts = 0
-    # 최대 3회까지만 API를 호출하여 루프 방지
     while len(unique_news) < 10 and st.session_state.eco_start <= 900 and attempts < 3:
         batch = get_naver_news(query, display=10, start=st.session_state.eco_start)
         st.session_state.eco_start += 10
@@ -250,7 +257,6 @@ def fetch_unique_eco_news(query):
                 st.session_state.seen_eco.add(n['link'])
             if len(unique_news) == 10: break
             
-    # API 한계 도달 시 메모리 초기화 후 1페이지부터 재시작
     if not unique_news:
         st.session_state.eco_start = 1
         st.session_state.seen_eco = set()
@@ -268,48 +274,36 @@ def fetch_unique_sector_news(sector_name, query):
         st.session_state.sector_starts[sector_name] = 1
         st.session_state.seen_sectors[sector_name] = set()
         
+    business_kws = ["주가", "실적", "목표가", "수주", "배당", "합병", "투자", "인수", "매출", "영업이익", "전망", "동향", "계약", "신제품", "개발", "수출", "공급", "M&A", "규제"]
+    
     unique_news = []
     attempts = 0
     while len(unique_news) < 10 and st.session_state.sector_starts[sector_name] <= 900 and attempts < 3:
-        batch = get_naver_news(query, display=10, start=st.session_state.sector_starts[sector_name])
-        st.session_state.sector_starts[sector_name] += 10
+        batch = get_naver_news(query, display=30, start=st.session_state.sector_starts[sector_name])
+        st.session_state.sector_starts[sector_name] += 30
         attempts += 1
         if not batch: break
         for n in batch:
             if n['link'] not in st.session_state.seen_sectors[sector_name]:
-                unique_news.append(n)
-                st.session_state.seen_sectors[sector_name].add(n['link'])
+                if any(b_kw in n['title'] or b_kw in n['summary'] for b_kw in business_kws):
+                    unique_news.append(n)
+                    st.session_state.seen_sectors[sector_name].add(n['link'])
             if len(unique_news) == 10: break
             
     if not unique_news:
         st.session_state.sector_starts[sector_name] = 1
         st.session_state.seen_sectors[sector_name] = set()
-        batch = get_naver_news(query, display=10, start=1)
-        st.session_state.sector_starts[sector_name] = 11
+        batch = get_naver_news(query, display=30, start=1)
+        st.session_state.sector_starts[sector_name] = 31
         for n in (batch or []):
-            unique_news.append(n)
-            st.session_state.seen_sectors[sector_name].add(n['link'])
+            if any(b_kw in n['title'] or b_kw in n['summary'] for b_kw in business_kws):
+                unique_news.append(n)
+                st.session_state.seen_sectors[sector_name].add(n['link'])
             if len(unique_news) == 10: break
             
     st.session_state.current_sector_news[sector_name] = unique_news
 
-# --- [제미나이 AI 분석 함수 및 데이터] ---
-# 사전 정의: 종목명 유의어 및 야후 파이낸스 티커 매핑 (UI 이전에 정의)
-STOCK_INFO = {
-    "삼성전자": {"alias": "삼성전자", "ticker": "005930.KS"},
-    "SK하이닉스": {"alias": "SK하이닉스 OR 하이닉스", "ticker": "000660.KS"},
-    "현대차": {"alias": "현대차 OR 현대자동차", "ticker": "005380.KS"},
-    "기아": {"alias": "기아 OR 기아차 OR 기아자동차", "ticker": "000270.KS"},
-    "카카오": {"alias": "카카오 OR 카카오톡 OR 카카오페이 OR 카카오뱅크", "ticker": "035720.KS"},
-    "네이버": {"alias": "네이버 OR NAVER OR 라인", "ticker": "035420.KS"},
-    "우리금융지주": {"alias": "우리금융지주 OR 우리은행 OR 우리투자증권 OR 우리카드 OR 우리종금", "ticker": "316140.KS"},
-    "KB금융": {"alias": "KB금융 OR 국민은행 OR KB증권 OR KB국민카드", "ticker": "105560.KS"},
-    "신한지주": {"alias": "신한지주 OR 신한은행 OR 신한투자증권 OR 신한카드", "ticker": "055550.KS"},
-    "하나금융지주": {"alias": "하나금융지주 OR 하나은행 OR 하나증권 OR 하나카드", "ticker": "086790.KS"},
-    "LG에너지솔루션": {"alias": "LG에너지솔루션 OR LG엔솔", "ticker": "373220.KS"},
-    "셀트리온": {"alias": "셀트리온 OR 셀트리온제약", "ticker": "068270.KS"}
-}
-
+# --- [제미나이 AI 분석 함수] ---
 def analyze_single_news(title, summary):
     if not GEMINI_API_KEY: return "Gemini API 키 오류"
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -337,15 +331,14 @@ def analyze_sector_news(sector_name, news_list):
     try: return client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
     except Exception as e: return f"분석 오류: {e}"
 
-def analyze_deep_dive(stock_name, news_title, news_summary):
+def analyze_deep_dive(stock_name, ticker, news_title, news_summary, is_owned, avg_price, quantity, current_price):
     if not GEMINI_API_KEY: return "Gemini API 키 오류"
     client = genai.Client(api_key=GEMINI_API_KEY)
     
-    # 재무 데이터 스크래핑 (yfinance)
     fin_data = "재무 데이터 조회 불가 (미지원 또는 야후 파이낸스 통신 오류)"
-    if stock_name in STOCK_INFO and STOCK_INFO[stock_name]["ticker"]:
+    if ticker:
         try:
-            info = yf.Ticker(STOCK_INFO[stock_name]["ticker"]).info
+            info = yf.Ticker(ticker).info
             market_cap = info.get('marketCap', 0)
             market_cap_str = f"{market_cap / 1_000_000_000_000:.1f}조 원" if market_cap else "N/A"
             
@@ -355,13 +348,22 @@ def analyze_deep_dive(stock_name, news_title, news_summary):
                         f"- 52주 최고/최저: {info.get('fiftyTwoWeekHigh', 'N/A')} / {info.get('fiftyTwoWeekLow', 'N/A')}")
         except Exception: pass
         
+    user_portfolio_status = "미보유 관심종목 (관망 중)"
+    if is_owned == 1:
+        roi = ((current_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
+        user_portfolio_status = (f"실제 보유 중 (매수단가: {avg_price:,.0f}원, "
+                                 f"수량: {quantity}주, 실시간 현재가: {current_price:,.0f}원, "
+                                 f"현재 수익률: {roi:.2f}%)")
+        
     prompt = (f"[{stock_name} 심층 분석 리포트]\n\n"
+              f"[사용자 포트폴리오 상태]\n- {user_portfolio_status}\n\n"
               f"[최신 핵심 뉴스]\n- 제목: {news_title}\n- 요약: {news_summary}\n\n"
               f"[현재 재무 상태]\n{fin_data}\n\n"
-              f"위의 뉴스 데이터와 객관적 재무 상태를 종합하여 다음 양식으로 브리핑을 작성하십시오.\n"
+              f"위 데이터를 모두 종합하여 다음 양식으로 브리핑을 작성하십시오.\n"
               f"1. 🏢 기업 펀더멘털 및 재무 요약\n"
-              f"2. 📈 뉴스가 주가에 미치는 단기/중장기 파급력\n"
-              f"3. 🎯 투자 관점 종합 의견 (매수/보유/매도 등 방향성 제시)")
+              f"2. 🌐 뉴스 파급력 및 섹터 전반 동향\n"
+              f"3. 📊 사용자 맞춤형 포트폴리오 진단 (사용자의 매수 단가 및 현재 수익률을 구체적으로 언급하며 진단할 것)\n"
+              f"4. 🎯 최종 투자의견 (매수/보유/매도 중 택 1) 및 객관적 근거 제시")
     try: return client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
     except Exception as e: return f"분석 오류: {e}"
 
@@ -383,7 +385,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 경제 뉴스 & 시장 심리", "�
 # [탭 1: 경제 뉴스]
 with tab1:
     st.subheader("오늘의 핵심 경제 뉴스")
-    eco_query = "경제 OR 증시 OR 주식 OR 금융"
+    eco_query = "경제|증시|주식|금융"
     
     if not st.session_state.current_eco_news:
         fetch_unique_eco_news(eco_query)
@@ -425,14 +427,13 @@ with tab1:
 
 # [탭 2: 섹터별 분석]
 with tab2:
-    # NCP API의 오류를 방지하기 위해 괄호()를 제거하고 직관적인 OR 연산으로 쿼리 최적화
     sectors = {
-        "반도체": "반도체 주가 OR 삼성전자 실적 OR SK하이닉스 주가", 
-        "2차전지": "2차전지 주가 OR 전기차 실적 OR 배터리 주가", 
-        "바이오": "바이오 주가 OR 제약 실적 OR 신약", 
-        "금융/밸류업": "금융지주 주가 OR 은행 실적 OR 밸류업", 
-        "IT/플랫폼": "네이버 주가 OR 카카오 실적 OR 인공지능 주식", 
-        "방산/조선": "조선주 실적 OR 방산주 주가 OR K방산"
+        "반도체": "반도체|삼성전자|SK하이닉스", 
+        "2차전지": "2차전지|전기차|배터리", 
+        "바이오": "바이오|제약|신약", 
+        "금융/밸류업": "금융|은행|밸류업", 
+        "IT/플랫폼": "IT|플랫폼|네이버|카카오|인공지능", 
+        "방산/조선": "방산|조선|K방산"
     }
     
     col_s1, col_s2 = st.columns([4, 1])
@@ -476,59 +477,84 @@ with tab2:
                     conn.commit()
                     st.success("저장 완료")
 
-# [탭 3: 관심종목]
+# [탭 3: 관심종목 및 포트폴리오 관리]
 with tab3:
-    st.subheader("⭐️ 내 관심종목 맞춤 뉴스")
-    new_stock = st.text_input("종목명 입력 (예: 카카오, 삼성전자, 에코프로)")
-    if st.button("➕ 등록") and new_stock.strip():
-        with st.spinner(f"AI가 '{new_stock.strip()}'의 종목 코드와 연관 검색어를 분석 중입니다..."):
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            prompt = f"""사용자가 한국 주식 '{new_stock.strip()}'을 관심종목에 추가했습니다.
-            1. 야후 파이낸스 티커: 코스피는 '6자리숫자.KS', 코스닥은 '6자리숫자.KQ'. (모르면 빈 문자열 "")
-            2. 검색어: 뉴스 검색 시 유용한 계열사/유의어 포함 (예: {new_stock.strip()} OR 자회사)
-            반드시 아래 JSON 형식으로만 답변하세요.
-            {{"ticker": "005930.KS", "search_query": "{new_stock.strip()} OR 유의어"}}"""
-            
-            ticker = ""
-            search_query = new_stock.strip()
-            try:
-                res = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
-                match = re.search(r'\{.*\}', res, re.DOTALL)
-                if match:
-                    data = json.loads(match.group(0))
-                    ticker = data.get("ticker", "")
-                    search_query = data.get("search_query", new_stock.strip())
-            except: pass
-            
-            c.execute("INSERT INTO portfolio (stock_name, search_query, ticker) VALUES (?, ?, ?)", (new_stock.strip(), search_query, ticker))
-            conn.commit()
-            st.rerun()
-            
-    c.execute("SELECT id, stock_name, search_query, ticker FROM portfolio")
-    portfolio = c.fetchall()
-    if portfolio:
-        for p_id, p_name, p_query, p_ticker in portfolio:
-            if st.button(f"{p_name} ✖", key=f"del_port_{p_id}"):
-                c.execute("DELETE FROM portfolio WHERE id=?", (p_id,)); conn.commit(); st.rerun()
-        st.divider()
+    st.subheader("⭐️ 내 관심종목 및 포트폴리오 맞춤 뉴스")
+    
+    with st.form("add_stock_form"):
+        new_stock = st.text_input("종목명 입력 (예: 카카오, 삼성전자, 에코프로)")
+        is_owned_ui = st.radio("보유 상태", ["관심종목 (미보유)", "실제 보유중"], horizontal=True)
         
-        st.write(f"🔍 **등록된 종목 관련 핵심 비즈니스 뉴스** (가십성 기사 제외)")
-        for p_id, p_name, p_query, p_ticker in portfolio:
-            st.markdown(f"#### 📌 [{p_name}] 최신 동향")
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            avg_price = st.number_input("매수 단가 (원)", min_value=0, value=0, step=100) if is_owned_ui == "실제 보유중" else 0
+        with col_p2:
+            quantity = st.number_input("보유 수량 (주)", min_value=0, value=0, step=1) if is_owned_ui == "실제 보유중" else 0
             
-            # DB에 저장된 AI 자동 생성 유의어를 사용하여 검색
+        submitted = st.form_submit_button("➕ 종목 등록")
+        
+        if submitted and new_stock.strip():
+            with st.spinner(f"AI가 '{new_stock.strip()}'의 종목 코드와 연관 검색어를 분석 중입니다..."):
+                client = genai.Client(api_key=GEMINI_API_KEY)
+                prompt = f"""사용자가 한국 주식 '{new_stock.strip()}'을 관심종목에 추가했습니다.
+                1. 야후 파이낸스 티커: 코스피는 '6자리숫자.KS', 코스닥은 '6자리숫자.KQ'. (모르면 빈 문자열 "")
+                2. 검색어: 뉴스 검색 시 유용한 핵심 계열사, 지주사, 자회사, 대표 브랜드, 영문명 등 종목과 관련된 폭넓은 유의어 포함 (예: {new_stock.strip()} OR 영문명 OR 지주사명 OR 주요자회사)
+                반드시 아래 JSON 형식으로만 답변하세요.
+                {{"ticker": "005930.KS", "search_query": "{new_stock.strip()} OR 유의어"}}"""
+                
+                ticker = ""
+                search_query = new_stock.strip()
+                try:
+                    res = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
+                    match = re.search(r'\{.*\}', res, re.DOTALL)
+                    if match:
+                        data = json.loads(match.group(0))
+                        ticker = data.get("ticker", "")
+                        search_query = data.get("search_query", new_stock.strip())
+                except: pass
+                
+                is_owned_int = 1 if is_owned_ui == "실제 보유중" else 0
+                c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?, ?, ?, ?, ?, ?)", 
+                          (new_stock.strip(), search_query, ticker, is_owned_int, float(avg_price), int(quantity)))
+                conn.commit()
+                st.rerun()
+            
+    c.execute("SELECT id, stock_name, search_query, ticker, is_owned, avg_price, quantity FROM portfolio")
+    portfolio = c.fetchall()
+    
+    if portfolio:
+        st.divider()
+        st.write(f"🔍 **등록된 종목 관련 핵심 비즈니스 뉴스 및 포트폴리오 진단**")
+        
+        for p_id, p_name, p_query, p_ticker, p_is_owned, p_avg_price, p_quantity in portfolio:
+            st.markdown(f"#### 📌 [{p_name}]")
+            
+            # 실시간 주가 및 수익률 정보 노출
+            current_price = get_stock_current_price(p_ticker)
+            
+            col_info, col_del = st.columns([5, 1])
+            with col_info:
+                if p_is_owned == 1:
+                    roi = ((current_price - p_avg_price) / p_avg_price) * 100 if p_avg_price > 0 else 0
+                    roi_color = "🔴" if roi > 0 else "🔵" if roi < 0 else "⚫"
+                    st.caption(f"💼 **보유중** | 매수단가: {p_avg_price:,.0f}원 | 수량: {p_quantity}주 | 현재가: {current_price:,.0f}원 | 수익률: {roi_color} {roi:.2f}%")
+                else:
+                    st.caption(f"👀 **관심종목 (미보유)** | 현재가: {current_price:,.0f}원")
+            with col_del:
+                if st.button("✖ 삭제", key=f"del_port_{p_id}"):
+                    c.execute("DELETE FROM portfolio WHERE id=?", (p_id,)); conn.commit(); st.rerun()
+            
             search_keywords = [k.strip() for k in (p_query or p_name).split(" OR ")]
-            broad_query = " OR ".join(search_keywords)
+            broad_query = "|".join(search_keywords)
             raw_news = get_naver_news(broad_query, display=30)
             
-            # 파이썬 내부에서 비즈니스 키워드가 포함된 기사만 강력하게 필터링
-            business_kws = ["주가", "실적", "목표가", "수주", "배당", "합병", "투자", "인수", "매출", "영업이익"]
+            business_kws = ["주가", "실적", "목표가", "수주", "배당", "합병", "투자", "인수", "매출", "영업이익", "전망", "동향", "계약", "신제품", "개발", "수출", "공급", "M&A", "규제"]
             port_news = []
             
             for n in raw_news:
                 if any(b_kw in n['title'] or b_kw in n['summary'] for b_kw in business_kws):
                     port_news.append(n)
-                if len(port_news) == 3: # 3개만 노출
+                if len(port_news) == 3:
                     break
             
             if port_news:
@@ -542,9 +568,11 @@ with tab3:
                             if st.button("일반 뉴스 분석", key=f"t3_btn_{p_id}_{i}"):
                                 st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
                         with col_btn2:
-                            if st.button("📊 심층 분석 리포트 (재무+뉴스)", type="primary", key=f"t3_deep_{p_id}_{i}"):
-                                with st.spinner("실시간 재무 데이터 스크래핑 및 종합 분석 중..."):
-                                    st.session_state.analysis_results[news['link']] = analyze_deep_dive(p_name, p_ticker, news['title'], news['summary'])
+                            if st.button("📊 포트폴리오 기반 심층 진단", type="primary", key=f"t3_deep_{p_id}_{i}"):
+                                with st.spinner("실시간 재무 데이터 스크래핑 및 투자 의견 생성 중..."):
+                                    st.session_state.analysis_results[news['link']] = analyze_deep_dive(
+                                        p_name, p_ticker, news['title'], news['summary'], p_is_owned, p_avg_price, p_quantity, current_price
+                                    )
                                     
                         if news['link'] in st.session_state.analysis_results:
                             st.info(st.session_state.analysis_results[news['link']])
@@ -598,8 +626,8 @@ with tab5:
         c.execute("SELECT title, link, summary, analysis, scrap_date FROM scrapbook")
         scrap_list = [{"title": r[0], "link": r[1], "summary": r[2], "analysis": r[3], "scrap_date": r[4]} for r in c.fetchall()]
         
-        c.execute("SELECT stock_name, search_query, ticker FROM portfolio")
-        port_list = [{"stock_name": r[0], "search_query": r[1], "ticker": r[2]} for r in c.fetchall()]
+        c.execute("SELECT stock_name, search_query, ticker, is_owned, avg_price, quantity FROM portfolio")
+        port_list = [{"stock_name": r[0], "search_query": r[1], "ticker": r[2], "is_owned": r[3], "avg_price": r[4], "quantity": r[5]} for r in c.fetchall()]
         
         backup_dict = {"scrapbook": scrap_list, "portfolio": port_list}
         json_data = json.dumps(backup_dict, ensure_ascii=False, indent=4)
@@ -630,12 +658,11 @@ with tab5:
                         c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
                                   (item['title'], item['link'], item['summary'], item['analysis'], item['scrap_date']))
                     for item in restore_data.get("portfolio", []):
-                        # 구버전 백업 파일 호환성 유지
                         if isinstance(item, str): 
                             c.execute("INSERT INTO portfolio (stock_name) VALUES (?)", (item,))
                         else:
-                            c.execute("INSERT INTO portfolio (stock_name, search_query, ticker) VALUES (?, ?, ?)", 
-                                      (item.get("stock_name"), item.get("search_query"), item.get("ticker")))
+                            c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?, ?, ?, ?, ?, ?)", 
+                                      (item.get("stock_name"), item.get("search_query"), item.get("ticker"), item.get("is_owned", 0), item.get("avg_price", 0.0), item.get("quantity", 0)))
                     conn.commit()
                     st.success(f"성공! 최신 백업 파일 [{file_name}] 데이터를 정상적으로 복구했습니다.")
                     st.rerun()
