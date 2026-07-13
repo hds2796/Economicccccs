@@ -23,7 +23,7 @@ from google import genai
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 # --- [페이지 설정] ---
-st.set_page_config(page_title="AI 증시 분석 플랫폼", page_icon="📊", layout="wide")
+st.set_page_config(page_title="AI 증시 뉴스 분석", page_icon="📊", layout="wide")
 
 # --- [API 키 설정] ---
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
@@ -52,7 +52,7 @@ def check_password():
     if st.session_state.get("password_correct", False):
         return True
 
-    st.title("🔒 AI 증시 분석 플랫폼 로그인")
+    st.title("🔒 AI 증시 뉴스 분석 로그인")
     st.warning("⚠️ **경고: 처음에 설정한 비밀번호를 잃어버리면 절대 찾을 수 없습니다.**")
     
     password = st.text_input("비밀번호를 입력하세요", type="password")
