@@ -467,34 +467,49 @@ with tab2:
 # [탭 3: 관심종목]
 with tab3:
     st.subheader("⭐️ 내 관심종목 맞춤 뉴스")
-    new_stock = st.text_input("종목명 입력 (예: 카카오, 삼성전자, 우리금융지주)")
+    new_stock = st.text_input("종목명 입력 (예: 카카오, 삼성전자, 에코프로)")
     if st.button("➕ 등록") and new_stock.strip():
-        c.execute("INSERT INTO portfolio (stock_name) VALUES (?)", (new_stock.strip(),))
-        conn.commit(); st.rerun()
-        
-    c.execute("SELECT id, stock_name FROM portfolio")
+        with st.spinner(f"AI가 '{new_stock.strip()}'의 종목 코드와 연관 검색어를 분석 중입니다..."):
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            prompt = f"""사용자가 한국 주식 '{new_stock.strip()}'을 관심종목에 추가했습니다.
+            1. 야후 파이낸스 티커: 코스피는 '6자리숫자.KS', 코스닥은 '6자리숫자.KQ'. (모르면 빈 문자열 "")
+            2. 검색어: 뉴스 검색 시 유용한 계열사/유의어 포함 (예: {new_stock.strip()} OR 자회사)
+            반드시 아래 JSON 형식으로만 답변하세요.
+            {{"ticker": "005930.KS", "search_query": "{new_stock.strip()} OR 유의어"}}"""
+            
+            ticker = ""
+            search_query = new_stock.strip()
+            try:
+                res = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
+                match = re.search(r'\{.*\}', res, re.DOTALL)
+                if match:
+                    data = json.loads(match.group(0))
+                    ticker = data.get("ticker", "")
+                    search_query = data.get("search_query", new_stock.strip())
+            except: pass
+            
+            c.execute("INSERT INTO portfolio (stock_name, search_query, ticker) VALUES (?, ?, ?)", (new_stock.strip(), search_query, ticker))
+            conn.commit()
+            st.rerun()
+            
+    c.execute("SELECT id, stock_name, search_query, ticker FROM portfolio")
     portfolio = c.fetchall()
     if portfolio:
-        for p_id, p_name in portfolio:
+        for p_id, p_name, p_query, p_ticker in portfolio:
             if st.button(f"{p_name} ✖", key=f"del_port_{p_id}"):
                 c.execute("DELETE FROM portfolio WHERE id=?", (p_id,)); conn.commit(); st.rerun()
         st.divider()
         
         st.write(f"🔍 **등록된 종목 관련 핵심 비즈니스 뉴스** (가십성 기사 제외)")
-        for p_id, p_name in portfolio:
+        for p_id, p_name, p_query, p_ticker in portfolio:
             st.markdown(f"#### 📌 [{p_name}] 최신 동향")
             
-            # 유의어 사전(계열사 포함) 추출
-            search_keywords = [p_name]
-            if p_name in STOCK_INFO:
-                search_keywords = [k.strip() for k in STOCK_INFO[p_name]["alias"].split(" OR ")]
-                
-            # NCP API 쿼리 인식 한계의 근본적 해결: 
-            # 1. 아주 단순하게 기업명으로만 넉넉히(30개) 기사를 검색합니다.
+            # DB에 저장된 AI 자동 생성 유의어를 사용하여 검색
+            search_keywords = [k.strip() for k in (p_query or p_name).split(" OR ")]
             broad_query = " OR ".join(search_keywords)
             raw_news = get_naver_news(broad_query, display=30)
             
-            # 2. 파이썬 내부에서 비즈니스 키워드가 포함된 기사만 강력하게 필터링합니다.
+            # 파이썬 내부에서 비즈니스 키워드가 포함된 기사만 강력하게 필터링
             business_kws = ["주가", "실적", "목표가", "수주", "배당", "합병", "투자", "인수", "매출", "영업이익"]
             port_news = []
             
@@ -517,7 +532,7 @@ with tab3:
                         with col_btn2:
                             if st.button("📊 심층 분석 리포트 (재무+뉴스)", type="primary", key=f"t3_deep_{p_id}_{i}"):
                                 with st.spinner("실시간 재무 데이터 스크래핑 및 종합 분석 중..."):
-                                    st.session_state.analysis_results[news['link']] = analyze_deep_dive(p_name, news['title'], news['summary'])
+                                    st.session_state.analysis_results[news['link']] = analyze_deep_dive(p_name, p_ticker, news['title'], news['summary'])
                                     
                         if news['link'] in st.session_state.analysis_results:
                             st.info(st.session_state.analysis_results[news['link']])
