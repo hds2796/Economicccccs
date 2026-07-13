@@ -337,24 +337,36 @@ def call_gemini_with_fallback(prompt, is_json=False):
     if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
     client = genai.Client(api_key=GEMINI_API_KEY)
     
-    try:
-        return client.models.generate_content(model='gemini-3.5-flash', contents=prompt).text
-    except Exception as e1:
-        if "429" in str(e1) or "RESOURCE_EXHAUSTED" in str(e1) or "quota" in str(e1).lower() or "not found" in str(e1).lower() or "404" in str(e1):
-            try:
-                res = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
-                if not is_json: res += "\n\n*(💡 3.5 모델 오류/한도로 인해 2.5-flash가 우회 적용되었습니다.)*"
-                return res
-            except Exception as e2:
-                if "429" in str(e2) or "RESOURCE_EXHAUSTED" in str(e2) or "quota" in str(e2).lower() or "not found" in str(e2).lower() or "404" in str(e2):
-                    try:
-                        res = client.models.generate_content(model='gemini-1.5-flash', contents=prompt).text
-                        if not is_json: res += "\n\n*(💡 3.5 및 2.5 모델 한도 초과로 1.5-flash가 최종 우회 적용되었습니다.)*"
-                        return res
-                    except Exception as e3:
-                        raise Exception(f"최종 우회 모델(1.5) 호출 실패: {e3}")
-                raise e2
-        raise e1
+    # 순차적 우회(Fallback)를 위한 모델 및 안내 메시지 정의
+    models_to_try = [
+        ('gemini-3.5-flash', ''),
+        ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하/오류로 인해 2.5-flash가 우회 적용되었습니다.)*'),
+        ('gemini-3.1-lite', '\n\n*(💡 2.5 모델 과부하/오류로 인해 3.1 Lite가 우회 적용되었습니다.)*'),
+        ('gemini-1.5-flash', '\n\n*(💡 상위 모델들의 연쇄적인 한도 초과로 1.5-flash가 최종 우회 적용되었습니다.)*')
+    ]
+    
+    # 우회 처리를 발동시킬 에러 키워드 목록 (할당량 초과, 모델 미지원, 서버 과부하 등)
+    fallback_keywords = ["429", "resource_exhausted", "quota", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
+    
+    last_exception = None
+    
+    for model_name, fallback_msg in models_to_try:
+        try:
+            res = client.models.generate_content(model=model_name, contents=prompt).text
+            if not is_json and fallback_msg:
+                res += fallback_msg
+            return res
+        except Exception as e:
+            error_str = str(e).lower()
+            # 발생한 에러가 우회 조건에 해당하는지 검사
+            if any(k in error_str for k in fallback_keywords):
+                last_exception = e
+                continue # 다음 하위 모델로 넘어감
+            else:
+                raise e # 우회 대상이 아닌 치명적 에러일 경우 즉시 중단
+                
+    # 모든 모델이 실패했을 경우 최종 예외 처리
+    raise Exception(f"모든 우회 모델 호출 실패. 최종 에러: {last_exception}")
 
 def get_financial_data(ticker):
     fin_data = "재무 데이터 조회 불가 (통신 오류 또는 티커 누락)"
@@ -424,16 +436,16 @@ def analyze_sector_news(sector_name, news_list, market_data_str):
     try: return call_gemini_with_fallback(prompt)
     except Exception as e: return f"분석 오류: {e}"
 
-def analyze_recommended_stocks(news_list, market_data_str):
+def analyze_recommended_stocks(news_list, market_data_str, investment_horizon):
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list[:30]])
     prompt = (f"다음은 최근 실적 개선, 목표가 상향, 대규모 수주 등과 관련된 시장 핵심 뉴스 30건과 실시간 지표입니다.\n"
               f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
               f"{combined_news}\n\n"
-              f"위 뉴스와 실시간 지표를 바탕으로 단기적으로 가장 유망해 보이는 '추천종목 3개'를 선정하십시오.\n\n"
+              f"위 뉴스와 실시간 지표를 바탕으로, 사용자가 설정한 투자 기간인 '{investment_horizon}'에 맞춰 가장 유망해 보이는 '추천종목 3개'를 선정하십시오.\n\n"
               f"[양식]\n"
               f"1. 🥇 추천종목 1: [종목명]\n"
-              f"- 선정 근거: (뉴스와 현재 지수 흐름을 바탕으로 객관적 작성)\n"
-              f"- 투자 전략: (진입 시점 및 단기 목표가 등)\n\n"
+              f"- 선정 근거: (뉴스와 현재 지수 흐름을 바탕으로 {investment_horizon} 관점에서 객관적 작성)\n"
+              f"- 투자 전략: (진입 시점 및 목표가 등)\n\n"
               f"2. 🥈 추천종목 2: [종목명]\n"
               f"- 선정 근거: ...\n"
               f"- 투자 전략: ...\n\n"
@@ -555,7 +567,7 @@ with tab2:
         "반도체": "반도체|삼성전자|SK하이닉스", 
         "2차전지": "2차전지|전기차|배터리", 
         "바이오": "바이오|제약|신약", 
-        "금융/밸류업": "금융|은행|밸류업", 
+        "금융/밸류업": "금융|은행|밸류업|증권", 
         "IT/플랫폼": "IT|플랫폼|네이버|카카오|인공지능", 
         "방산/조선": "방산|조선|K방산"
     }
@@ -609,11 +621,17 @@ with tab2:
 
 # [탭 3: 오늘의 추천종목]
 with tab3:
-    st.subheader("🎯 AI 오늘의 추천종목 발굴")
+    st.subheader("🎯 AI 오늘의 맞춤 추천종목 발굴")
     st.write("실적 개선, 목표가 상향, 대규모 수주 등의 핵심 키워드를 바탕으로 시장 최신 뉴스를 분석하여 가장 유망한 종목 3가지를 추천합니다.")
     
-    if st.button("🚀 오늘의 추천종목 발굴 실행", type="primary", use_container_width=True):
-        with st.spinner("유망 종목 관련 최신 뉴스를 수집 및 분석 중입니다..."):
+    investment_horizon = st.radio(
+        "희망 투자 기간 설정", 
+        ["초단기 (1주일 이내 - 모멘텀/테마)", "단기 (1~3개월 - 실적/수주 모멘텀)", "중장기 (6개월 이상 - 펀더멘털/구조적 성장)"],
+        horizontal=True
+    )
+    
+    if st.button(f"🚀 {investment_horizon.split(' ')[0]} 맞춤 추천종목 발굴 실행", type="primary", use_container_width=True):
+        with st.spinner(f"'{investment_horizon}' 관점의 유망 종목 관련 최신 뉴스를 수집 및 분석 중입니다..."):
             rec_query = "특징주|목표가|수주|흑자|실적"
             rec_news = get_naver_news(rec_query, display=50, start=1)
             recent_rec_news = [n for n in rec_news if is_within_7_days(n['published'])]
@@ -623,16 +641,16 @@ with tab3:
                 recent_rec_news = [n for n in fallback_rec_news if is_within_7_days(n['published'])]
             
             if recent_rec_news:
-                st.session_state.today_recommendation = analyze_recommended_stocks(recent_rec_news, market_data_str)
+                st.session_state.today_recommendation = analyze_recommended_stocks(recent_rec_news, market_data_str, investment_horizon)
             else:
                 st.warning("분석할 만한 최신 유망 뉴스가 부족합니다.")
     
     if st.session_state.get('today_recommendation'):
-        with st.expander("🎯 AI 추천종목 리포트 보기", expanded=True):
+        with st.expander("🎯 AI 맞춤 추천종목 리포트 보기", expanded=True):
             st.write(st.session_state.today_recommendation)
             if st.button("💾 추천종목 리포트 스크랩", key="scrap_rec"):
                 c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                          ("🎯 오늘의 AI 추천종목", "", "실적/수주/목표가 상향 기반 추천", st.session_state.today_recommendation, datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
+                          (f"🎯 AI 맞춤 추천종목 ({investment_horizon.split(' ')[0]})", "", "설정 기간에 맞춘 실적/수주/모멘텀 기반 추천", st.session_state.today_recommendation, datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
                 conn.commit()
                 st.success("저장 완료")
 
