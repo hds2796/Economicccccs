@@ -23,7 +23,7 @@ from google import genai
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 # --- [페이지 설정] ---
-st.set_page_config(page_title="AI 증시 뉴스 분석", page_icon="📊", layout="wide")
+st.set_page_config(page_title="AI 증시 분석 플랫폼", page_icon="📊", layout="wide")
 
 # --- [API 키 설정] ---
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
@@ -52,7 +52,7 @@ def check_password():
     if st.session_state.get("password_correct", False):
         return True
 
-    st.title("🔒 AI 증시 뉴스 분석 로그인")
+    st.title("🔒 AI 증시 분석 플랫폼 로그인")
     st.warning("⚠️ **경고: 처음에 설정한 비밀번호를 잃어버리면 절대 찾을 수 없습니다.**")
     
     password = st.text_input("비밀번호를 입력하세요", type="password")
@@ -242,7 +242,8 @@ def fetch_unique_sector_news(sector_name, query):
         st.session_state.seen_sectors[sector_name] = set()
         
     unique_news = []
-    while len(unique_news) < 5 and st.session_state.sector_starts[sector_name] <= 1000:
+    # 화면에 노출되는 기사 수를 5개에서 10개로 확장
+    while len(unique_news) < 10 and st.session_state.sector_starts[sector_name] <= 1000:
         batch = get_naver_news(query, display=10, start=st.session_state.sector_starts[sector_name])
         st.session_state.sector_starts[sector_name] += 10
         if not batch: break
@@ -250,7 +251,7 @@ def fetch_unique_sector_news(sector_name, query):
             if n['link'] not in st.session_state.seen_sectors[sector_name]:
                 unique_news.append(n)
                 st.session_state.seen_sectors[sector_name].add(n['link'])
-            if len(unique_news) == 5: break
+            if len(unique_news) == 10: break
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # --- [제미나이 AI 분석 함수] ---
@@ -278,12 +279,12 @@ def analyze_sector_news(sector_name, news_list):
     if not GEMINI_API_KEY: return "Gemini API 키 오류"
     client = genai.Client(api_key=GEMINI_API_KEY)
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
-    prompt = f"다음은 '{sector_name}' 섹터와 관련된 최신 주요 뉴스입니다.\n{combined_news}\n\n[양식]\n1. 🏭 섹터 전반적 흐름 요약\n2. 📈 주요 호재 및 악재 요인\n3. 🎯 투자 심리 및 단기 전망"
+    # 분석 대상 기사 개수를 동적으로 반영하도록 프롬프트 수정
+    prompt = f"다음 수집된 '{sector_name}' 섹터 관련 {len(news_list)}개의 최신 주요 뉴스를 모두 종합하여 분석하십시오.\n{combined_news}\n\n[양식]\n1. 🏭 섹터 전반적 흐름 요약\n2. 📈 주요 호재 및 악재 요인\n3. 🎯 투자 심리 및 단기 전망"
     try: return client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
     except Exception as e: return f"분석 오류: {e}"
 
-# =======================================================
-# 4. 상단 대시보드 및 UI 구성
+# 종목명 유의어 및 야후 파이낸스 티커 매핑 사전
 # =======================================================
 st.title("📊 AI 종합 증시 분석 플랫폼")
 market_data = get_market_data()
@@ -360,19 +361,19 @@ with tab2:
             fetch_unique_sector_news(selected_sector, sectors[selected_sector])
             if f'sector_summary_{selected_sector}' in st.session_state:
                 del st.session_state[f'sector_summary_{selected_sector}']
-            st.rerun()
-            
-    sector_news = st.session_state.current_sector_news.get(selected_sector, [])
-    
-    if sector_news:
-        if st.button(f"🤖 '{selected_sector}' 섹터 종합 분석", type="primary"):
-            with st.spinner(f"{selected_sector} 섹터 동향을 분석 중입니다..."):
-                st.session_state[f'sector_summary_{selected_sector}'] = analyze_sector_news(selected_sector, sector_news)
-                
-        if f'sector_summary_{selected_sector}' in st.session_state:
-            st.markdown("### 📊 섹터 종합 브리핑")
-            st.info(st.session_state[f'sector_summary_{selected_sector}'])
-            st.markdown("---")
+        sector_news = st.session_state.current_sector_news.get(selected_sector, [])
+        
+        if sector_news:
+            if st.button(f"🤖 '{selected_sector}' 섹터 종합 분석 (TOP 20 뉴스 기반)", type="primary"):
+                with st.spinner(f"{selected_sector} 섹터 동향을 분석 중입니다..."):
+                    # 화면에 보이는 10개 기사가 아닌 최신 20개 기사를 백그라운드에서 별도 수집
+                    top_20_news = get_naver_news(sectors[selected_sector], display=20, start=1)
+                    st.session_state[f'sector_summary_{selected_sector}'] = analyze_sector_news(selected_sector, top_20_news)
+                    
+            if f'sector_summary_{selected_sector}' in st.session_state:
+                st.markdown("### 📊 섹터 종합 브리핑")
+                st.info(st.session_state[f'sector_summary_{selected_sector}'])
+                st.markdown("---")
             
     for i, news in enumerate(sector_news):
         with st.expander(f"📰 {news['title']}"):
@@ -406,7 +407,13 @@ with tab3:
         st.write(f"🔍 **등록된 종목 관련 핵심 비즈니스 뉴스** (가십성 기사 제외)")
         for p_id, p_name in portfolio:
             st.markdown(f"#### 📌 [{p_name}] 최신 동향")
-            query = f"{p_name} 주가 OR {p_name} 실적 OR {p_name} 목표가 OR {p_name} 수주"
+            
+            # 유의어 사전(계열사 포함)을 적용하여 검색 쿼리 지능적 확장
+            search_keyword = p_name
+            if p_name in STOCK_INFO:
+                search_keyword = STOCK_INFO[p_name]["alias"]
+                
+            query = f"({search_keyword}) AND (주가 OR 실적 OR 목표가 OR 수주 OR 배당 OR 합병)"
             port_news = get_naver_news(query, display=3)
             
             if port_news:
@@ -414,10 +421,23 @@ with tab3:
                     with st.expander(f"📰 {news['title']}"):
                         st.caption(news['published'])
                         st.write(news['summary'])
-                        if st.button("이 기사 분석하기", key=f"t3_btn_{p_id}_{i}"):
-                            st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
+                        
+                        col_btn1, col_btn2 = st.columns(2)
+                        with col_btn1:
+                            if st.button("일반 뉴스 분석", key=f"t3_btn_{p_id}_{i}"):
+                                st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
+                        with col_btn2:
+                            if st.button("📊 심층 분석 리포트 (재무+뉴스)", type="primary", key=f"t3_deep_{p_id}_{i}"):
+                                with st.spinner("실시간 재무 데이터 스크래핑 및 종합 분석 중..."):
+                                    st.session_state.analysis_results[news['link']] = analyze_deep_dive(p_name, news['title'], news['summary'])
+                                    
                         if news['link'] in st.session_state.analysis_results:
                             st.info(st.session_state.analysis_results[news['link']])
+                            if st.button("💾 스크랩", key=f"t3_scrap_{p_id}_{i}"):
+                                c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
+                                          (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
+                                conn.commit()
+                                st.success("저장 완료")
             else:
                 st.info(f"'{p_name}' 관련 비즈니스 뉴스가 없습니다.")
             st.markdown("---")
