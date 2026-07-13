@@ -370,10 +370,9 @@ def call_gemini_with_fallback(prompt, is_json=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     models_to_try = [
-        ('gemini-3.5-flash', '\n\n*(💡3.5 모델이 적용되었습니다.)'),
+        ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
         ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하/오류로 인해 2.5-flash가 우회 적용되었습니다.)*'),
-        ('gemini-3.1-flash-lite', '\n\n*(💡 2.5 모델 과부하/오류로 인해 3.1 Lite가 우회 적용되었습니다.)*'),
-       
+        ('gemini-3.1-flash-lite', '\n\n*(💡 2.5 모델 과부하/오류로 인해 3.1 Flash Lite가 우회 적용되었습니다.)*')
     ]
     
     fallback_keywords = ["429", "resource_exhausted", "quota", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
@@ -606,7 +605,7 @@ with tab1:
     st.subheader("📰 실시간 경제·시사 뉴스 분석")
     st.write("네이버 뉴스에 방금 송고된 최신 경제, 시사, 정치 기사를 실시간(최신순)으로 수집하고 트렌드를 분석합니다.")
     
-    realtime_query = "경제 OR 시사 OR 증시 OR 금융 OR 정책 OR 주식 OR 코스피 OR 코스닥"
+    realtime_query = "경제|시사|증시|금융|정책|코스피|코스닥"
     
     if not st.session_state.current_realtime_news:
         fetch_unique_realtime_news(realtime_query)
