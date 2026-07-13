@@ -5,6 +5,7 @@ import sqlite3
 import json
 import os
 import io
+import time
 import yfinance as yf
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -42,7 +43,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS oauth_store (state TEXT, verifier TEXT)'
 c.execute('''CREATE TABLE IF NOT EXISTS oauth_creds (creds TEXT)''')
 conn.commit()
 
-# 기존 포트폴리오 및 스크랩북 테이블 신규 컬럼 강제 추가 (트래킹 기능용)
 try: c.execute("ALTER TABLE portfolio ADD COLUMN search_query TEXT")
 except sqlite3.OperationalError: pass
 try: c.execute("ALTER TABLE portfolio ADD COLUMN ticker TEXT")
@@ -235,12 +235,14 @@ def get_stock_current_price(ticker):
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
             code = code_match.group()
-            url = f"https://m.stock.naver.com/api/stock/{code}/basic"
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            res = requests.get(url, headers=headers, timeout=3)
-            if res.status_code == 200:
-                data = res.json()
-                return float(data.get('closePrice', '0').replace(',', ''))
+            url = f"https://finance.naver.com/item/main.naver?code={code}"
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+            res = requests.get(url, headers=headers, timeout=5)
+            soup = BeautifulSoup(res.text, 'html.parser')
+            
+            price_tag = soup.select_one('.no_today .blind')
+            if price_tag:
+                return float(price_tag.text.replace(',', ''))
                 
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
@@ -337,35 +339,37 @@ def call_gemini_with_fallback(prompt, is_json=False):
     if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
     client = genai.Client(api_key=GEMINI_API_KEY)
     
-    # 순차적 우회(Fallback)를 위한 모델 및 안내 메시지 정의
     models_to_try = [
         ('gemini-3.5-flash', ''),
         ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하/오류로 인해 2.5-flash가 우회 적용되었습니다.)*'),
-        ('gemini-3.1-flash-lite', '\n\n*(💡 2.5 모델 과부하/오류로 인해 3.1 flash Lite가 우회 적용되었습니다.)*')
+        ('gemini-3.1-lite', '\n\n*(💡 2.5 모델 과부하/오류로 인해 3.1 Lite가 우회 적용되었습니다.)*'),
+        ('gemini-1.5-flash', '\n\n*(💡 상위 모델들의 연쇄적인 한도 초과로 1.5-flash가 최종 우회 적용되었습니다.)*')
     ]
     
-    # 우회 처리를 발동시킬 에러 키워드 목록 (할당량 초과, 모델 미지원, 서버 과부하 등)
     fallback_keywords = ["429", "resource_exhausted", "quota", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
-    
     last_exception = None
     
     for model_name, fallback_msg in models_to_try:
-        try:
-            res = client.models.generate_content(model=model_name, contents=prompt).text
-            if not is_json and fallback_msg:
-                res += fallback_msg
-            return res
-        except Exception as e:
-            error_str = str(e).lower()
-            # 발생한 에러가 우회 조건에 해당하는지 검사
-            if any(k in error_str for k in fallback_keywords):
+        for attempt in range(2):
+            try:
+                res = client.models.generate_content(model=model_name, contents=prompt).text
+                if not is_json and fallback_msg:
+                    res += fallback_msg
+                return res
+            except Exception as e:
+                error_str = str(e).lower()
                 last_exception = e
-                continue # 다음 하위 모델로 넘어감
-            else:
-                raise e # 우회 대상이 아닌 치명적 에러일 경우 즉시 중단
                 
-    # 모든 모델이 실패했을 경우 최종 예외 처리
-    raise Exception(f"모든 우회 모델 호출 실패. 최종 에러: {last_exception}")
+                if "not found" in error_str or "404" in error_str:
+                    break 
+                    
+                if any(k in error_str for k in fallback_keywords):
+                    time.sleep(3)
+                    continue
+                    
+                break 
+                
+    raise Exception(f"일시적인 API 호출 한도 초과 또는 치명적 오류입니다. 잠시 후 다시 시도하십시오. (에러: {last_exception})")
 
 def get_financial_data(ticker):
     fin_data = "재무 데이터 조회 불가 (통신 오류 또는 티커 누락)"
@@ -374,20 +378,24 @@ def get_financial_data(ticker):
     try:
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
+            # HTML 스크래핑 기반 재무 데이터 수집 유지
             code = code_match.group()
-            url = f"https://m.stock.naver.com/api/stock/{code}/basic"
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            res = requests.get(url, headers=headers, timeout=3)
+            url = f"https://finance.naver.com/item/main.naver?code={code}"
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
+            res = requests.get(url, headers=headers, timeout=5)
+            soup = BeautifulSoup(res.text, 'html.parser')
             
-            if res.status_code == 200:
-                data = res.json()
-                market_sum = data.get('marketValue', 'N/A')
-                per = data.get('per', 'N/A')
-                pbr = data.get('pbr', 'N/A')
-                
-                fin_data = (f"- 시가총액: {market_sum}억 원\n"
-                            f"- PER (주가수익비율): {per}배\n"
-                            f"- PBR (주가순자산비율): {pbr}배")
+            market_sum = soup.select_one('#_market_sum')
+            per = soup.select_one('#_per')
+            pbr = soup.select_one('#_pbr')
+            
+            m_str = market_sum.text.strip() + "억원" if market_sum else "N/A"
+            per_str = per.text.strip() + "배" if per else "N/A"
+            pbr_str = pbr.text.strip() + "배" if pbr else "N/A"
+            
+            fin_data = (f"- 시가총액: {m_str}\n"
+                        f"- PER (주가수익비율): {per_str}\n"
+                        f"- PBR (주가순자산비율): {pbr_str}")
         else:
             info = yf.Ticker(ticker).info
             market_cap = info.get('marketCap', 0)
@@ -410,12 +418,14 @@ def analyze_single_news(title, summary, market_data_str):
 
 def analyze_overall_market(news_list, market_data_str):
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
+    # 향후 전망("앞으로 주식시장은?") 항목 프롬프트에 추가
     prompt = (f"다음 수집된 {len(news_list)}개의 주요 뉴스와 현재 시장 지표를 종합하여 증시 방향성을 객관적으로 브리핑하십시오.\n"
               f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
               f"{combined_news}\n\n[양식]\n"
               f"1. 🌐 거시 환경 종합 요약 (현재 지수 및 환율 흐름 반영)\n"
               f"2. ⚖️ 증시 호악재 분석\n"
-              f"3. 💡 주목할 섹터\n\n"
+              f"3. 💡 주목할 섹터\n"
+              f"4. 🔮 앞으로 주식시장은? (향후 전망 및 요약 정리)\n\n"
               f"반드시 마지막 줄에 'SCORE: 숫자' 형태로 시장 심리 지수를 0~100 사이로 기재하십시오.")
     try:
         text = call_gemini_with_fallback(prompt)
@@ -499,6 +509,7 @@ for i, (name, data) in enumerate(market_data.items()):
         else: st.metric(label=name, value="데이터 오류")
 st.divider()
 
+# 실시간 트렌드 관련 기능(Tab 1) 제거 및 순서 재조정
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔥 경제 뉴스 & 시장 심리", "📑 섹터별 분석", "🎯 오늘의 추천종목", "⭐️ 내 관심종목", "📁 스크랩북", "⚙️ 데이터 백업/복구"])
 
 # [탭 1: 경제 뉴스]
@@ -690,7 +701,7 @@ with tab4:
                         data = json.loads(match.group(0))
                         ticker = data.get("ticker", "")
                         search_query = data.get("search_query", new_stock.strip())
-                except Exception as e:
+                except Exception:
                     pass
                 
                 is_owned_int = 1 if is_owned_ui == "실제 보유중" else 0
@@ -802,7 +813,6 @@ with tab4:
                 with st.expander("📊 AI 포트폴리오 심층 진단 결과", expanded=True):
                     raw_report = st.session_state.analysis_results[f"deep_{p_id}"]
                     
-                    # TARGET_PRICE 추출 및 화면 노출 시 해당 문자열 제거
                     target_price = 0.0
                     match = re.search(r'TARGET_PRICE:\s*([\d,]+)', raw_report)
                     if match:
@@ -843,13 +853,10 @@ with tab5:
     for s_id, s_title, s_link, s_summary, s_analysis, s_date, s_name, s_ticker, s_saved_price, s_target_price in scraps:
         with st.expander(f"[{s_date}] {s_title}"):
             
-            # AI 투자의견 적중률 트래킹 UI (심층 리포트인 경우에만 표시)
             if s_name and s_ticker and s_target_price > 0:
                 current_price = get_stock_current_price(s_ticker)
                 
-                # 저장 당시부터 현재까지의 수익률
                 actual_roi = ((current_price - s_saved_price) / s_saved_price) * 100 if s_saved_price > 0 else 0
-                # 목표가 달성률 (현재가 / 목표가)
                 achievement_rate = (current_price / s_target_price) * 100 if s_target_price > 0 else 0
                 
                 st.markdown("### 🎯 AI 예측 트래커")
@@ -863,7 +870,6 @@ with tab5:
             if s_link: st.markdown(f"[기사 링크]({s_link})\n\n**요약:** {s_summary}\n\n**AI 분석:**\n{s_analysis}")
             else: st.markdown(f"**AI 분석:**\n{s_analysis}")
             
-            # 다운로드 및 삭제 버튼
             col_b1, col_b2 = st.columns([1, 1])
             with col_b1:
                 html_content = f"""
