@@ -6,7 +6,8 @@ import json
 import os
 import io
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 # 로컬 및 클라우드 환경 테스트 시 HTTPS 오류 우회
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
@@ -65,7 +66,7 @@ def check_password():
     if st.session_state.get("password_correct", False):
         return True
 
-    st.title("🔒 AI 증시 분석 플랫폼 로그인")
+    st.title("🔒 Project2_Stock 로그인")
     st.warning("⚠️ **경고: 처음에 설정한 비밀번호를 잃어버리면 절대 찾을 수 없습니다.**")
     
     password = st.text_input("비밀번호를 입력하세요", type="password")
@@ -220,7 +221,6 @@ def get_market_data():
 def get_stock_current_price(ticker):
     if not ticker: return 0.0
     try:
-        # 한국 주식(6자리 코드)인 경우 네이버 금융에서 실시간 현재가를 직접 크롤링 (yfinance 오류 우회)
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
             code = code_match.group()
@@ -233,7 +233,6 @@ def get_stock_current_price(ticker):
             if price_tag:
                 return float(price_tag.text.replace(',', ''))
                 
-        # 미국 주식 등 6자리 코드가 없는 경우 기존 yfinance 사용
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             return float(data['Close'].iloc[-1])
@@ -255,6 +254,15 @@ def get_naver_news(query, display=10, start=1):
     if response.status_code == 200:
         return [{"title": clean_html(i['title']), "link": i['link'], "summary": clean_html(i['description']), "published": i['pubDate']} for i in response.json().get("items", [])]
     return []
+
+# 화면 노출용 24시간 필터링 검증 함수
+def is_within_24_hours(pub_date_str):
+    try:
+        dt = parsedate_to_datetime(pub_date_str)
+        now = datetime.now(timezone.utc)
+        return (now - dt) <= timedelta(hours=24)
+    except Exception:
+        return True
 
 def fetch_unique_eco_news(query):
     unique_news = []
@@ -319,14 +327,12 @@ def fetch_unique_sector_news(sector_name, query):
 # --- [제미나이 AI 분석 함수 및 재무 스크래핑 로직] ---
 
 def get_financial_data(ticker):
-    """yfinance 오류를 우회하여 네이버 금융에서 직접 재무제표를 가져오는 함수"""
     fin_data = "재무 데이터 조회 불가 (통신 오류 또는 티커 누락)"
     if not ticker: return fin_data
     
     try:
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
-            # 한국 주식: 네이버 금융 스크래핑 우선 (안정성 100%)
             code = code_match.group()
             url = f"https://finance.naver.com/item/main.naver?code={code}"
             headers = {'User-Agent': 'Mozilla/5.0'}
@@ -345,7 +351,6 @@ def get_financial_data(ticker):
                         f"- PER (주가수익비율): {per_str}\n"
                         f"- PBR (주가순자산비율): {pbr_str}")
         else:
-            # 미국 등 해외 주식: yfinance 사용
             info = yf.Ticker(ticker).info
             market_cap = info.get('marketCap', 0)
             market_cap_str = f"{market_cap / 1_000_000_000_000:.1f}조" if market_cap else "N/A"
@@ -387,7 +392,6 @@ def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quanti
     if not GEMINI_API_KEY: return "Gemini API 키 오류"
     client = genai.Client(api_key=GEMINI_API_KEY)
     
-    # 안정적인 크롤링 함수로 교체
     fin_data = get_financial_data(ticker)
         
     user_portfolio_status = "미보유 관심종목 (관망 중)"
@@ -397,7 +401,6 @@ def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quanti
                                  f"수량: {quantity}주, 실시간 현재가: {current_price:,.0f}원, "
                                  f"현재 수익률: {roi:.2f}%)")
         
-    # 기사 리스트에서 최대 30개만 추출하여 문자열로 병합
     top_30_news = news_list[:30]
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in top_30_news])
         
@@ -431,7 +434,8 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 경제 뉴스 & 시장 심리", "�
 # [탭 1: 경제 뉴스]
 with tab1:
     st.subheader("오늘의 핵심 경제 뉴스")
-    eco_query = "경제|증시|주식|금융|코스피|코스닥|환율|S&P500"
+    # 검색어에 코스피, 코스닥 추가 반영
+    eco_query = "경제|증시|주식|금융|코스피|코스닥"
     
     if not st.session_state.current_eco_news:
         fetch_unique_eco_news(eco_query)
@@ -457,19 +461,25 @@ with tab1:
             st.markdown(st.session_state.overall_analysis['text'])
         
         st.markdown("---")
-        for i, news in enumerate(st.session_state.current_eco_news):
-            st.markdown(f"**{i+1}. [{news['title']}]({news['link']})**")
-            st.caption(f"{news['published']} | {news['summary']}")
-            if st.button("이 기사 심층 분석", key=f"t1_btn_{news['link']}"):
-                st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
-            if news['link'] in st.session_state.analysis_results:
-                st.info(st.session_state.analysis_results[news['link']])
-                if st.button("💾 이 리포트 스크랩하기", key=f"t1_scrap_{news['link']}"):
-                    c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
-                              (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
-                    conn.commit()
-                    st.success("스크랩북 저장 완료")
-            st.divider()
+        
+        # UI 출력 시 24시간 이내의 뉴스만 필터링 (분석에는 위 50개 원본 데이터 사용)
+        recent_eco_news = [n for n in st.session_state.current_eco_news if is_within_24_hours(n['published'])]
+        if recent_eco_news:
+            for i, news in enumerate(recent_eco_news):
+                st.markdown(f"**{i+1}. [{news['title']}]({news['link']})**")
+                st.caption(f"{news['published']} | {news['summary']}")
+                if st.button("이 기사 심층 분석", key=f"t1_btn_{news['link']}"):
+                    st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
+                if news['link'] in st.session_state.analysis_results:
+                    st.info(st.session_state.analysis_results[news['link']])
+                    if st.button("💾 이 리포트 스크랩하기", key=f"t1_scrap_{news['link']}"):
+                        c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
+                                  (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
+                        conn.commit()
+                        st.success("스크랩북 저장 완료")
+                st.divider()
+        else:
+            st.info("24시간 이내에 보도된 뉴스가 없습니다.")
 
 # [탭 2: 섹터별 분석]
 with tab2:
@@ -477,7 +487,7 @@ with tab2:
         "반도체": "반도체|삼성전자|SK하이닉스", 
         "2차전지": "2차전지|전기차|배터리", 
         "바이오": "바이오|제약|신약", 
-        "금융/밸류업": "금융|은행|밸류업|증권", 
+        "금융/밸류업": "금융|은행|밸류업", 
         "IT/플랫폼": "IT|플랫폼|네이버|카카오|인공지능", 
         "방산/조선": "방산|조선|K방산"
     }
@@ -510,18 +520,23 @@ with tab2:
             st.info(st.session_state[f'sector_summary_{selected_sector}'])
             st.markdown("---")
             
-    for i, news in enumerate(sector_news):
-        with st.expander(f"📰 {news['title']}"):
-            st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
-            if st.button("AI 분석 실행", key=f"t2_btn_{news['link']}"):
-                st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
-            if news['link'] in st.session_state.analysis_results:
-                st.info(st.session_state.analysis_results[news['link']])
-                if st.button("💾 스크랩", key=f"t2_scrap_{news['link']}"):
-                    c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
-                              (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
-                    conn.commit()
-                    st.success("저장 완료")
+        # UI 출력 시 24시간 이내 뉴스만 필터링
+        recent_sector_news = [n for n in sector_news if is_within_24_hours(n['published'])]
+        if recent_sector_news:
+            for i, news in enumerate(recent_sector_news):
+                with st.expander(f"📰 {news['title']}"):
+                    st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
+                    if st.button("AI 분석 실행", key=f"t2_btn_{news['link']}"):
+                        st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
+                    if news['link'] in st.session_state.analysis_results:
+                        st.info(st.session_state.analysis_results[news['link']])
+                        if st.button("💾 스크랩", key=f"t2_scrap_{news['link']}"):
+                            c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
+                                      (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M")))
+                            conn.commit()
+                            st.success("저장 완료")
+        else:
+            st.info("24시간 이내에 보도된 관련 섹터 뉴스가 없습니다.")
 
 # [탭 3: 관심종목 및 포트폴리오 관리]
 with tab3:
@@ -579,36 +594,29 @@ with tab3:
         for p_id, p_name, p_query, p_ticker, p_is_owned, p_avg_price, p_quantity in portfolio:
             st.markdown("---")
             
-            # 심층 분석 버튼을 종목명 바로 옆으로 배치
             col_title, col_deep = st.columns([4, 2])
             with col_title:
                 st.markdown(f"#### 📌 [{p_name}]")
             
-            # 실시간 주가 및 수익률 정보 노출
             current_price = get_stock_current_price(p_ticker)
             
-            # TOP 30 분석을 위해 넓게 수집
             search_keywords = [k.strip() for k in (p_query or p_name).split(" OR ")]
             broad_query = "|".join(search_keywords)
-            raw_news = get_naver_news(broad_query, display=50) # 넉넉히 수집
+            raw_news = get_naver_news(broad_query, display=50) 
             
             business_kws = ["주가", "실적", "목표가", "수주", "배당", "합병", "투자", "인수", "매출", "영업이익", "전망", "동향", "계약", "신제품", "개발", "수출", "공급", "M&A", "규제"]
             port_news_all = [n for n in raw_news if any(b_kw in n['title'] or b_kw in n['summary'] for b_kw in business_kws)]
             
-            # --- [추가된 Fallback(재검색) 로직] ---
-            # 1차 폴백: 비즈니스 키워드 필터링에 걸리는 뉴스가 아예 없을 경우 일반 뉴스라도 출력 허용
             if not port_news_all and raw_news:
                 port_news_all = raw_news
                 
-            # 2차 폴백: AI가 만든 유의어(search_query) 자체의 문제로 raw_news가 비어있다면 순수 종목명으로 재검색
             if not port_news_all:
                 port_news_all = get_naver_news(p_name, display=30)
-            # ------------------------------------
             
             with col_deep:
-                # TOP 30 기반 심층 분석 버튼 로직
                 if st.button("📊 포트폴리오 심층 진단 (TOP 30)", type="primary", key=f"t3_deep_{p_id}"):
                     with st.spinner("실시간 재무 데이터 스크래핑 및 투자 의견 생성 중..."):
+                        # AI 분석에는 24시간 여부와 상관없이 수집된 전체 데이터 전달
                         st.session_state.analysis_results[f"deep_{p_id}"] = analyze_deep_dive(
                             p_name, p_ticker, port_news_all, p_is_owned, p_avg_price, p_quantity, current_price
                         )
@@ -649,7 +657,6 @@ with tab3:
                         conn.commit()
                         st.rerun()
                         
-            # 심층 진단 결과 출력부
             if f"deep_{p_id}" in st.session_state.analysis_results:
                 st.info(st.session_state.analysis_results[f"deep_{p_id}"])
                 if st.button("💾 이 리포트 스크랩", key=f"t3_scrap_deep_{p_id}"):
@@ -658,9 +665,10 @@ with tab3:
                     conn.commit()
                     st.success("저장 완료")
             
-            # 개별 기사는 최대 3개만 화면에 노출
-            if port_news_all:
-                for i, news in enumerate(port_news_all[:3]):
+            # 개별 기사 화면 노출 시 24시간 이내 필터링 적용
+            recent_port_news = [n for n in port_news_all if is_within_24_hours(n['published'])]
+            if recent_port_news:
+                for i, news in enumerate(recent_port_news[:3]):
                     with st.expander(f"📰 {news['title']}"):
                         st.caption(news['published'])
                         st.write(news['summary'])
@@ -669,7 +677,7 @@ with tab3:
                         if news['link'] in st.session_state.analysis_results:
                             st.info(st.session_state.analysis_results[news['link']])
             else:
-                st.info(f"'{p_name}' 관련 뉴스가 없습니다.")
+                st.info(f"'{p_name}' 관련 24시간 이내 최신 뉴스가 없습니다. (심층 분석에는 과거 뉴스가 정상 반영됩니다.)")
     else: st.info("등록된 관심종목이 없습니다.")
 
 # [탭 4: 스크랩북]
