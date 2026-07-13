@@ -159,10 +159,10 @@ def download_latest_from_google_drive():
 if 'analysis_results' not in st.session_state: st.session_state.analysis_results = {}
 if 'overall_analysis' not in st.session_state: st.session_state.overall_analysis = None
 
-# 중복 기사 필터링을 위한 메모리 저장소 초기화
-if 'macro_start' not in st.session_state: st.session_state.macro_start = 1
-if 'seen_macro' not in st.session_state: st.session_state.seen_macro = set()
-if 'current_macro_news' not in st.session_state: st.session_state.current_macro_news = []
+# 중복 기사 필터링을 위한 메모리 저장소 초기화 (거시 -> 경제 변수명 변경)
+if 'eco_start' not in st.session_state: st.session_state.eco_start = 1
+if 'seen_eco' not in st.session_state: st.session_state.seen_eco = set()
+if 'current_eco_news' not in st.session_state: st.session_state.current_eco_news = []
 
 if 'sector_starts' not in st.session_state: st.session_state.sector_starts = {}
 if 'seen_sectors' not in st.session_state: st.session_state.seen_sectors = {}
@@ -209,7 +209,8 @@ def clean_html(raw_html):
     if not raw_html: return ""
     return BeautifulSoup(raw_html, "html.parser").get_text()
 
-@st.cache_data(ttl=1800)
+# API 캐시 유지 시간을 30분에서 5분으로 단축하여 새로고침 효율 최적화
+@st.cache_data(ttl=300)
 def get_naver_news(query, display=10, start=1):
     if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET: return []
     url = "https://naverapihub.apigw.ntruss.com/search/v1/news"
@@ -221,19 +222,34 @@ def get_naver_news(query, display=10, start=1):
         return [{"title": clean_html(i['title']), "link": i['link'], "summary": clean_html(i['description']), "published": i['pubDate']} for i in response.json().get("items", [])]
     return []
 
-# 중복을 피하며 무한 새로고침을 처리하는 커스텀 로직
-def fetch_unique_macro_news(query):
+# 중복을 피하며 무한 새로고침을 처리하는 커스텀 로직 (경제 뉴스용)
+def fetch_unique_eco_news(query):
     unique_news = []
-    while len(unique_news) < 10 and st.session_state.macro_start <= 1000:
-        batch = get_naver_news(query, display=10, start=st.session_state.macro_start)
-        st.session_state.macro_start += 10
+    attempts = 0
+    # 최대 3회까지만 API를 호출하여 루프 방지
+    while len(unique_news) < 10 and st.session_state.eco_start <= 900 and attempts < 3:
+        batch = get_naver_news(query, display=10, start=st.session_state.eco_start)
+        st.session_state.eco_start += 10
+        attempts += 1
         if not batch: break
         for n in batch:
-            if n['link'] not in st.session_state.seen_macro:
+            if n['link'] not in st.session_state.seen_eco:
                 unique_news.append(n)
-                st.session_state.seen_macro.add(n['link'])
+                st.session_state.seen_eco.add(n['link'])
             if len(unique_news) == 10: break
-    st.session_state.current_macro_news = unique_news
+            
+    # API 한계 도달 시 메모리 초기화 후 1페이지부터 재시작
+    if not unique_news:
+        st.session_state.eco_start = 1
+        st.session_state.seen_eco = set()
+        batch = get_naver_news(query, display=10, start=1)
+        st.session_state.eco_start = 11
+        for n in (batch or []):
+            unique_news.append(n)
+            st.session_state.seen_eco.add(n['link'])
+            if len(unique_news) == 10: break
+            
+    st.session_state.current_eco_news = unique_news
 
 def fetch_unique_sector_news(sector_name, query):
     if sector_name not in st.session_state.sector_starts:
@@ -241,15 +257,28 @@ def fetch_unique_sector_news(sector_name, query):
         st.session_state.seen_sectors[sector_name] = set()
         
     unique_news = []
-    while len(unique_news) < 10 and st.session_state.sector_starts[sector_name] <= 1000:
+    attempts = 0
+    while len(unique_news) < 10 and st.session_state.sector_starts[sector_name] <= 900 and attempts < 3:
         batch = get_naver_news(query, display=10, start=st.session_state.sector_starts[sector_name])
         st.session_state.sector_starts[sector_name] += 10
+        attempts += 1
         if not batch: break
         for n in batch:
             if n['link'] not in st.session_state.seen_sectors[sector_name]:
                 unique_news.append(n)
                 st.session_state.seen_sectors[sector_name].add(n['link'])
             if len(unique_news) == 10: break
+            
+    if not unique_news:
+        st.session_state.sector_starts[sector_name] = 1
+        st.session_state.seen_sectors[sector_name] = set()
+        batch = get_naver_news(query, display=10, start=1)
+        st.session_state.sector_starts[sector_name] = 11
+        for n in (batch or []):
+            unique_news.append(n)
+            st.session_state.seen_sectors[sector_name].add(n['link'])
+            if len(unique_news) == 10: break
+            
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # --- [제미나이 AI 분석 함수 및 데이터] ---
@@ -337,27 +366,27 @@ for i, (name, data) in enumerate(market_data.items()):
         else: st.metric(label=name, value="데이터 오류")
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 거시 뉴스 & 시장 심리", "📑 섹터별 분석", "⭐️ 내 관심종목", "📁 스크랩북", "⚙️ 데이터 백업/복구"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 경제 뉴스 & 시장 심리", "📑 섹터별 분석", "⭐️ 내 관심종목", "📁 스크랩북", "⚙️ 데이터 백업/복구"])
 
-# [탭 1: 거시 뉴스]
+# [탭 1: 경제 뉴스]
 with tab1:
-    st.subheader("오늘의 핵심 거시 뉴스")
-    macro_query = "증시 시황 OR 글로벌 경제 OR 주식 시장"
+    st.subheader("오늘의 핵심 경제 뉴스")
+    eco_query = "경제 OR 증시 OR 주식 OR 금융"
     
-    if not st.session_state.current_macro_news:
-        fetch_unique_macro_news(macro_query)
+    if not st.session_state.current_eco_news:
+        fetch_unique_eco_news(eco_query)
         
     col_m1, col_m2 = st.columns([4, 1])
     with col_m2:
-        if st.button("🔄 완전히 새로운 뉴스 보기", key="refresh_macro", use_container_width=True):
-            fetch_unique_macro_news(macro_query)
+        if st.button("🔄 완전히 새로운 뉴스 보기", key="refresh_eco", use_container_width=True):
+            fetch_unique_eco_news(eco_query)
             st.session_state.overall_analysis = None
             st.rerun()
 
-    if st.session_state.current_macro_news:
+    if st.session_state.current_eco_news:
         if st.button("🤖 TOP 50 뉴스 기반 시장 브리핑 생성", type="primary"):
             with st.spinner("최근 50개의 핵심 뉴스를 백그라운드에서 수집 및 정밀 분석 중입니다..."):
-                top_50_news = get_naver_news(macro_query, display=50, start=1)
+                top_50_news = get_naver_news(eco_query, display=50, start=1)
                 analysis_text, score = analyze_overall_market(top_50_news)
                 st.session_state.overall_analysis = {"text": analysis_text, "score": score}
                 
@@ -368,7 +397,7 @@ with tab1:
             st.markdown(st.session_state.overall_analysis['text'])
         
         st.markdown("---")
-        for i, news in enumerate(st.session_state.current_macro_news):
+        for i, news in enumerate(st.session_state.current_eco_news):
             st.markdown(f"**{i+1}. [{news['title']}]({news['link']})**")
             st.caption(f"{news['published']} | {news['summary']}")
             if st.button("이 기사 심층 분석", key=f"t1_btn_{news['link']}"):
@@ -384,7 +413,15 @@ with tab1:
 
 # [탭 2: 섹터별 분석]
 with tab2:
-    sectors = {"반도체": "반도체 (삼성전자 OR SK하이닉스 OR 엔비디아)", "2차전지": "2차전지 OR 전기차 OR 배터리", "바이오": "바이오 OR 제약 OR 신약", "금융/밸류업": "은행 OR 금융지주 OR 밸류업", "IT/플랫폼": "네이버 OR 카카오 OR 인공지능", "방산/조선": "조선 OR 방산 OR K방산"}
+    # NCP API의 오류를 방지하기 위해 괄호()를 제거하고 직관적인 OR 연산으로 쿼리 최적화
+    sectors = {
+        "반도체": "반도체 주가 OR 삼성전자 실적 OR SK하이닉스 주가", 
+        "2차전지": "2차전지 주가 OR 전기차 실적 OR 배터리 주가", 
+        "바이오": "바이오 주가 OR 제약 실적 OR 신약", 
+        "금융/밸류업": "금융지주 주가 OR 은행 실적 OR 밸류업", 
+        "IT/플랫폼": "네이버 주가 OR 카카오 실적 OR 인공지능 주식", 
+        "방산/조선": "조선주 실적 OR 방산주 주가 OR K방산"
+    }
     
     col_s1, col_s2 = st.columns([4, 1])
     with col_s1:
@@ -447,13 +484,25 @@ with tab3:
         for p_id, p_name in portfolio:
             st.markdown(f"#### 📌 [{p_name}] 최신 동향")
             
-            # 유의어 사전(계열사 포함)을 적용하여 검색 쿼리 지능적 확장
-            search_keyword = p_name
+            # 유의어 사전(계열사 포함) 추출
+            search_keywords = [p_name]
             if p_name in STOCK_INFO:
-                search_keyword = STOCK_INFO[p_name]["alias"]
+                search_keywords = [k.strip() for k in STOCK_INFO[p_name]["alias"].split(" OR ")]
                 
-            query = f"({search_keyword}) AND (주가 OR 실적 OR 목표가 OR 수주 OR 배당 OR 합병)"
-            port_news = get_naver_news(query, display=3)
+            # NCP API 쿼리 인식 한계의 근본적 해결: 
+            # 1. 아주 단순하게 기업명으로만 넉넉히(30개) 기사를 검색합니다.
+            broad_query = " OR ".join(search_keywords)
+            raw_news = get_naver_news(broad_query, display=30)
+            
+            # 2. 파이썬 내부에서 비즈니스 키워드가 포함된 기사만 강력하게 필터링합니다.
+            business_kws = ["주가", "실적", "목표가", "수주", "배당", "합병", "투자", "인수", "매출", "영업이익"]
+            port_news = []
+            
+            for n in raw_news:
+                if any(b_kw in n['title'] or b_kw in n['summary'] for b_kw in business_kws):
+                    port_news.append(n)
+                if len(port_news) == 3: # 3개만 노출
+                    break
             
             if port_news:
                 for i, news in enumerate(port_news):
@@ -521,8 +570,9 @@ with tab5:
                 
         c.execute("SELECT title, link, summary, analysis, scrap_date FROM scrapbook")
         scrap_list = [{"title": r[0], "link": r[1], "summary": r[2], "analysis": r[3], "scrap_date": r[4]} for r in c.fetchall()]
-        c.execute("SELECT stock_name FROM portfolio")
-        port_list = [r[0] for r in c.fetchall()]
+        
+        c.execute("SELECT stock_name, search_query, ticker FROM portfolio")
+        port_list = [{"stock_name": r[0], "search_query": r[1], "ticker": r[2]} for r in c.fetchall()]
         
         backup_dict = {"scrapbook": scrap_list, "portfolio": port_list}
         json_data = json.dumps(backup_dict, ensure_ascii=False, indent=4)
@@ -552,8 +602,13 @@ with tab5:
                     for item in restore_data.get("scrapbook", []):
                         c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)",
                                   (item['title'], item['link'], item['summary'], item['analysis'], item['scrap_date']))
-                    for name in restore_data.get("portfolio", []):
-                        c.execute("INSERT INTO portfolio (stock_name) VALUES (?)", (name,))
+                    for item in restore_data.get("portfolio", []):
+                        # 구버전 백업 파일 호환성 유지
+                        if isinstance(item, str): 
+                            c.execute("INSERT INTO portfolio (stock_name) VALUES (?)", (item,))
+                        else:
+                            c.execute("INSERT INTO portfolio (stock_name, search_query, ticker) VALUES (?, ?, ?)", 
+                                      (item.get("stock_name"), item.get("search_query"), item.get("ticker")))
                     conn.commit()
                     st.success(f"성공! 최신 백업 파일 [{file_name}] 데이터를 정상적으로 복구했습니다.")
                     st.rerun()
