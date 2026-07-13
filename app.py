@@ -23,7 +23,7 @@ from google import genai
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 # --- [페이지 설정] ---
-st.set_page_config(page_title="Project_2 Economics", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide")
 
 # --- [API 키 설정] ---
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
@@ -416,7 +416,7 @@ def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quanti
 # =======================================================
 # 4. 상단 대시보드 및 UI 구성
 # =======================================================
-st.title("📊 AI 종합 증시 분석 플랫폼")
+st.title("📊 Project2_Stock")
 market_data = get_market_data()
 cols = st.columns(len(market_data))
 for i, (name, data) in enumerate(market_data.items()):
@@ -431,7 +431,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 경제 뉴스 & 시장 심리", "�
 # [탭 1: 경제 뉴스]
 with tab1:
     st.subheader("오늘의 핵심 경제 뉴스")
-    eco_query = "경제|증시|주식|금융|코스피|코스닥"
+    eco_query = "경제|증시|주식|금융|코스피|코스닥|환율|S&P500"
     
     if not st.session_state.current_eco_news:
         fetch_unique_eco_news(eco_query)
@@ -533,7 +533,11 @@ with tab3:
         
         col_p1, col_p2 = st.columns(2)
         with col_p1:
-            avg_price = st.number_input("매수 단가 (원)", min_value=0, value=0, step=100) if is_owned_ui == "실제 보유중" else 0
+            avg_price_str = st.text_input("매수 단가 (원, 쉼표 입력 가능)", value="0") if is_owned_ui == "실제 보유중" else "0"
+            try:
+                avg_price = float(avg_price_str.replace(',', ''))
+            except ValueError:
+                avg_price = 0.0
         with col_p2:
             quantity = st.number_input("보유 수량 (주)", min_value=0, value=0, step=1) if is_owned_ui == "실제 보유중" else 0
             
@@ -626,17 +630,22 @@ with tab3:
                     new_is_owned_ui = st.radio("보유 상태", ["관심종목 (미보유)", "실제 보유중"], index=1 if p_is_owned == 1 else 0)
                     col_e1, col_e2 = st.columns(2)
                     with col_e1:
-                        new_avg_price = st.number_input("매수 단가 (원)", min_value=0.0, value=float(p_avg_price), step=100.0)
+                        new_avg_price_str = st.text_input("매수 단가 (원, 쉼표 입력 가능)", value=f"{int(p_avg_price):,}")
                     with col_e2:
                         new_quantity = st.number_input("보유 수량 (주)", min_value=0, value=int(p_quantity), step=1)
                     
                     if st.form_submit_button("상태 업데이트"):
                         new_is_owned = 1 if new_is_owned_ui == "실제 보유중" else 0
+                        try:
+                            parsed_avg_price = float(new_avg_price_str.replace(',', ''))
+                        except ValueError:
+                            parsed_avg_price = 0.0
+                            
                         if new_is_owned == 0:
-                            new_avg_price = 0.0
+                            parsed_avg_price = 0.0
                             new_quantity = 0
                         c.execute("UPDATE portfolio SET is_owned=?, avg_price=?, quantity=? WHERE id=?", 
-                                  (new_is_owned, float(new_avg_price), int(new_quantity), p_id))
+                                  (new_is_owned, parsed_avg_price, int(new_quantity), p_id))
                         conn.commit()
                         st.rerun()
                         
