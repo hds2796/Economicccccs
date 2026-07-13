@@ -340,10 +340,10 @@ def call_gemini_with_fallback(prompt, is_json=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     models_to_try = [
-        ('gemini-3.5-flash', ''),
+        ('gemini-3.5-flash', '\n\n*(💡 3.5 모델로 작성되었습니다.)*'),
         ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하/오류로 인해 2.5-flash가 우회 적용되었습니다.)*'),
-        ('gemini-3.1-lite', '\n\n*(💡 2.5 모델 과부하/오류로 인해 3.1 Lite가 우회 적용되었습니다.)*'),
-        ('gemini-1.5-flash', '\n\n*(💡 상위 모델들의 연쇄적인 한도 초과로 1.5-flash가 최종 우회 적용되었습니다.)*')
+        ('gemini-3.1-flash-lite', '\n\n*(💡 3.5 및 2.5 모델 과부하/오류로 인해 3.1 Lite가 우회 적용되었습니다.)*'),
+        
     ]
     
     fallback_keywords = ["429", "resource_exhausted", "quota", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
