@@ -1,0 +1,8 @@
+streamlit
+requests
+yfinance
+google-genai
+beautifulsoup4
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
