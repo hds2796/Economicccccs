@@ -591,6 +591,16 @@ with tab3:
             business_kws = ["주가", "실적", "목표가", "수주", "배당", "합병", "투자", "인수", "매출", "영업이익", "전망", "동향", "계약", "신제품", "개발", "수출", "공급", "M&A", "규제"]
             port_news_all = [n for n in raw_news if any(b_kw in n['title'] or b_kw in n['summary'] for b_kw in business_kws)]
             
+            # --- [추가된 Fallback(재검색) 로직] ---
+            # 1차 폴백: 비즈니스 키워드 필터링에 걸리는 뉴스가 아예 없을 경우 일반 뉴스라도 출력 허용
+            if not port_news_all and raw_news:
+                port_news_all = raw_news
+                
+            # 2차 폴백: AI가 만든 유의어(search_query) 자체의 문제로 raw_news가 비어있다면 순수 종목명으로 재검색
+            if not port_news_all:
+                port_news_all = get_naver_news(p_name, display=30)
+            # ------------------------------------
+            
             with col_deep:
                 # TOP 30 기반 심층 분석 버튼 로직
                 if st.button("📊 포트폴리오 심층 진단 (TOP 30)", type="primary", key=f"t3_deep_{p_id}"):
@@ -639,7 +649,7 @@ with tab3:
                     conn.commit()
                     st.success("저장 완료")
             
-            # 개별 기사는 3개만 화면에 노출
+            # 개별 기사는 최대 3개만 화면에 노출
             if port_news_all:
                 for i, news in enumerate(port_news_all[:3]):
                     with st.expander(f"📰 {news['title']}"):
@@ -650,7 +660,7 @@ with tab3:
                         if news['link'] in st.session_state.analysis_results:
                             st.info(st.session_state.analysis_results[news['link']])
             else:
-                st.info(f"'{p_name}' 관련 비즈니스 뉴스가 없습니다.")
+                st.info(f"'{p_name}' 관련 뉴스가 없습니다.")
     else: st.info("등록된 관심종목이 없습니다.")
 
 # [탭 4: 스크랩북]
