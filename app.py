@@ -381,14 +381,24 @@ def get_financial_data(ticker):
         pass
     return fin_data
 
-def analyze_single_news(title, summary):
-    prompt = f"아래 뉴스가 주식 시장에 미칠 영향을 분석하십시오.\n[제목]: {title}\n[요약]: {summary}\n1. 💡 사건 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"
+def analyze_single_news(title, summary, market_data_str):
+    prompt = (f"아래 뉴스가 주식 시장에 미칠 영향을 분석하십시오.\n"
+              f"[현재 실시간 시장 지표]: {market_data_str}\n"
+              f"[제목]: {title}\n[요약]: {summary}\n"
+              f"위 실시간 시장 지표(지수, 환율 등)의 흐름과 뉴스를 연관 지어 다음을 객관적으로 작성하십시오.\n"
+              f"1. 💡 사건 핵심 요약\n2. 📈 시장 파급력 및 현재 지표와의 연관성\n3. 🎯 연관 섹터")
     try: return call_gemini_with_fallback(prompt)
     except Exception as e: return f"분석 오류: {e}"
 
-def analyze_overall_market(news_list):
+def analyze_overall_market(news_list, market_data_str):
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
-    prompt = f"다음 수집된 {len(news_list)}개의 주요 뉴스를 모두 종합하여 현재 증시 방향성을 브리핑하십시오.\n{combined_news}\n\n[양식]\n1. 🌐 거시 환경 종합 요약\n2. ⚖️ 증시 호악재 분석\n3. 💡 주목할 섹터\n\n반드시 마지막 줄에 'SCORE: 숫자' 형태로 시장 심리 지수를 0~100 사이로 기재하십시오."
+    prompt = (f"다음 수집된 {len(news_list)}개의 주요 뉴스와 현재 시장 지표를 종합하여 증시 방향성을 객관적으로 브리핑하십시오.\n"
+              f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
+              f"{combined_news}\n\n[양식]\n"
+              f"1. 🌐 거시 환경 종합 요약 (현재 지수 및 환율 흐름 반영)\n"
+              f"2. ⚖️ 증시 호악재 분석\n"
+              f"3. 💡 주목할 섹터\n\n"
+              f"반드시 마지막 줄에 'SCORE: 숫자' 형태로 시장 심리 지수를 0~100 사이로 기재하십시오.")
     try:
         text = call_gemini_with_fallback(prompt)
         match = re.search(r'SCORE:\s*(\d+)', text)
@@ -396,19 +406,26 @@ def analyze_overall_market(news_list):
         return re.sub(r'SCORE:\s*\d+', '', text).strip(), score
     except Exception as e: return f"분석 오류: {e}", 50
 
-def analyze_sector_news(sector_name, news_list):
+def analyze_sector_news(sector_name, news_list, market_data_str):
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
-    prompt = f"다음 수집된 '{sector_name}' 섹터 관련 {len(news_list)}개의 최신 주요 뉴스를 모두 종합하여 분석하십시오.\n{combined_news}\n\n[양식]\n1. 🏭 섹터 전반적 흐름 요약\n2. 📈 주요 호재 및 악재 요인\n3. 🎯 투자 심리 및 단기 전망"
+    prompt = (f"다음 수집된 '{sector_name}' 섹터 관련 최신 주요 뉴스와 실시간 시장 지표를 종합하여 분석하십시오.\n"
+              f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
+              f"{combined_news}\n\n[양식]\n"
+              f"1. 🏭 섹터 전반적 흐름 요약 (시장 지수와 연계)\n"
+              f"2. 📈 주요 호재 및 악재 요인\n"
+              f"3. 🎯 투자 심리 및 단기 전망")
     try: return call_gemini_with_fallback(prompt)
     except Exception as e: return f"분석 오류: {e}"
 
-def analyze_recommended_stocks(news_list):
+def analyze_recommended_stocks(news_list, market_data_str):
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list[:30]])
-    prompt = (f"다음은 최근 실적 개선, 목표가 상향, 대규모 수주 등과 관련된 시장 핵심 뉴스 30건입니다.\n{combined_news}\n\n"
-              f"위 뉴스를 바탕으로 단기적으로 가장 유망해 보이는 '추천종목 3개'를 선정하십시오.\n\n"
+    prompt = (f"다음은 최근 실적 개선, 목표가 상향, 대규모 수주 등과 관련된 시장 핵심 뉴스 30건과 실시간 지표입니다.\n"
+              f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
+              f"{combined_news}\n\n"
+              f"위 뉴스와 실시간 지표를 바탕으로 단기적으로 가장 유망해 보이는 '추천종목 3개'를 선정하십시오.\n\n"
               f"[양식]\n"
               f"1. 🥇 추천종목 1: [종목명]\n"
-              f"- 선정 근거: (뉴스를 바탕으로 객관적 작성)\n"
+              f"- 선정 근거: (뉴스와 현재 지수 흐름을 바탕으로 객관적 작성)\n"
               f"- 투자 전략: (진입 시점 및 단기 목표가 등)\n\n"
               f"2. 🥈 추천종목 2: [종목명]\n"
               f"- 선정 근거: ...\n"
@@ -419,7 +436,7 @@ def analyze_recommended_stocks(news_list):
     try: return call_gemini_with_fallback(prompt)
     except Exception as e: return f"분석 오류: {e}"
 
-def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price):
+def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str):
     fin_data = get_financial_data(ticker)
         
     user_portfolio_status = "미보유 관심종목 (관망 중)"
@@ -433,15 +450,16 @@ def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quanti
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in top_30_news])
         
     prompt = (f"[{stock_name} 심층 분석 리포트]\n\n"
+              f"[현재 실시간 시장 지표]\n{market_data_str}\n\n"
               f"[사용자 포트폴리오 상태]\n- {user_portfolio_status}\n\n"
               f"[최신 핵심 뉴스 TOP {len(top_30_news)}]\n{combined_news}\n\n"
               f"[현재 재무 상태]\n{fin_data}\n\n"
-              f"위 데이터를 모두 종합하여 다음 양식으로 브리핑을 작성하십시오.\n"
+              f"위 데이터를 모두 종합하여 다음 양식으로 브리핑을 작성하십시오. 실시간 거시 지표와 개별 종목의 현재가를 반드시 연계하여 해석하십시오.\n"
               f"1. 🏢 기업 펀더멘털 및 재무 요약\n"
-              f"2. 🌐 최신 뉴스 파급력 종합 분석\n"
-              f"3. 📊 사용자 맞춤형 포트폴리오 진단 (사용자의 매수 단가, 수량, 현재 수익률을 구체적으로 언급하며 진단할 것)\n"
+              f"2. 🌐 최신 뉴스 및 거시 지표(환율/지수 등) 파급력 종합 분석\n"
+              f"3. 📊 사용자 맞춤형 포트폴리오 진단 (사용자의 매수 단가, 수량, 현재 수익률을 구체적으로 언급하며 진단)\n"
               f"4. 🎯 최종 투자의견 (매수/보유/매도 중 택 1) 및 객관적 근거 제시\n"
-              f"5. 💰 적정 목표가 및 손절가 (객관적 산출 근거를 포함하여 구체적인 가격 제시)")
+              f"5. 💰 적정 목표가 및 손절가 (현재가 대비 객관적 산출 근거를 포함하여 구체적인 가격 제시)")
     try: return call_gemini_with_fallback(prompt)
     except Exception as e: return f"분석 오류: {e}"
 
@@ -450,6 +468,10 @@ def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quanti
 # =======================================================
 st.title("📊 Project2_Stock")
 market_data = get_market_data()
+
+# AI 프롬프트 주입용 실시간 시장 지표 문자열 생성
+market_data_str = ", ".join([f"{k}: {v['current']:,.2f}({v['diff_pct']:+.2f}%)" for k, v in market_data.items() if v.get('current', 0) > 0])
+
 cols = st.columns(len(market_data))
 for i, (name, data) in enumerate(market_data.items()):
     with cols[i]:
@@ -479,7 +501,7 @@ with tab1:
         if st.button("🤖 TOP 50 뉴스 기반 시장 브리핑 생성", type="primary"):
             with st.spinner("최근 50개의 핵심 뉴스를 백그라운드에서 수집 및 정밀 분석 중입니다..."):
                 top_50_news = get_naver_news(eco_query, display=50, start=1)
-                analysis_text, score = analyze_overall_market(top_50_news)
+                analysis_text, score = analyze_overall_market(top_50_news, market_data_str)
                 st.session_state.overall_analysis = {"text": analysis_text, "score": score}
                 
         if st.session_state.overall_analysis:
@@ -506,7 +528,7 @@ with tab1:
                 st.markdown(f"**{i+1}. [{news['title']}]({news['link']})**")
                 st.caption(f"{news['published']} | {news['summary']}")
                 if st.button("이 기사 심층 분석", key=f"t1_btn_{news['link']}"):
-                    st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
+                    st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'], market_data_str)
                 
                 if news['link'] in st.session_state.analysis_results:
                     with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
@@ -526,7 +548,7 @@ with tab2:
         "반도체": "반도체|삼성전자|SK하이닉스", 
         "2차전지": "2차전지|전기차|배터리", 
         "바이오": "바이오|제약|신약", 
-        "금융/밸류업": "금융|은행|밸류업|증권", 
+        "금융/밸류업": "금융|은행|밸류업", 
         "IT/플랫폼": "IT|플랫폼|네이버|카카오|인공지능", 
         "방산/조선": "방산|조선|K방산"
     }
@@ -552,7 +574,7 @@ with tab2:
         if st.button(f"🤖 '{selected_sector}' 섹터 종합 분석 (TOP 20 뉴스 기반)", type="primary"):
             with st.spinner(f"{selected_sector} 섹터 동향을 분석 중입니다..."):
                 top_20_news = get_naver_news(sectors[selected_sector], display=20, start=1)
-                st.session_state[f'sector_summary_{selected_sector}'] = analyze_sector_news(selected_sector, top_20_news)
+                st.session_state[f'sector_summary_{selected_sector}'] = analyze_sector_news(selected_sector, top_20_news, market_data_str)
                 
         if f'sector_summary_{selected_sector}' in st.session_state:
             with st.expander("📊 AI 섹터 종합 브리핑", expanded=True):
@@ -565,7 +587,7 @@ with tab2:
                 with st.expander(f"📰 {news['title']}"):
                     st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
                     if st.button("AI 분석 실행", key=f"t2_btn_{news['link']}"):
-                        st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
+                        st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'], market_data_str)
                     
                     if news['link'] in st.session_state.analysis_results:
                         with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
@@ -596,7 +618,7 @@ with tab3:
                 recent_rec_news = [n for n in fallback_rec_news if is_within_7_days(n['published'])]
             
             if recent_rec_news:
-                st.session_state.today_recommendation = analyze_recommended_stocks(recent_rec_news)
+                st.session_state.today_recommendation = analyze_recommended_stocks(recent_rec_news, market_data_str)
             else:
                 st.warning("분석할 만한 최신 유망 뉴스가 부족합니다.")
     
@@ -715,7 +737,7 @@ with tab4:
                 if st.button("📊 포트폴리오 심층 진단 (TOP 30)", type="primary", key=f"t3_deep_{p_id}"):
                     with st.spinner("실시간 재무 데이터 스크래핑 및 투자 의견 생성 중..."):
                         st.session_state.analysis_results[f"deep_{p_id}"] = analyze_deep_dive(
-                            p_name, p_ticker, port_news_all, p_is_owned, p_avg_price, p_quantity, current_price
+                            p_name, p_ticker, port_news_all, p_is_owned, p_avg_price, p_quantity, current_price, market_data_str
                         )
 
             col_info, col_del = st.columns([5, 1])
@@ -772,7 +794,7 @@ with tab4:
                         st.caption(news['published'])
                         st.write(news['summary'])
                         if st.button("이 개별 뉴스 분석", key=f"t3_btn_{p_id}_{i}"):
-                            st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'])
+                            st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'], market_data_str)
                         
                         if news['link'] in st.session_state.analysis_results:
                             with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
