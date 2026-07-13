@@ -41,6 +41,18 @@ c.execute('''CREATE TABLE IF NOT EXISTS oauth_store (state TEXT, verifier TEXT)'
 c.execute('''CREATE TABLE IF NOT EXISTS oauth_creds (creds TEXT)''')
 conn.commit()
 
+# 기존 포트폴리오 테이블에 신규 컬럼 강제 추가 (스키마 업데이트)
+try:
+    c.execute("ALTER TABLE portfolio ADD COLUMN search_query TEXT")
+except sqlite3.OperationalError:
+    pass
+
+try:
+    c.execute("ALTER TABLE portfolio ADD COLUMN ticker TEXT")
+except sqlite3.OperationalError:
+    pass
+conn.commit()
+
 # =======================================================
 # 1. 보안: 로그인 시스템
 # =======================================================
