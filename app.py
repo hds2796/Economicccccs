@@ -225,15 +225,14 @@ def get_stock_current_price(ticker):
     try:
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
+            # HTML 스크래핑 대신 모바일 전용 JSON API 호출 (UI 변경에 강건함)
             code = code_match.group()
-            url = f"https://finance.naver.com/item/main.naver?code={code}"
+            url = f"https://m.stock.naver.com/api/stock/{code}/basic"
             headers = {'User-Agent': 'Mozilla/5.0'}
             res = requests.get(url, headers=headers, timeout=3)
-            soup = BeautifulSoup(res.text, 'html.parser')
-            
-            price_tag = soup.select_one('.no_today .blind')
-            if price_tag:
-                return float(price_tag.text.replace(',', ''))
+            if res.status_code == 200:
+                data = res.json()
+                return float(data.get('closePrice', '0').replace(',', ''))
                 
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
@@ -356,23 +355,21 @@ def get_financial_data(ticker):
     try:
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
+            # HTML 스크래핑(BeautifulSoup) 제거 및 JSON API 직접 통신 적용
             code = code_match.group()
-            url = f"https://finance.naver.com/item/main.naver?code={code}"
+            url = f"https://m.stock.naver.com/api/stock/{code}/basic"
             headers = {'User-Agent': 'Mozilla/5.0'}
             res = requests.get(url, headers=headers, timeout=3)
-            soup = BeautifulSoup(res.text, 'html.parser')
             
-            market_sum = soup.select_one('#_market_sum')
-            per = soup.select_one('#_per')
-            pbr = soup.select_one('#_pbr')
-            
-            m_str = market_sum.text.strip() + "억원" if market_sum else "N/A"
-            per_str = per.text.strip() + "배" if per else "N/A"
-            pbr_str = pbr.text.strip() + "배" if pbr else "N/A"
-            
-            fin_data = (f"- 시가총액: {m_str}\n"
-                        f"- PER (주가수익비율): {per_str}\n"
-                        f"- PBR (주가순자산비율): {pbr_str}")
+            if res.status_code == 200:
+                data = res.json()
+                market_sum = data.get('marketValue', 'N/A')
+                per = data.get('per', 'N/A')
+                pbr = data.get('pbr', 'N/A')
+                
+                fin_data = (f"- 시가총액: {market_sum}억 원\n"
+                            f"- PER (주가수익비율): {per}배\n"
+                            f"- PBR (주가순자산비율): {pbr}배")
         else:
             info = yf.Ticker(ticker).info
             market_cap = info.get('marketCap', 0)
