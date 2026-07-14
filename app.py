@@ -265,12 +265,10 @@ def get_naver_news(query, display=100, start=1, sort_type="date"):
     url = "https://naverapihub.apigw.ntruss.com/search/v1/news"
     headers = {"X-NCP-APIGW-API-KEY-ID": NAVER_CLIENT_ID, "X-NCP-APIGW-API-KEY": NAVER_CLIENT_SECRET}
     
-    # 💡 핵심 수정: 네이버 API는 '|'(OR) 연산자를 지원하지 않으므로 직접 분리하여 다중 요청
     queries = [q.strip() for q in query.split('|') if q.strip()]
     all_items = []
     now = datetime.now(timezone.utc)
     
-    # 여러 키워드일 경우 요청당 가져올 기사 개수를 균등하게 분배
     per_query_display = max(10, display // len(queries)) if queries else display
     
     for q in queries:
@@ -299,7 +297,6 @@ def get_naver_news(query, display=100, start=1, sort_type="date"):
         except Exception:
             pass
             
-    # 중복 기사 제거 (링크 기준)
     unique_items = []
     seen = set()
     for item in all_items:
@@ -307,9 +304,7 @@ def get_naver_news(query, display=100, start=1, sort_type="date"):
             seen.add(item['link'])
             unique_items.append(item)
             
-    # 💡 가져온 모든 키워드의 기사를 병합한 뒤 시간 역순(가장 최신순)으로 완벽히 재정렬
     unique_items.sort(key=lambda x: x['raw_date'], reverse=True)
-    
     return unique_items[:display]
 
 def is_within_7_days(pub_date_str):
@@ -334,14 +329,11 @@ def fetch_unique_realtime_news(query):
                 st.session_state.seen_realtime.add(n['link'])
             if len(unique_news) == 20: break
             
-    # 뉴스가 3개 이하일 경우 구체적인 경제/시사 관련 용어로 검색어 확장
     if len(unique_news) <= 3:
         st.session_state.realtime_start = 1
         st.session_state.seen_realtime = set()
         try:
             prompt = f"'{query}' 검색어로 최신 뉴스가 3개 이하로 부족합니다. '경제'나 '시사' 같은 카테고리 명칭 대신, 현재 뉴스에 자주 등장하는 구체적인 '경제 관련 핵심 용어'와 '시사 관련 핵심 용어' 5개를 '|' 기호로 연결하여 출력하십시오. (예: 금리|환율|물가|부동산|선거)"
-            
-            # 검색어 확장(양 채우기) 전용 AI 모델 (3.1 Flash Lite) 지정 호출
             client = genai.Client(api_key=GEMINI_API_KEY)
             expanded_query_raw = ""
             for _ in range(2):
@@ -352,8 +344,6 @@ def fetch_unique_realtime_news(query):
                     time.sleep(2)
             
             expanded_query = re.sub(r'[^가-힣a-zA-Z0-9|]', '', expanded_query_raw).strip()
-            
-            # AI가 빈 값을 반환할 경우 최후의 수단(하드코딩) 적용
             if not expanded_query or len(expanded_query) < 2:
                 expanded_query = "금리|환율|물가|수출|부동산"
             
@@ -365,7 +355,6 @@ def fetch_unique_realtime_news(query):
                     st.session_state.seen_realtime.add(n['link'])
                 if len(unique_news) >= 10: break
         except Exception:
-            # AI 호출 자체가 실패하더라도 뉴스가 비지 않도록 안전망 작동
             fallback_query = "금리|환율|물가|수출|부동산"
             batch = get_naver_news(fallback_query, display=20, start=1, sort_type="date")
             st.session_state.realtime_start = 21
@@ -437,16 +426,18 @@ def fetch_unique_sector_news(sector_name, query):
             
     st.session_state.current_sector_news[sector_name] = unique_news
 
-# --- [제미나이 AI 분석 함수 및 예외 처리(Fallback) 로직] ---
+# =======================================================
+# 💡 [핵심 추가] AI 호출 로직: 일반 호출(JSON용) 및 스트리밍 호출(타자기 효과)
+# =======================================================
 def call_gemini_with_fallback(prompt, is_json=False):
     if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     models_to_try = [
         ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
-        ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하/오류로 인해 2.5-flash가 우회 적용되었습니다.)*'),
-        ('gemini-1.5-flash', '\n\n*(💡 2.5 모델 과부하/오류로 인해 1.5-flash가 우회 적용되었습니다.)*'),
-        ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하/오류로 인해 3.1 Flash Lite가 우회 적용되었습니다.)*')
+        ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하로 2.5-flash가 우회 적용되었습니다.)*'),
+        ('gemini-1.5-flash', '\n\n*(💡 2.5 모델 과부하로 1.5-flash가 우회 적용되었습니다.)*'),
+        ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1 Flash Lite가 우회 적용되었습니다.)*')
     ]
     
     fallback_keywords = ["429", "resource_exhausted", "quota", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
@@ -462,76 +453,71 @@ def call_gemini_with_fallback(prompt, is_json=False):
             except Exception as e:
                 error_str = str(e).lower()
                 last_exception = e
-                
-                if "not found" in error_str or "404" in error_str:
-                    break 
-                    
+                if "not found" in error_str or "404" in error_str: break 
                 if any(k in error_str for k in fallback_keywords):
-                    time.sleep(3)
+                    time.sleep(2)
                     continue
-                    
                 break 
-                
-    raise Exception(f"일시적인 API 호출 한도 초과 또는 치명적 오류입니다. 잠시 후 다시 시도하십시오. (에러: {last_exception})")
+    raise Exception(f"API 호출 한도 초과입니다. (에러: {last_exception})")
 
+def call_gemini_stream_with_fallback(prompt):
+    if not GEMINI_API_KEY:
+        yield "Gemini API 키 오류"
+        return
+        
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    models_to_try = ['gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-1.5-flash']
+    
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content_stream(model=model_name, contents=prompt)
+            for chunk in response:
+                if chunk.text:
+                    yield chunk.text
+            return
+        except Exception:
+            continue
+    yield "\n\n일시적인 서버 과부하로 분석을 완료할 수 없습니다. 잠시 후 다시 시도해주세요."
+
+# =======================================================
+# 재무 데이터 및 AI 프롬프트 생성 함수들
+# =======================================================
 def get_financial_data(ticker):
     fin_data = "재무 데이터 조회 불가 (통신 오류 또는 티커 누락)"
     if not ticker: return fin_data
-    
     try:
         code_match = re.search(r'\d{6}', ticker)
-        
         if code_match:
             code = code_match.group()
-            
             try:
                 daum_url = f"https://finance.daum.net/api/quotes/A{code}?summary=false"
-                daum_headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Referer': 'https://finance.daum.net/'
-                }
+                daum_headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.daum.net/'}
                 res = requests.get(daum_url, headers=daum_headers, timeout=3)
                 if res.status_code == 200:
                     data = res.json()
                     market_cap = data.get('marketCap', 0)
                     per = data.get('per', 'N/A')
                     pbr = data.get('pbr', 'N/A')
-                    
                     m_str = f"{market_cap / 100000000:,.0f}억 원" if market_cap else "N/A"
                     per_str = f"{per}배" if per is not None and per != 'N/A' else "N/A"
                     pbr_str = f"{pbr}배" if pbr is not None and pbr != 'N/A' else "N/A"
-                    
-                    return (f"- 시가총액: {m_str}\n"
-                            f"- PER (주가수익비율): {per_str}\n"
-                            f"- PBR (주가순자산비율): {pbr_str}")
-            except:
-                pass
-                
+                    return f"- 시가총액: {m_str}\n- PER: {per_str}\n- PBR: {pbr_str}"
+            except: pass
+            
             try:
                 naver_url = f"https://m.stock.naver.com/api/stock/{code}/basic"
-                naver_headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                    'Referer': 'https://m.stock.naver.com/'
-                }
+                naver_headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://m.stock.naver.com/'}
                 res = requests.get(naver_url, headers=naver_headers, timeout=3)
                 if res.status_code == 200:
                     data = res.json()
-                    market_sum = data.get('marketValue', 'N/A')
-                    per = data.get('per', 'N/A')
-                    pbr = data.get('pbr', 'N/A')
-                    
-                    return (f"- 시가총액: {market_sum}억 원\n"
-                            f"- PER (주가수익비율): {per}배\n"
-                            f"- PBR (주가순자산비율): {pbr}배")
-            except:
-                pass
+                    return f"- 시가총액: {data.get('marketValue', 'N/A')}억 원\n- PER: {data.get('per', 'N/A')}배\n- PBR: {data.get('pbr', 'N/A')}배"
+            except: pass
 
         info = {}
         if code_match:
             code = code_match.group()
             yf_ticker = yf.Ticker(f"{code}.KS")
             info = yf_ticker.info
-            
             if not info or info.get('marketCap') is None:
                 yf_ticker = yf.Ticker(f"{code}.KQ")
                 info = yf_ticker.info
@@ -548,88 +534,69 @@ def get_financial_data(ticker):
         pbr_str = f"{pbr:.2f}배" if isinstance(pbr, (int, float)) else "N/A"
         
         if market_cap_str != "N/A" or per_str != "N/A" or pbr_str != "N/A":
-            fin_data = (f"- 시가총액: {market_cap_str}\n"
-                        f"- PER (주가수익비율): {per_str}\n"
-                        f"- PBR (주가순자산비율): {pbr_str}")
-    except Exception:
-        pass
-        
+            fin_data = f"- 시가총액: {market_cap_str}\n- PER: {per_str}\n- PBR: {pbr_str}"
+    except Exception: pass
     return fin_data
 
-def analyze_single_news(title, summary, market_data_str):
-    prompt = (f"아래 뉴스가 주식 시장에 미칠 영향을 분석하십시오.\n"
-              f"[현재 실시간 시장 지표]: {market_data_str}\n"
-              f"[제목]: {title}\n[요약]: {summary}\n"
-              f"위 실시간 시장 지표(지수, 환율 등)의 흐름과 뉴스를 연관 지어 다음을 객관적으로 작성하십시오.\n"
-              f"1. 💡 사건 핵심 요약\n2. 📈 시장 파급력 및 현재 지표와의 연관성\n3. 🎯 연관 섹터")
-    try: return call_gemini_with_fallback(prompt)
-    except Exception as e: return f"분석 오류: {e}"
+def build_prompt_single_news(title, summary, market_data_str):
+    return (f"아래 뉴스가 주식 시장에 미칠 영향을 분석하십시오.\n"
+            f"[현재 실시간 시장 지표]: {market_data_str}\n"
+            f"[제목]: {title}\n[요약]: {summary}\n"
+            f"위 실시간 시장 지표(지수, 환율 등)의 흐름과 뉴스를 연관 지어 다음을 객관적으로 작성하십시오.\n"
+            f"1. 💡 사건 핵심 요약\n2. 📈 시장 파급력 및 현재 지표와의 연관성\n3. 🎯 연관 섹터")
 
-def analyze_realtime_news(news_list, market_data_str):
+def build_prompt_realtime(news_list, market_data_str):
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
-    prompt = (f"다음은 방금 네이버에 송고된 최신 실시간 경제/시사 뉴스 {len(news_list)}건과 현재 시장 지표입니다.\n"
-              f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
-              f"{combined_news}\n\n[양식]\n"
-              f"1. 🔔 실시간 핵심 이슈 요약 (가장 주목받고 있는 핫이슈 정리)\n"
-              f"2. 📉 경제 및 증시 파급력 (단기적 관점의 영향도)\n"
-              f"3. 🎯 주목해야 할 섹터 및 리스크 요인\n\n"
-              f"※ 뉴스들의 흐름을 관통하는 최신 트렌드를 객관적으로 분석하십시오.")
-    try: return call_gemini_with_fallback(prompt)
-    except Exception as e: return f"분석 오류: {e}"
+    return (f"다음은 방금 네이버에 송고된 최신 실시간 경제/시사 뉴스 {len(news_list)}건과 현재 시장 지표입니다.\n"
+            f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
+            f"{combined_news}\n\n[양식]\n"
+            f"1. 🔔 실시간 핵심 이슈 요약 (가장 주목받고 있는 핫이슈 정리)\n"
+            f"2. 📉 경제 및 증시 파급력 (단기적 관점의 영향도)\n"
+            f"3. 🎯 주목해야 할 섹터 및 리스크 요인\n\n"
+            f"※ 뉴스들의 흐름을 관통하는 최신 트렌드를 객관적으로 분석하십시오.")
 
-def analyze_overall_market(news_list, market_data_str):
+def build_prompt_overall(news_list, market_data_str):
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
-    prompt = (f"다음 수집된 {len(news_list)}개의 주요 뉴스와 현재 시장 지표를 종합하여 증시 방향성을 객관적으로 브리핑하십시오.\n"
-              f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
-              f"{combined_news}\n\n[양식]\n"
-              f"1. 🌐 거시 환경 종합 요약 (현재 지수 및 환율 흐름 반영)\n"
-              f"2. ⚖️ 증시 호악재 분석\n"
-              f"3. 💡 주목할 섹터\n"
-              f"4. 🔮 앞으로 주식시장은? (향후 전망 및 요약 정리)\n\n"
-              f"반드시 마지막 줄에 'SCORE: 숫자' 형태로 시장 심리 지수를 0~100 사이로 기재하십시오.")
-    try:
-        text = call_gemini_with_fallback(prompt)
-        match = re.search(r'SCORE:\s*(\d+)', text)
-        score = int(match.group(1)) if match else 50
-        return re.sub(r'SCORE:\s*\d+', '', text).strip(), score
-    except Exception as e: return f"분석 오류: {e}", 50
+    return (f"다음 수집된 {len(news_list)}개의 주요 뉴스와 현재 시장 지표를 종합하여 증시 방향성을 객관적으로 브리핑하십시오.\n"
+            f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
+            f"{combined_news}\n\n[양식]\n"
+            f"1. 🌐 거시 환경 종합 요약 (현재 지수 및 환율 흐름 반영)\n"
+            f"2. ⚖️ 증시 호악재 분석\n"
+            f"3. 💡 주목할 섹터\n"
+            f"4. 🔮 앞으로 주식시장은? (향후 전망 및 요약 정리)\n\n"
+            f"반드시 마지막 줄에 'SCORE: 숫자' 형태로 시장 심리 지수를 0~100 사이로 기재하십시오.")
 
-def analyze_sector_news(sector_name, news_list, market_data_str):
+def build_prompt_sector(sector_name, news_list, market_data_str):
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
-    prompt = (f"다음 수집된 '{sector_name}' 섹터 관련 최신 주요 뉴스와 실시간 시장 지표를 종합하여 분석하십시오.\n"
-              f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
-              f"{combined_news}\n\n[양식]\n"
-              f"1. 🏭 섹터 전반적 흐름 요약 (시장 지수와 연계)\n"
-              f"2. 📈 주요 호재 및 악재 요인\n"
-              f"3. 🎯 투자 심리 및 단기 전망")
-    try: return call_gemini_with_fallback(prompt)
-    except Exception as e: return f"분석 오류: {e}"
+    return (f"다음 수집된 '{sector_name}' 섹터 관련 최신 주요 뉴스와 실시간 시장 지표를 종합하여 분석하십시오.\n"
+            f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
+            f"{combined_news}\n\n[양식]\n"
+            f"1. 🏭 섹터 전반적 흐름 요약 (시장 지수와 연계)\n"
+            f"2. 📈 주요 호재 및 악재 요인\n"
+            f"3. 🎯 투자 심리 및 단기 전망")
 
-def analyze_recommended_stocks(news_list, market_data_str, investment_horizon):
+def build_prompt_recommend(news_list, market_data_str, investment_horizon):
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list[:30]])
-    prompt = (f"다음은 최근 시장 핵심 뉴스 30건과 실시간 지표입니다.\n"
-              f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
-              f"{combined_news}\n\n"
-              f"위 뉴스와 실시간 지표를 바탕으로, 사용자가 설정한 투자 기간인 '{investment_horizon}'에 최적화된 기준(단기: 모멘텀/수주, 중기: 실적/사이클, 중장기/장기: 구조적 성장/가치/배당 등)을 엄격히 적용하여 가장 유망한 '추천종목 3개'를 선정하십시오.\n\n"
-              f"[양식]\n"
-              f"1. 🥇 추천종목 1: [종목명]\n"
-              f"- 선정 근거: (뉴스와 현재 지수 흐름을 바탕으로 {investment_horizon} 관점에서 객관적 작성)\n"
-              f"- 투자 전략: (진입 시점 및 비중 등)\n"
-              f"- 💰 목표가: [구체적 가격] / 손절가: [구체적 가격]\n\n"
-              f"2. 🥈 추천종목 2: [종목명]\n"
-              f"- 선정 근거: ...\n"
-              f"- 투자 전략: ...\n"
-              f"- 💰 목표가: ... / 손절가: ...\n\n"
-              f"3. 🥉 추천종목 3: [종목명]\n"
-              f"- 선정 근거: ...\n"
-              f"- 투자 전략: ...\n"
-              f"- 💰 목표가: ... / 손절가: ...")
-    try: return call_gemini_with_fallback(prompt)
-    except Exception as e: return f"분석 오류: {e}"
+    return (f"다음은 최근 시장 핵심 뉴스 30건과 실시간 지표입니다.\n"
+            f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
+            f"{combined_news}\n\n"
+            f"위 뉴스와 실시간 지표를 바탕으로, 사용자가 설정한 투자 기간인 '{investment_horizon}'에 최적화된 기준을 엄격히 적용하여 가장 유망한 '추천종목 3개'를 선정하십시오.\n\n"
+            f"[양식]\n"
+            f"1. 🥇 추천종목 1: [종목명]\n"
+            f"- 선정 근거: (뉴스와 현재 지수 흐름을 바탕으로 {investment_horizon} 관점에서 객관적 작성)\n"
+            f"- 투자 전략: (진입 시점 및 비중 등)\n"
+            f"- 💰 목표가: [구체적 가격] / 손절가: [구체적 가격]\n\n"
+            f"2. 🥈 추천종목 2: [종목명]\n"
+            f"- 선정 근거: ...\n"
+            f"- 투자 전략: ...\n"
+            f"- 💰 목표가: ... / 손절가: ...\n\n"
+            f"3. 🥉 추천종목 3: [종목명]\n"
+            f"- 선정 근거: ...\n"
+            f"- 투자 전략: ...\n"
+            f"- 💰 목표가: ... / 손절가: ...")
 
-def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str):
+def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str):
     fin_data = get_financial_data(ticker)
-        
     user_portfolio_status = "미보유 관심종목 (관망 중)"
     if is_owned == 1:
         roi = ((current_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
@@ -640,21 +607,19 @@ def analyze_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quanti
     top_30_news = news_list[:30]
     combined_news = "\n".join([f"- {n['title']} : {n['summary']}" for n in top_30_news])
         
-    prompt = (f"[{stock_name} 심층 분석 리포트]\n\n"
-              f"[현재 실시간 시장 지표]\n{market_data_str}\n\n"
-              f"[사용자 포트폴리오 상태]\n- {user_portfolio_status}\n\n"
-              f"[최신 핵심 뉴스 TOP {len(top_30_news)}]\n{combined_news}\n\n"
-              f"[현재 재무 상태]\n{fin_data}\n\n"
-              f"위 데이터를 모두 종합하여 다음 양식으로 브리핑을 작성하십시오. 실시간 거시 지표와 개별 종목의 현재가를 반드시 연계하여 해석하십시오.\n"
-              f"1. 🏢 기업 펀더멘털 및 재무 요약\n"
-              f"2. 🌐 최신 뉴스 및 거시 지표(환율/지수 등) 파급력 종합 분석\n"
-              f"3. 📊 사용자 맞춤형 포트폴리오 진단 (사용자의 매수 단가, 수량, 현재 수익률을 구체적으로 언급하며 진단)\n"
-              f"4. 🎯 최종 투자의견 (매수/보유/매도 중 택 1) 및 객관적 근거 제시\n"
-              f"5. 💰 적정 목표가 및 손절가 (현재가 대비 객관적 산출 근거를 포함하여 구체적인 가격 제시)\n"
-              f"6. 👥 동종 업계(Peer Group) 비교 (국내외 주요 경쟁사 1~2곳과 비교한 강약점 및 밸류에이션 평가)\n\n"
-              f"※ 중요: 반드시 리포트 맨 마지막 줄에 'TARGET_PRICE: 숫자' 형태로 단기 목표가격을 숫자로만 기재하십시오. (예: TARGET_PRICE: 85000)")
-    try: return call_gemini_with_fallback(prompt)
-    except Exception as e: return f"분석 오류: {e}"
+    return (f"[{stock_name} 심층 분석 리포트]\n\n"
+            f"[현재 실시간 시장 지표]\n{market_data_str}\n\n"
+            f"[사용자 포트폴리오 상태]\n- {user_portfolio_status}\n\n"
+            f"[최신 핵심 뉴스 TOP {len(top_30_news)}]\n{combined_news}\n\n"
+            f"[현재 재무 상태]\n{fin_data}\n\n"
+            f"위 데이터를 모두 종합하여 다음 양식으로 브리핑을 작성하십시오. 실시간 거시 지표와 개별 종목의 현재가를 반드시 연계하여 해석하십시오.\n"
+            f"1. 🏢 기업 펀더멘털 및 재무 요약\n"
+            f"2. 🌐 최신 뉴스 및 거시 지표 파급력 종합 분석\n"
+            f"3. 📊 사용자 맞춤형 포트폴리오 진단 (사용자의 매수 단가, 수량, 현재 수익률 언급)\n"
+            f"4. 🎯 최종 투자의견 (매수/보유/매도 중 택 1) 및 객관적 근거 제시\n"
+            f"5. 💰 적정 목표가 및 손절가 (현재가 대비 객관적 산출 근거를 포함하여 구체적인 가격 제시)\n"
+            f"6. 👥 동종 업계(Peer Group) 비교\n\n"
+            f"※ 중요: 반드시 리포트 맨 마지막 줄에 'TARGET_PRICE: 숫자' 형태로 단기 목표가격을 숫자로만 기재하십시오. (예: TARGET_PRICE: 85000)")
 
 # =======================================================
 # 4. 상단 대시보드 및 UI 구성
@@ -679,7 +644,6 @@ with tab1:
     st.subheader("📰 실시간 경제·시사 뉴스 분석")
     st.write("네이버 뉴스에 방금 송고된 최신 경제, 시사, 정치 기사를 실시간(최신순)으로 수집하고 트렌드를 분석합니다.")
     
-    # 네이버 API 쿼리 길이 제한 우회: 핵심 키워드를 7개로 소폭 확장
     realtime_query = "증시|금융|환율|물가|부동산|정책|수출"
     
     if not st.session_state.current_realtime_news:
@@ -688,7 +652,6 @@ with tab1:
     col_r1, col_r2 = st.columns([4, 1])
     with col_r2:
         if st.button("🔄 실시간 뉴스 갱신", key="refresh_realtime", use_container_width=True):
-            # 실시간 갱신 시 과거 페이지를 불러오지 않도록 인덱스 및 캐시를 완전히 초기화
             st.session_state.realtime_start = 1
             st.session_state.seen_realtime = set()
             get_naver_news.clear()
@@ -698,9 +661,23 @@ with tab1:
 
     if st.session_state.current_realtime_news:
         if st.button("🤖 실시간 뉴스 TOP 20 기반 종합 분석", type="primary", use_container_width=True):
-            with st.spinner("방금 올라온 최신 뉴스 20개를 바탕으로 실시간 트렌드를 분석 중입니다..."):
-                top_20_realtime = st.session_state.current_realtime_news[:20]
-                st.session_state.realtime_analysis = analyze_realtime_news(top_20_realtime, market_data_str)
+            my_bar = st.progress(0, text="진행률: 0% (대기 중...)")
+            my_bar.progress(30, text="진행률: 30% (실시간 최신 뉴스 20건 수집 중...)")
+            
+            top_20_realtime = st.session_state.current_realtime_news[:20]
+            prompt = build_prompt_realtime(top_20_realtime, market_data_str)
+            
+            my_bar.progress(80, text="진행률: 80% (AI 실시간 분석 및 리포트 작성 중...)")
+            st.markdown("### 🤖 실시간 AI 브리핑 작성 중...")
+            
+            full_response = st.write_stream(call_gemini_stream_with_fallback(prompt))
+            
+            my_bar.progress(100, text="진행률: 100% (분석 완료!)")
+            time.sleep(1)
+            my_bar.empty()
+            
+            st.session_state.realtime_analysis = full_response
+            st.rerun()
                 
         if st.session_state.realtime_analysis:
             with st.expander("📊 AI 실시간 시황 종합 브리핑", expanded=True):
@@ -721,7 +698,9 @@ with tab1:
                     st.caption(f"{news['published']}")
                     st.write(news['summary'])
                     if st.button("이 기사 심층 분석", key=f"tr_btn_{news['link']}"):
-                        st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'], market_data_str)
+                        with st.spinner("기사 내용 분석 중..."):
+                            prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
+                            st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                     
                     if news['link'] in st.session_state.analysis_results:
                         with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
@@ -739,7 +718,6 @@ with tab2:
     st.subheader("오늘의 핵심 경제 뉴스")
     st.write("주식 시장과 연관성이 높은 핵심 경제 기사를 정확도순으로 수집합니다.")
     
-    # 네이버 API 쿼리 길이 제한 우회: 핵심 키워드를 7개로 소폭 확장
     eco_query = "경제|증시|주식|코스피|코스닥|금리|실적"
     
     if not st.session_state.current_eco_news:
@@ -754,11 +732,30 @@ with tab2:
 
     if st.session_state.current_eco_news:
         if st.button("🤖 TOP 50 뉴스 기반 시장 브리핑 생성", type="primary"):
-            with st.spinner("최근 50개의 핵심 뉴스를 백그라운드에서 수집 및 정밀 분석 중입니다..."):
-                top_50_news = get_naver_news(eco_query, display=50, start=1, sort_type="sim")
-                analysis_text, score = analyze_overall_market(top_50_news, market_data_str)
-                st.session_state.overall_analysis = {"text": analysis_text, "score": score}
-                
+            my_bar = st.progress(0, text="진행률: 0% (대기 중...)")
+            
+            my_bar.progress(30, text="진행률: 30% (핵심 뉴스 50건 스크래핑 중...)")
+            top_50_news = get_naver_news(eco_query, display=50, start=1, sort_type="sim")
+            
+            my_bar.progress(70, text="진행률: 70% (데이터 정제 및 프롬프트 준비 중...)")
+            prompt = build_prompt_overall(top_50_news, market_data_str)
+            
+            my_bar.progress(90, text="진행률: 90% (AI 실시간 리포트 작성 중...)")
+            st.markdown("### 🤖 실시간 AI 브리핑 작성 중...")
+            
+            full_response = st.write_stream(call_gemini_stream_with_fallback(prompt))
+            
+            my_bar.progress(100, text="진행률: 100% (분석 완료!)")
+            time.sleep(1)
+            my_bar.empty()
+            
+            match = re.search(r'SCORE:\s*(\d+)', full_response)
+            score = int(match.group(1)) if match else 50
+            clean_text = re.sub(r'SCORE:\s*\d+', '', full_response).strip()
+            
+            st.session_state.overall_analysis = {"text": clean_text, "score": score}
+            st.rerun()
+                 
         if st.session_state.overall_analysis:
             score = st.session_state.overall_analysis['score']
             
@@ -783,8 +780,11 @@ with tab2:
                     st.markdown(f"[원문 읽기]({news['link']})")
                     st.caption(f"{news['published']}")
                     st.write(news['summary'])
+                    
                     if st.button("이 기사 심층 분석", key=f"t1_btn_{news['link']}"):
-                        st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'], market_data_str)
+                        with st.spinner("기사 내용 분석 중..."):
+                            prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
+                            st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                     
                     if news['link'] in st.session_state.analysis_results:
                         with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
@@ -827,10 +827,25 @@ with tab3:
     
     if sector_news:
         if st.button(f"🤖 '{selected_sector}' 섹터 종합 분석 (TOP 20 뉴스 기반)", type="primary"):
-            with st.spinner(f"{selected_sector} 섹터 동향을 분석 중입니다..."):
-                top_20_news = get_naver_news(sectors[selected_sector], display=20, start=1, sort_type="sim")
-                st.session_state[f'sector_summary_{selected_sector}'] = analyze_sector_news(selected_sector, top_20_news, market_data_str)
-                
+            my_bar = st.progress(0, text="진행률: 0% (대기 중...)")
+            
+            my_bar.progress(30, text=f"진행률: 30% ({selected_sector} 뉴스 스크래핑 중...)")
+            top_20_news = get_naver_news(sectors[selected_sector], display=20, start=1, sort_type="sim")
+            
+            prompt = build_prompt_sector(selected_sector, top_20_news, market_data_str)
+            
+            my_bar.progress(80, text="진행률: 80% (AI 실시간 분석 및 리포트 작성 중...)")
+            st.markdown(f"### 🤖 [{selected_sector}] 실시간 AI 브리핑 작성 중...")
+            
+            full_response = st.write_stream(call_gemini_stream_with_fallback(prompt))
+            
+            my_bar.progress(100, text="진행률: 100% (분석 완료!)")
+            time.sleep(1)
+            my_bar.empty()
+            
+            st.session_state[f'sector_summary_{selected_sector}'] = full_response
+            st.rerun()
+            
         if f'sector_summary_{selected_sector}' in st.session_state:
             with st.expander("📊 AI 섹터 종합 브리핑", expanded=True):
                 st.write(st.session_state[f'sector_summary_{selected_sector}'])
@@ -842,7 +857,9 @@ with tab3:
                 with st.expander(f"📰 {news['title']}"):
                     st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
                     if st.button("AI 분석 실행", key=f"t2_btn_{news['link']}"):
-                        st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'], market_data_str)
+                        with st.spinner("분석 중..."):
+                            prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
+                            st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                     
                     if news['link'] in st.session_state.analysis_results:
                         with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
@@ -867,19 +884,35 @@ with tab4:
     )
     
     if st.button(f"🚀 {investment_horizon.split(' ')[0]} 맞춤 추천종목 발굴 실행", type="primary", use_container_width=True):
-        with st.spinner(f"'{investment_horizon}' 관점의 유망 종목 관련 최신 뉴스를 수집 및 분석 중입니다..."):
-            rec_query = "특징주|목표가|수주|흑자|실적"
-            rec_news = get_naver_news(rec_query, display=50, start=1, sort_type="sim")
-            recent_rec_news = [n for n in rec_news if is_within_7_days(n['published'])]
+        my_bar = st.progress(0, text="진행률: 0% (대기 중...)")
+        
+        my_bar.progress(30, text="진행률: 30% (시장의 최신 핵심 뉴스 스크래핑 중...)")
+        rec_query = "특징주|목표가|수주|흑자|실적"
+        rec_news = get_naver_news(rec_query, display=50, start=1, sort_type="sim")
+        recent_rec_news = [n for n in rec_news if is_within_7_days(n['published'])]
+        
+        if not recent_rec_news:
+            fallback_rec_news = get_naver_news("주식 추천|특징주", display=50, start=1, sort_type="sim")
+            recent_rec_news = [n for n in fallback_rec_news if is_within_7_days(n['published'])]
+        
+        if recent_rec_news:
+            my_bar.progress(70, text=f"진행률: 70% ({investment_horizon.split(' ')[0]} 관점 데이터 필터링 및 프롬프트 준비 중...)")
+            prompt = build_prompt_recommend(recent_rec_news, market_data_str, investment_horizon)
             
-            if not recent_rec_news:
-                fallback_rec_news = get_naver_news("주식 추천|특징주", display=50, start=1, sort_type="sim")
-                recent_rec_news = [n for n in fallback_rec_news if is_within_7_days(n['published'])]
+            my_bar.progress(90, text="진행률: 90% (AI 추천 알고리즘 가동 및 종목 발굴 중...)")
+            st.markdown(f"### 🤖 {investment_horizon.split(' ')[0]} AI 맞춤 추천종목 발굴 중...")
             
-            if recent_rec_news:
-                st.session_state.today_recommendation = analyze_recommended_stocks(recent_rec_news, market_data_str, investment_horizon)
-            else:
-                st.warning("분석할 만한 최신 유망 뉴스가 부족합니다.")
+            full_response = st.write_stream(call_gemini_stream_with_fallback(prompt))
+            
+            my_bar.progress(100, text="진행률: 100% (발굴 완료!)")
+            time.sleep(1)
+            my_bar.empty()
+            
+            st.session_state.today_recommendation = full_response
+            st.rerun()
+        else:
+            my_bar.empty()
+            st.warning("분석할 만한 최신 유망 뉴스가 부족합니다.")
     
     if st.session_state.get('today_recommendation'):
         with st.expander("🎯 AI 맞춤 추천종목 리포트 보기", expanded=True):
@@ -912,11 +945,10 @@ with tab5:
         
         if submitted and new_stock.strip():
             with st.spinner(f"AI가 '{new_stock.strip()}'의 종목 코드와 연관 검색어를 분석 중입니다..."):
-                prompt = f"""사용자가 한국 주식 '{new_stock.strip()}'을 관심종목에 추가했습니다.
+                prompt = f"""사용자가 한국 주식 '{new_stock.strip()}'을 관심종목에 추가했습니다. 
                 1. 야후 파이낸스 티커: 코스피는 '6자리숫자.KS', 코스닥은 '6자리숫자.KQ'. (모르면 빈 문자열 "")
-                2. 검색어: 뉴스 검색 시 유용한 핵심 계열사, 지주사, 자회사, 대표 브랜드, 영문명 등 종목과 관련된 폭넓은 유의어 포함 (예: {new_stock.strip()} OR 영문명 OR 지주사명 OR 주요자회사)
-                반드시 아래 JSON 형식으로만 답변하세요.
-                {{"ticker": "005930.KS", "search_query": "{new_stock.strip()} OR 유의어"}}"""
+                2. 검색어: 뉴스 검색 시 유용한 핵심 계열사, 지주사, 자회사, 대표 브랜드, 영문명 등 종목과 관련된 폭넓은 유의어 포함
+                반드시 아래 JSON 형식으로만 답변하세요. {{"ticker": "005930.KS", "search_query": "{new_stock.strip()} OR 유의어"}}"""
                 
                 ticker = ""
                 search_query = new_stock.strip()
@@ -951,6 +983,7 @@ with tab5:
                 st.markdown(f"#### 📌 [{p_name}]")
                 
             start_idx = st.session_state.port_starts.get(p_id, 1)
+            
             with col_refresh:
                 if st.button("🔄 새 뉴스 보기", key=f"ref_port_{p_id}", use_container_width=True):
                     st.session_state.port_starts[p_id] = 1
@@ -958,7 +991,6 @@ with tab5:
                     st.rerun()
             
             current_price = get_stock_current_price(p_ticker or p_name)
-            
             search_keywords = [k.strip() for k in (p_query or p_name).split(" OR ")]
             broad_query = "|".join(search_keywords)
             raw_news = get_naver_news(broad_query, display=100, start=start_idx, sort_type="date") 
@@ -997,10 +1029,22 @@ with tab5:
             
             with col_deep:
                 if st.button("📊 포트폴리오 심층 진단 (TOP 30)", type="primary", key=f"t3_deep_{p_id}"):
-                    with st.spinner("실시간 재무 데이터 스크래핑 및 투자 의견 생성 중..."):
-                        st.session_state.analysis_results[f"deep_{p_id}"] = analyze_deep_dive(
-                            p_name, p_ticker, port_news_all, p_is_owned, p_avg_price, p_quantity, current_price, market_data_str
-                        )
+                    my_bar = st.progress(0, text="진행률: 0% (대기 중...)")
+                    
+                    my_bar.progress(30, text="진행률: 30% (실시간 재무 데이터 스크래핑 중...)")
+                    prompt = build_prompt_deep_dive(p_name, p_ticker, port_news_all, p_is_owned, p_avg_price, p_quantity, current_price, market_data_str)
+                    
+                    my_bar.progress(80, text="진행률: 80% (AI 실시간 분석 및 리포트 작성 중...)")
+                    st.markdown(f"### 🤖 [{p_name}] AI 심층 진단 작성 중...")
+                    
+                    full_response = st.write_stream(call_gemini_stream_with_fallback(prompt))
+                    
+                    my_bar.progress(100, text="진행률: 100% (진단 완료!)")
+                    time.sleep(1)
+                    my_bar.empty()
+                    
+                    st.session_state.analysis_results[f"deep_{p_id}"] = full_response
+                    st.rerun()
 
             col_info, col_del = st.columns([5, 1])
             with col_info:
@@ -1057,7 +1101,7 @@ with tab5:
                         st.success("저장 완료. '스크랩북' 탭에서 AI 목표가 적중률을 확인할 수 있습니다.")
             
             if is_ai_picked:
-                st.caption("✨ 직접적인 비즈니스 키워드가 포함된 뉴스가 없어 AI가 선별한 최근 7일 내 주요 뉴스입니다.")
+                st.caption("✨ 직접적인 비즈니스 키워드가 포함된 뉴스가 없어 AI가 선별한 최근 주요 뉴스입니다.")
                 
             if port_news_all:
                 for i, news in enumerate(port_news_all[:10]):
@@ -1065,7 +1109,9 @@ with tab5:
                         st.caption(news['published'])
                         st.write(news['summary'])
                         if st.button("이 개별 뉴스 분석", key=f"t3_btn_{p_id}_{i}"):
-                            st.session_state.analysis_results[news['link']] = analyze_single_news(news['title'], news['summary'], market_data_str)
+                            with st.spinner("분석 중..."):
+                                prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
+                                st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                         
                         if news['link'] in st.session_state.analysis_results:
                             with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
@@ -1082,10 +1128,8 @@ with tab6:
     for s_id, s_title, s_link, s_summary, s_analysis, s_date, s_name, s_ticker, s_saved_price, s_target_price in scraps:
         with st.expander(f"[{s_date}] {s_title}"):
             
-            # 💡 티커가 비어있어도 종목명과 타겟 프라이스가 있으면 추적 기능이 렌더링되도록 조건 완화
             if s_name and s_target_price > 0:
                 current_price = get_stock_current_price(s_ticker or s_name)
-                
                 actual_roi = ((current_price - s_saved_price) / s_saved_price) * 100 if s_saved_price > 0 else 0
                 achievement_rate = (current_price / s_target_price) * 100 if s_target_price > 0 else 0
                 
