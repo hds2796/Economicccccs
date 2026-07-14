@@ -260,16 +260,57 @@ def clean_html(raw_html):
     return BeautifulSoup(raw_html, "html.parser").get_text()
 
 @st.cache_data(ttl=300)
-def get_naver_news(query, display=10, start=1, sort_type="sim"):
+def get_naver_news(query, display=100, start=1, sort_type="date"):
     if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET: return []
     url = "https://naverapihub.apigw.ntruss.com/search/v1/news"
     headers = {"X-NCP-APIGW-API-KEY-ID": NAVER_CLIENT_ID, "X-NCP-APIGW-API-KEY": NAVER_CLIENT_SECRET}
-    params = {"query": query, "display": display, "start": start, "sort": sort_type, "format": "json"}
     
-    response = requests.get(url, headers=headers, params=params)
-    if response.status_code == 200:
-        return [{"title": clean_html(i['title']), "link": i['link'], "summary": clean_html(i['description']), "published": i['pubDate']} for i in response.json().get("items", [])]
-    return []
+    # 💡 핵심 수정: 네이버 API는 '|'(OR) 연산자를 지원하지 않으므로 직접 분리하여 다중 요청
+    queries = [q.strip() for q in query.split('|') if q.strip()]
+    all_items = []
+    now = datetime.now(timezone.utc)
+    
+    # 여러 키워드일 경우 요청당 가져올 기사 개수를 균등하게 분배
+    per_query_display = max(10, display // len(queries)) if queries else display
+    
+    for q in queries:
+        params = {"query": q, "display": per_query_display, "start": start, "sort": sort_type, "format": "json"}
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=3)
+            if response.status_code == 200:
+                for i in response.json().get("items", []):
+                    pub_date_str = i['pubDate']
+                    try:
+                        dt = parsedate_to_datetime(pub_date_str)
+                        kst = timezone(timedelta(hours=9))
+                        pub_date_formatted = dt.astimezone(kst).strftime("%Y-%m-%d %H:%M")
+                        raw_date = dt
+                    except Exception:
+                        pub_date_formatted = pub_date_str
+                        raw_date = now
+                        
+                    all_items.append({
+                        "title": clean_html(i['title']), 
+                        "link": i['link'], 
+                        "summary": clean_html(i['description']), 
+                        "published": pub_date_formatted,
+                        "raw_date": raw_date
+                    })
+        except Exception:
+            pass
+            
+    # 중복 기사 제거 (링크 기준)
+    unique_items = []
+    seen = set()
+    for item in all_items:
+        if item['link'] not in seen:
+            seen.add(item['link'])
+            unique_items.append(item)
+            
+    # 💡 가져온 모든 키워드의 기사를 병합한 뒤 시간 역순(가장 최신순)으로 완벽히 재정렬
+    unique_items.sort(key=lambda x: x['raw_date'], reverse=True)
+    
+    return unique_items[:display]
 
 def is_within_7_days(pub_date_str):
     try:
