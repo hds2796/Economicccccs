@@ -911,20 +911,24 @@ with tab5:
             start_idx = st.session_state.port_starts.get(p_id, 1)
             with col_refresh:
                 if st.button("🔄 새 뉴스 보기", key=f"ref_port_{p_id}", use_container_width=True):
-                    st.session_state.port_starts[p_id] = start_idx + 50
+                    st.session_state.port_starts[p_id] = 1
+                    get_naver_news.clear()
                     st.rerun()
             
-            current_price = get_stock_current_price(p_ticker)
+            current_price = get_stock_current_price(p_ticker or p_name)
             
             search_keywords = [k.strip() for k in (p_query or p_name).split(" OR ")]
             broad_query = "|".join(search_keywords)
-            raw_news = get_naver_news(broad_query, display=50, start=start_idx, sort_type="sim") 
+            raw_news = get_naver_news(broad_query, display=100, start=start_idx, sort_type="sim") 
+            
+            now = datetime.now(timezone.utc)
+            raw_news = [n for n in raw_news if (now - n.get('raw_date', now)) <= timedelta(hours=24)]
+            raw_news.sort(key=lambda x: x.get('raw_date', now), reverse=True)
             
             if not raw_news:
                 st.session_state.port_starts[p_id] = 1
-                raw_news = get_naver_news(broad_query, display=50, start=1, sort_type="sim")
-            
-            raw_news = [n for n in raw_news if is_within_7_days(n['published'])]
+                raw_news_fallback = get_naver_news(broad_query, display=100, start=1, sort_type="date")
+                raw_news = [n for n in raw_news_fallback if (now - n.get('raw_date', now)) <= timedelta(hours=24)]
             
             business_kws = ["주가", "실적", "목표가", "수주", "배당", "합병", "투자", "인수", "매출", "영업이익", "전망", "동향", "계약", "신제품", "개발", "수출", "공급", "M&A", "규제"]
             port_news_all = [n for n in raw_news if any(b_kw in n['title'] or b_kw in n['summary'] for b_kw in business_kws)]
