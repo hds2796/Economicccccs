@@ -341,7 +341,7 @@ def fetch_unique_realtime_news(query):
                     expanded_query_raw = client.models.generate_content(model='gemini-3.1-flash-lite', contents=prompt).text
                     break
                 except Exception:
-                    time.sleep(2)
+                    time.sleep(1)
             
             expanded_query = re.sub(r'[^가-힣a-zA-Z0-9|]', '', expanded_query_raw).strip()
             if not expanded_query or len(expanded_query) < 2:
@@ -427,7 +427,7 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# 💡 [정상화 완료] AI 호출 (무한 로딩 방지 패치)
+# 💡 [정상화 완료] AI 호출 (일일 한도 초과 시 즉각 에러 반환)
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False):
     if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
@@ -903,7 +903,7 @@ with tab3:
 # [탭 4: 오늘의 추천종목]
 with tab4:
     st.subheader("🎯 AI 오늘의 맞춤 추천종목 발굴")
-    st.write("시장 최신 뉴스를 분석하여 설정한 투자 기간의 특성에 부합하는 가장 유망한 종목 3가지를 추천합니다. (목표가 및 손절가 포함)")
+    st.write("시장 최신 뉴스를 분석하여 설정한 투자 기간의 특성에 부합하는 가장 유망한 종목 3가지를 추천합니다.")
     
     investment_horizon = st.radio(
         "희망 투자 기간 설정", 
@@ -945,48 +945,54 @@ with tab4:
     if st.session_state.get('today_recommendation'):
         raw_report = st.session_state.today_recommendation
         
-        # UI 화면에는 백그라운드 추적용 데이터 포맷([TRACKING_DATA])을 가리고 출력함
-        display_report = raw_report.split("[TRACKING_DATA]")[0].strip() if "[TRACKING_DATA]" in raw_report else raw_report
-        
-        with st.expander("🎯 AI 맞춤 추천종목 리포트 보기", expanded=True):
-            st.write(display_report)
+        # --- [추가된 기능] 개별 종목 스크랩 및 관심종목 자동 등록 ---
+        if "[TRACKING_DATA]" in raw_report:
+            parts = raw_report.split("[TRACKING_DATA]")
+            display_report = parts[0].strip()
+            tracking_lines = parts[1].strip().split('\n')
             
-            if st.button("💾 추천종목 리포트 전체 스크랩 (목표가 추적 시작)", key="scrap_rec"):
-                if "[TRACKING_DATA]" in raw_report:
-                    parts = raw_report.split("[TRACKING_DATA]")
-                    clean_report = parts[0].strip()
-                    tracking_lines = parts[1].strip().split('\n')
+            with st.expander("🎯 AI 맞춤 추천종목 리포트 보기", expanded=True):
+                st.write(display_report)
+                
+            st.markdown("### 📌 찜하기 (스크랩 및 관심종목 자동 등록)")
+            st.caption("버튼을 누르면 스크랩북에 개별 저장되고, 내 관심종목(탭 5)에 미보유 상태로 추가됩니다.")
+            
+            cols = st.columns(3)
+            idx = 0
+            for line in tracking_lines:
+                data = line.split('|')
+                if len(data) >= 4:
+                    s_name = data[0].strip()
+                    s_ticker = data[1].strip()
+                    try:
+                        t_price = float(re.sub(r'[^\d.]', '', data[3]))
+                    except:
+                        t_price = 0.0
                     
-                    saved_count = 0
-                    for line in tracking_lines:
-                        data = line.split('|')
-                        if len(data) >= 4:
-                            s_name = data[0].strip()
-                            s_ticker = data[1].strip()
-                            try:
-                                # 수정: AI가 생성한 가격 데이터를 무시하고 스크랩하는 순간 진짜 실시간 가격을 긁어오도록 강제 적용
+                    if s_name and t_price > 0:
+                        with cols[idx % 3]:
+                            if st.button(f"💾 [{s_name}] 찜하기", key=f"scrap_rec_{s_name}_{idx}"):
+                                # 1. 실시간 주가 조회
                                 s_price = get_stock_current_price(s_ticker if s_ticker else s_name)
-                                t_price = float(re.sub(r'[^\d.]', '', data[3]))
-                            except:
-                                s_price = get_stock_current_price(s_ticker if s_ticker else s_name)
-                                t_price = 0.0
-                            
-                            if s_name and t_price > 0:
-                                c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                          (f"🎯 AI 추천종목: {s_name} ({investment_horizon.split(' ')[0]})", "", "AI 맞춤 추천종목 발굴 리포트", clean_report, datetime.now().strftime("%Y-%m-%d %H:%M"), s_name, s_ticker, s_price, t_price))
-                                saved_count += 1
                                 
-                    if saved_count > 0:
-                        conn.commit()
-                        st.success(f"{saved_count}개의 추천종목이 개별적으로 스크랩북에 저장되었습니다! 탭 6에서 실시간 목표가 달성률을 추적하세요.")
-                    else:
-                        c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                  (f"🎯 AI 맞춤 추천종목 ({investment_horizon.split(' ')[0]})", "", "설정 기간에 맞춘 전략적 추천", display_report, datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
-                        conn.commit()
-                        st.success("스크랩북 저장 완료 (종목 식별 데이터 부족)")
-                else:
+                                # 2. 스크랩북에 개별 저장
+                                c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                          (f"🎯 AI 추천종목: {s_name} ({investment_horizon.split(' ')[0]})", "", "AI 맞춤 추천종목 발굴 리포트", display_report, datetime.now().strftime("%Y-%m-%d %H:%M"), s_name, s_ticker, s_price, t_price))
+                                
+                                # 3. 관심종목에 중복 확인 후 미보유로 추가
+                                c.execute("SELECT id FROM portfolio WHERE stock_name=?", (s_name,))
+                                if not c.fetchone():
+                                    c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?, ?, ?, ?, ?, ?)", 
+                                              (s_name, s_name, s_ticker, 0, 0.0, 0))
+                                conn.commit()
+                                st.success(f"'{s_name}' 찜하기 완료! (탭 5, 탭 6 확인)")
+                        idx += 1
+        else:
+            with st.expander("🎯 AI 맞춤 추천종목 리포트 보기", expanded=True):
+                st.write(raw_report)
+                if st.button("💾 추천종목 리포트 통째로 스크랩", key="scrap_rec_fallback"):
                     c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                              (f"🎯 AI 맞춤 추천종목 ({investment_horizon.split(' ')[0]})", "", "설정 기간에 맞춘 전략적 추천 (목표가/손절가 포함)", display_report, datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
+                              (f"🎯 AI 맞춤 추천종목 ({investment_horizon.split(' ')[0]})", "", "설정 기간에 맞춘 전략적 추천", raw_report, datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
                     conn.commit()
                     st.success("스크랩북 저장 완료")
 
@@ -1008,7 +1014,7 @@ with tab5:
         with col_p2:
             quantity = st.number_input("보유 수량 (주)", min_value=0, value=0, step=1) if is_owned_ui == "실제 보유중" else 0
             
-        submitted = st.form_submit_button("➕ 종목 등록")
+        submitted = st.form_submit_button("➕ 종목 수동 등록")
         
         if submitted and new_stock.strip():
             with st.spinner(f"AI가 '{new_stock.strip()}'의 종목 코드와 연관 검색어를 분석 중입니다..."):
@@ -1170,19 +1176,23 @@ with tab5:
             if is_ai_picked:
                 st.caption("✨ 직접적인 비즈니스 키워드가 포함된 뉴스가 없어 AI가 선별한 최근 주요 뉴스입니다.")
                 
+            # --- [추가된 기능] 뉴스 섹션을 접이식(Expander)으로 압축하여 가독성 개선 ---
             if port_news_all:
-                for i, news in enumerate(port_news_all[:10]):
-                    with st.expander(f"📰 {news['title']}"):
-                        st.caption(news['published'])
-                        st.write(news['summary'])
-                        if st.button("이 개별 뉴스 분석", key=f"t3_btn_{p_id}_{i}"):
-                            with st.spinner("분석 중..."):
-                                prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
-                                st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
+                with st.expander(f"📰 '{p_name}' 관련 최신 뉴스 보기 ({len(port_news_all[:10])}건)", expanded=False):
+                    for i, news in enumerate(port_news_all[:10]):
+                        st.markdown(f"**[{news['title']}]({news['link']})**")
+                        st.caption(f"{news['published']} | {news['summary'][:150]}...")
+                        
+                        col_btn1, col_btn2 = st.columns([1, 4])
+                        with col_btn1:
+                            if st.button("🤖 AI 심층 분석", key=f"t3_btn_{p_id}_{i}"):
+                                with st.spinner("분석 중..."):
+                                    prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
+                                    st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                         
                         if news['link'] in st.session_state.analysis_results:
-                            with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
-                                st.write(st.session_state.analysis_results[news['link']])
+                            st.info(st.session_state.analysis_results[news['link']])
+                        st.markdown("---")
             else:
                 st.info(f"'{p_name}' 관련 최근 7일 이내 뉴스가 없습니다. (새 뉴스 보기 버튼을 눌러보십시오.)")
     else: st.info("등록된 관심종목이 없습니다.")
@@ -1192,43 +1202,66 @@ with tab6:
     st.subheader("📁 내 스크랩북 및 AI 예측 트래킹")
     c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price FROM scrapbook ORDER BY id DESC")
     scraps = c.fetchall()
-    for s_id, s_title, s_link, s_summary, s_analysis, s_date, s_name, s_ticker, s_saved_price, s_target_price in scraps:
-        with st.expander(f"[{s_date}] {s_title}"):
-            
-            if s_name and s_target_price > 0:
-                current_price = get_stock_current_price(s_ticker or s_name)
-                actual_roi = ((current_price - s_saved_price) / s_saved_price) * 100 if s_saved_price > 0 else 0
-                achievement_rate = (current_price / s_target_price) * 100 if s_target_price > 0 else 0
+    
+    if scraps:
+        with st.expander("🗑️ 여러 스크랩 한 번에 선택 삭제하기", expanded=False):
+            with st.form("bulk_delete_form"):
+                st.write("삭제할 항목을 선택하고 아래 버튼을 누르세요.")
+                delete_ids = []
+                for s in scraps:
+                    s_id, s_title, s_date = s[0], s[1], s[5]
+                    if st.checkbox(f"[{s_date}] {s_title}", key=f"bulk_del_{s_id}"):
+                        delete_ids.append(s_id)
                 
-                st.markdown("### 🎯 AI 예측 트래커")
-                t_col1, t_col2, t_col3, t_col4 = st.columns(4)
-                t_col1.metric("저장 당시 주가", f"{s_saved_price:,.0f}원")
-                t_col2.metric("실시간 주가", f"{current_price:,.0f}원", f"{actual_roi:+.2f}%")
-                t_col3.metric("AI 목표가", f"{s_target_price:,.0f}원")
-                t_col4.metric("목표가 달성률", f"{achievement_rate:.1f}%")
-                st.divider()
+                if st.form_submit_button("선택한 항목 일괄 삭제", type="primary"):
+                    if delete_ids:
+                        placeholders = ','.join(['?'] * len(delete_ids))
+                        c.execute(f"DELETE FROM scrapbook WHERE id IN ({placeholders})", tuple(delete_ids))
+                        conn.commit()
+                        st.rerun()
+                    else:
+                        st.warning("선택된 항목이 없습니다.")
+        st.divider()
 
-            if s_link: st.markdown(f"[기사 링크]({s_link})\n\n**요약:** {s_summary}\n\n**AI 분석:**\n{s_analysis}")
-            else: st.markdown(f"**AI 분석:**\n{s_analysis}")
-            
-            col_b1, col_b2 = st.columns([1, 1])
-            with col_b1:
-                html_content = f"""
-                <html>
-                <head><meta charset="utf-8"><title>{s_title}</title></head>
-                <body style="font-family: sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px;">
-                <h2>{s_title}</h2>
-                <p><strong>스크랩 날짜:</strong> {s_date}</p>
-                <hr>
-                <h3>요약</h3><p>{s_summary}</p>
-                <h3>AI 분석 리포트</h3><p>{s_analysis.replace(chr(10), '<br>')}</p>
-                </body>
-                </html>
-                """
-                st.download_button("📄 HTML 리포트로 저장", data=html_content, file_name=f"Report_{s_date[:10]}.html", mime="text/html", key=f"dl_{s_id}")
-            with col_b2:
-                if st.button("🗑️ 리포트 삭제", key=f"del_scrap_{s_id}"):
-                    c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,)); conn.commit(); st.rerun()
+        for s_id, s_title, s_link, s_summary, s_analysis, s_date, s_name, s_ticker, s_saved_price, s_target_price in scraps:
+            with st.expander(f"[{s_date}] {s_title}"):
+                
+                if s_name and s_target_price > 0:
+                    current_price = get_stock_current_price(s_ticker or s_name)
+                    actual_roi = ((current_price - s_saved_price) / s_saved_price) * 100 if s_saved_price > 0 else 0
+                    achievement_rate = (current_price / s_target_price) * 100 if s_target_price > 0 else 0
+                    
+                    st.markdown("### 🎯 AI 예측 트래커")
+                    t_col1, t_col2, t_col3, t_col4 = st.columns(4)
+                    t_col1.metric("저장 당시 주가", f"{s_saved_price:,.0f}원")
+                    t_col2.metric("실시간 주가", f"{current_price:,.0f}원", f"{actual_roi:+.2f}%")
+                    t_col3.metric("AI 목표가", f"{s_target_price:,.0f}원")
+                    t_col4.metric("목표가 달성률", f"{achievement_rate:.1f}%")
+                    st.divider()
+
+                if s_link: st.markdown(f"[기사 링크]({s_link})\n\n**요약:** {s_summary}\n\n**AI 분석:**\n{s_analysis}")
+                else: st.markdown(f"**AI 분석:**\n{s_analysis}")
+                
+                col_b1, col_b2 = st.columns([1, 1])
+                with col_b1:
+                    html_content = f"""
+                    <html>
+                    <head><meta charset="utf-8"><title>{s_title}</title></head>
+                    <body style="font-family: sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px;">
+                    <h2>{s_title}</h2>
+                    <p><strong>스크랩 날짜:</strong> {s_date}</p>
+                    <hr>
+                    <h3>요약</h3><p>{s_summary}</p>
+                    <h3>AI 분석 리포트</h3><p>{s_analysis.replace(chr(10), '<br>')}</p>
+                    </body>
+                    </html>
+                    """
+                    st.download_button("📄 HTML 리포트로 저장", data=html_content, file_name=f"Report_{s_date[:10]}.html", mime="text/html", key=f"dl_{s_id}")
+                with col_b2:
+                    if st.button("🗑️ 리포트 개별 삭제", key=f"del_scrap_{s_id}"):
+                        c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,)); conn.commit(); st.rerun()
+    else:
+        st.info("저장된 스크랩 리포트가 없습니다. 관심 있는 종목과 뉴스를 분석해 스크랩해 보세요!")
 
 # [탭 7: 데이터 백업/복구]
 with tab7:
