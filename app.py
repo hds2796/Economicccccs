@@ -7,6 +7,7 @@ import os
 import io
 import time
 import yfinance as yf
+import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
@@ -334,15 +335,8 @@ def fetch_unique_realtime_news(query):
         st.session_state.seen_realtime = set()
         try:
             prompt = f"'{query}' 검색어로 최신 뉴스가 3개 이하로 부족합니다. '경제'나 '시사' 같은 카테고리 명칭 대신, 현재 뉴스에 자주 등장하는 구체적인 '경제 관련 핵심 용어'와 '시사 관련 핵심 용어' 5개를 '|' 기호로 연결하여 출력하십시오. (예: 금리|환율|물가|부동산|선거)"
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            expanded_query_raw = ""
-            for _ in range(2):
-                try:
-                    expanded_query_raw = client.models.generate_content(model='gemini-3.1-flash-lite', contents=prompt).text
-                    break
-                except Exception:
-                    time.sleep(1)
-            
+            # 단순 키워드 발굴은 Lite 모델 전담으로 호출
+            expanded_query_raw = call_gemini_with_fallback(prompt, is_json=False, use_lite=True)
             expanded_query = re.sub(r'[^가-힣a-zA-Z0-9|]', '', expanded_query_raw).strip()
             if not expanded_query or len(expanded_query) < 2:
                 expanded_query = "금리|환율|물가|수출|부동산"
@@ -427,18 +421,22 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# 💡 [정상화 완료] AI 호출 (일일 한도 초과 시 즉각 에러 반환)
+# 💡 [정교화 완료] AI 호출 (Lite 모델 분리 기능 추가)
 # =======================================================
-def call_gemini_with_fallback(prompt, is_json=False):
+def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
     client = genai.Client(api_key=GEMINI_API_KEY)
     
-    models_to_try = [
-        ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
-        ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하로 2.5-flash가 우회 적용되었습니다.)*'),
-        ('gemini-1.5-flash', '\n\n*(💡 2.5 모델 과부하로 1.5-flash가 우회 적용되었습니다.)*'),
-        ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1 Flash Lite가 우회 적용되었습니다.)*')
-    ]
+    # use_lite가 True면 단순 노가다 작업을 위해 비용이 가장 저렴한 3.1-lite만 단독으로 호출
+    if use_lite:
+        models_to_try = [('gemini-3.1-flash-lite', '')]
+    else:
+        models_to_try = [
+            ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
+            ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하로 2.5-flash가 우회 적용되었습니다.)*'),
+            ('gemini-1.5-flash', '\n\n*(💡 2.5 모델 과부하로 1.5-flash가 우회 적용되었습니다.)*'),
+            ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1 Flash Lite가 우회 적용되었습니다.)*')
+        ]
     
     quota_keywords = ["quota exceeded", "quota", "billing"]
     fallback_keywords = ["429", "resource_exhausted", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
@@ -474,14 +472,12 @@ def call_gemini_stream_with_fallback(prompt):
         return
         
     client = genai.Client(api_key=GEMINI_API_KEY)
-    
     models_to_try = [
         ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
         ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하로 2.5-flash가 우회 적용되었습니다.)*'),
         ('gemini-1.5-flash', '\n\n*(💡 2.5 모델 과부하로 1.5-flash가 우회 적용되었습니다.)*'),
         ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1 Flash Lite가 우회 적용되었습니다.)*')
     ]
-    
     quota_keywords = ["quota exceeded", "quota", "billing"]
     
     for model_name, fallback_msg in models_to_try:
@@ -501,6 +497,18 @@ def call_gemini_stream_with_fallback(prompt):
             
     yield "\n\n서버 과부하로 분석을 완료할 수 없습니다. 잠시 후 다시 시도해주세요."
 
+# 24시간 단위 캐싱: AI를 활용한 트렌드 호재/악재 키워드 자동 추출 (Lite 모델 전담)
+@st.cache_data(ttl=86400)
+def get_dynamic_business_keywords():
+    try:
+        prompt = "현재 한국 주식 시장에서 특급 호재나 악재를 나타내는 가장 트렌디하고 핵심적인 비즈니스 키워드 15개를 '|' 기호로 연결하여 출력하십시오. (예: HBM|전고체|밸류업|FDA승인|독점공급|M&A|어닝서프라이즈|경영권분쟁). 부가 설명 없이 키워드만 출력하세요."
+        res = call_gemini_with_fallback(prompt, is_json=True, use_lite=True)
+        clean_res = re.sub(r'[^가-힣a-zA-Z0-9|]', '', res).strip()
+        if len(clean_res.split('|')) > 3:
+            return clean_res.split('|')
+    except:
+        pass
+    return ["HBM", "AI", "밸류업", "전고체", "비만치료제", "자율주행", "초전도체", "경영권분쟁", "독점공급", "FDA"]
 
 # =======================================================
 # 재무 데이터 및 AI 프롬프트 생성 함수들
@@ -652,7 +660,7 @@ def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, q
 # =======================================================
 # 4. 상단 대시보드 및 UI 구성
 # =======================================================
-st.title("📊 Project2_Stock")
+st.title("📊 Project2_Stock (하이브리드 엔진)")
 market_data = get_market_data()
 
 market_data_str = ", ".join([f"{k}: {v['current']:,.2f}({v['diff_pct']:+.2f}%)" for k, v in market_data.items() if v.get('current', 0) > 0])
@@ -728,14 +736,21 @@ with tab1:
                     if st.button("이 기사 심층 분석", key=f"tr_btn_{news['link']}"):
                         with st.spinner("기사 내용 분석 중..."):
                             prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
-                            st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
+                            
+                            cache_key = f"news_{news['link']}"
+                            st.session_state.analysis_results[cache_key] = {
+                                "text": call_gemini_with_fallback(prompt),
+                                "time": time.time()
+                            }
                     
-                    if news['link'] in st.session_state.analysis_results:
+                    cache_key = f"news_{news['link']}"
+                    cached_data = st.session_state.analysis_results.get(cache_key)
+                    if cached_data and isinstance(cached_data, dict):
                         with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
-                            st.write(st.session_state.analysis_results[news['link']])
+                            st.write(cached_data['text'])
                             if st.button("💾 이 리포트 스크랩하기", key=f"tr_scrap_{news['link']}"):
                                 c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                          (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
+                                          (news['title'], news['link'], news['summary'], cached_data['text'], datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
                                 conn.commit()
                                 st.success("스크랩북 저장 완료")
         else:
@@ -812,14 +827,17 @@ with tab2:
                     if st.button("이 기사 심층 분석", key=f"t1_btn_{news['link']}"):
                         with st.spinner("기사 내용 분석 중..."):
                             prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
-                            st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
+                            cache_key = f"eco_{news['link']}"
+                            st.session_state.analysis_results[cache_key] = {"text": call_gemini_with_fallback(prompt), "time": time.time()}
                     
-                    if news['link'] in st.session_state.analysis_results:
+                    cache_key = f"eco_{news['link']}"
+                    cached_data = st.session_state.analysis_results.get(cache_key)
+                    if cached_data and isinstance(cached_data, dict):
                         with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
-                            st.write(st.session_state.analysis_results[news['link']])
+                            st.write(cached_data['text'])
                             if st.button("💾 이 리포트 스크랩하기", key=f"t1_scrap_{news['link']}"):
                                 c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                          (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
+                                          (news['title'], news['link'], news['summary'], cached_data['text'], datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
                                 conn.commit()
                                 st.success("스크랩북 저장 완료")
         else:
@@ -887,14 +905,17 @@ with tab3:
                     if st.button("AI 분석 실행", key=f"t2_btn_{news['link']}"):
                         with st.spinner("분석 중..."):
                             prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
-                            st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
+                            cache_key = f"sec_{news['link']}"
+                            st.session_state.analysis_results[cache_key] = {"text": call_gemini_with_fallback(prompt), "time": time.time()}
                     
-                    if news['link'] in st.session_state.analysis_results:
+                    cache_key = f"sec_{news['link']}"
+                    cached_data = st.session_state.analysis_results.get(cache_key)
+                    if cached_data and isinstance(cached_data, dict):
                         with st.expander("🤖 AI 뉴스 분석 결과", expanded=True):
-                            st.write(st.session_state.analysis_results[news['link']])
+                            st.write(cached_data['text'])
                             if st.button("💾 스크랩", key=f"t2_scrap_{news['link']}"):
                                 c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                          (news['title'], news['link'], news['summary'], st.session_state.analysis_results[news['link']], datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
+                                          (news['title'], news['link'], news['summary'], cached_data['text'], datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
                                 conn.commit()
                                 st.success("저장 완료")
         else:
@@ -944,11 +965,10 @@ with tab4:
     
     if st.session_state.get('today_recommendation'):
         raw_report = st.session_state.today_recommendation
+        display_report = raw_report.split("[TRACKING_DATA]")[0].strip() if "[TRACKING_DATA]" in raw_report else raw_report
         
-        # --- [추가된 기능] 개별 종목 스크랩 및 관심종목 자동 등록 ---
         if "[TRACKING_DATA]" in raw_report:
             parts = raw_report.split("[TRACKING_DATA]")
-            display_report = parts[0].strip()
             tracking_lines = parts[1].strip().split('\n')
             
             with st.expander("🎯 AI 맞춤 추천종목 리포트 보기", expanded=True):
@@ -972,14 +992,10 @@ with tab4:
                     if s_name and t_price > 0:
                         with cols[idx % 3]:
                             if st.button(f"💾 [{s_name}] 찜하기", key=f"scrap_rec_{s_name}_{idx}"):
-                                # 1. 실시간 주가 조회
                                 s_price = get_stock_current_price(s_ticker if s_ticker else s_name)
-                                
-                                # 2. 스크랩북에 개별 저장
                                 c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                           (f"🎯 AI 추천종목: {s_name} ({investment_horizon.split(' ')[0]})", "", "AI 맞춤 추천종목 발굴 리포트", display_report, datetime.now().strftime("%Y-%m-%d %H:%M"), s_name, s_ticker, s_price, t_price))
                                 
-                                # 3. 관심종목에 중복 확인 후 미보유로 추가
                                 c.execute("SELECT id FROM portfolio WHERE stock_name=?", (s_name,))
                                 if not c.fetchone():
                                     c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?, ?, ?, ?, ?, ?)", 
@@ -1026,7 +1042,8 @@ with tab5:
                 ticker = ""
                 search_query = new_stock.strip()
                 try:
-                    res = call_gemini_with_fallback(prompt, is_json=True)
+                    # 단순 티커 발굴도 비용 절감을 위해 Lite 모델 전담 호출
+                    res = call_gemini_with_fallback(prompt, is_json=True, use_lite=True)
                     match = re.search(r'\{.*\}', res, re.DOTALL)
                     if match:
                         data = json.loads(match.group(0))
@@ -1048,76 +1065,106 @@ with tab5:
         st.divider()
         st.write(f"🔍 **등록된 종목 관련 핵심 비즈니스 뉴스 및 포트폴리오 진단**")
         
+        dynamic_kws = get_dynamic_business_keywords()
+        static_kws = ["주가", "실적", "목표가", "수주", "배당", "합병", "투자", "인수", "매출", "영업이익", "전망", "동향", "계약", "신제품", "개발", "수출", "공급", "M&A", "규제", "상장"]
+        all_kws = list(set(static_kws + dynamic_kws))
+        
+        port_data_cache = {}
+        with st.spinner("⚡ 1차 텍스트 망으로 전체 관심종목 뉴스를 초고속 수집 중입니다..."):
+            def fetch_single_portfolio_data(p):
+                p_id, p_name, p_query, p_ticker, p_is_owned, p_avg_price, p_quantity = p
+                start_idx = st.session_state.port_starts.get(p_id, 1)
+
+                current_price = get_stock_current_price(p_ticker or p_name)
+                search_keywords = [k.strip() for k in (p_query or p_name).split(" OR ")]
+                broad_query = "|".join(search_keywords)
+
+                raw_news = get_naver_news(broad_query, display=100, start=start_idx, sort_type="date")
+                now_utc = datetime.now(timezone.utc)
+                raw_news = [n for n in raw_news if (now_utc - n.get('raw_date', now_utc)) <= timedelta(hours=24)]
+
+                if not raw_news:
+                    raw_news_fallback = get_naver_news(broad_query, display=100, start=1, sort_type="date")
+                    raw_news = [n for n in raw_news_fallback if (now_utc - n.get('raw_date', now_utc)) <= timedelta(hours=24)]
+
+                port_news_all = [n for n in raw_news if any(b_kw in n['title'] or b_kw in n['summary'] for b_kw in all_kws)]
+
+                if not port_news_all and raw_news:
+                    port_news_all = raw_news[:10]
+
+                if not port_news_all:
+                    raw_news_fallback = get_naver_news(p_name, display=50, start=start_idx, sort_type="sim")
+                    port_news_all = [n for n in raw_news_fallback if is_within_7_days(n['published'])][:10]
+
+                return p_id, current_price, port_news_all, raw_news
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                results = executor.map(fetch_single_portfolio_data, portfolio)
+                for res in results:
+                    p_id, c_price, p_news, r_news = res
+                    port_data_cache[p_id] = {"price": c_price, "news": p_news, "raw_news": r_news}
+
         for p_id, p_name, p_query, p_ticker, p_is_owned, p_avg_price, p_quantity in portfolio:
             st.markdown("---")
+            
+            p_data = port_data_cache.get(p_id, {"price": 0.0, "news": [], "raw_news": []})
+            current_price = p_data["price"]
+            port_news_all = p_data["news"]
+            raw_news = p_data["raw_news"]
             
             col_title, col_refresh, col_deep = st.columns([3, 1, 2])
             with col_title:
                 st.markdown(f"#### 📌 [{p_name}]")
                 
-            start_idx = st.session_state.port_starts.get(p_id, 1)
-            
             with col_refresh:
-                if st.button("🔄 새 뉴스 보기", key=f"ref_port_{p_id}", use_container_width=True):
-                    st.session_state.port_starts[p_id] = 1
-                    get_naver_news.clear()
+                if st.button("🔄 새 뉴스", key=f"ref_port_{p_id}", use_container_width=True):
+                    st.session_state.port_starts[p_id] = st.session_state.port_starts.get(p_id, 1) + 10
+                    if f"ai_filtered_news_{p_id}" in st.session_state:
+                        del st.session_state[f"ai_filtered_news_{p_id}"]
                     st.rerun()
-            
-            current_price = get_stock_current_price(p_ticker or p_name)
-            search_keywords = [k.strip() for k in (p_query or p_name).split(" OR ")]
-            broad_query = "|".join(search_keywords)
-            raw_news = get_naver_news(broad_query, display=100, start=start_idx, sort_type="date") 
-            
-            now = datetime.now(timezone.utc)
-            raw_news = [n for n in raw_news if (now - n.get('raw_date', now)) <= timedelta(hours=24)]
-            
-            if not raw_news:
-                st.session_state.port_starts[p_id] = 1
-                raw_news_fallback = get_naver_news(broad_query, display=100, start=1, sort_type="date")
-                raw_news = [n for n in raw_news_fallback if (now - n.get('raw_date', now)) <= timedelta(hours=24)]
-            
-            business_kws = ["주가", "실적", "목표가", "수주", "배당", "합병", "투자", "인수", "매출", "영업이익", "전망", "동향", "계약", "신제품", "개발", "수출", "공급", "M&A", "규제"]
-            port_news_all = [n for n in raw_news if any(b_kw in n['title'] or b_kw in n['summary'] for b_kw in business_kws)]
-            
-            is_ai_picked = False
-            
-            if not port_news_all and raw_news:
-                try:
-                    prompt = f"다음 뉴스 목록에서 주식 투자자 관점으로 가장 의미 있는 뉴스 최대 10개의 인덱스를 JSON 배열(예: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) 형태로만 출력하십시오.\n"
-                    for idx, n in enumerate(raw_news[:50]): 
-                        prompt += f"[{idx}] {n['title']} : {n['summary']}\n"
-                    
-                    res = call_gemini_with_fallback(prompt, is_json=True)
-                    match = re.search(r'\[.*?\]', res, re.DOTALL)
-                    if match:
-                        indices = json.loads(match.group(0))
-                        port_news_all = [raw_news[i] for i in indices if i < len(raw_news)]
-                        is_ai_picked = True
-                except Exception:
-                    port_news_all = raw_news[:10]
-                    
-            if not port_news_all:
-                raw_news_fallback = get_naver_news(p_name, display=50, start=start_idx, sort_type="sim")
-                port_news_all = [n for n in raw_news_fallback if is_within_7_days(n['published'])][:10]
             
             with col_deep:
-                if st.button("📊 포트폴리오 심층 진단 (TOP 30)", type="primary", key=f"t3_deep_{p_id}"):
-                    my_bar = st.progress(0, text="진행률: 0% (대기 중...)")
-                    
-                    my_bar.progress(30, text="진행률: 30% (실시간 재무 데이터 스크래핑 중...)")
-                    prompt = build_prompt_deep_dive(p_name, p_ticker, port_news_all, p_is_owned, p_avg_price, p_quantity, current_price, market_data_str)
-                    
-                    my_bar.progress(80, text="진행률: 80% (AI 실시간 분석 및 리포트 작성 중...)")
-                    st.markdown(f"### 🤖 [{p_name}] AI 심층 진단 작성 중...")
-                    
-                    full_response = st.write_stream(call_gemini_stream_with_fallback(prompt))
-                    
-                    my_bar.progress(100, text="진행률: 100% (진단 완료!)")
-                    time.sleep(1)
-                    my_bar.empty()
-                    
-                    st.session_state.analysis_results[f"deep_{p_id}"] = full_response
-                    st.rerun()
+                cache_key = f"deep_{p_id}"
+                cached_report = st.session_state.analysis_results.get(cache_key)
+                now_ts = time.time()
+                
+                has_valid_cache = cached_report and isinstance(cached_report, dict) and (now_ts - cached_report.get('time', 0)) < 3600
+                
+                if has_valid_cache:
+                    if st.button("📊 캐시된 진단 보기", type="primary", key=f"t3_deep_{p_id}"):
+                        st.session_state[f"show_cache_{p_id}"] = True
+                else:
+                    if st.button("📊 포트폴리오 심층 진단 (TOP 30)", type="primary", key=f"t3_deep_{p_id}"):
+                        my_bar = st.progress(0, text="진행률: 0% (대기 중...)")
+                        my_bar.progress(30, text="진행률: 30% (실시간 재무 데이터 매핑 중...)")
+                        
+                        # --- [앙상블 결합 로직] 1차 필터 기사(10개) + AI 정밀 필터 기사(최대 7개) 합치기 ---
+                        ai_news = st.session_state.get(f"ai_filtered_news_{p_id}", [])
+                        if ai_news:
+                            combined_news = port_news_all + ai_news
+                            best_news = []
+                            seen_links = set()
+                            for n in combined_news:
+                                if n['link'] not in seen_links:
+                                    seen_links.add(n['link'])
+                                    best_news.append(n)
+                        else:
+                            best_news = port_news_all
+                            
+                        prompt = build_prompt_deep_dive(p_name, p_ticker, best_news, p_is_owned, p_avg_price, p_quantity, current_price, market_data_str)
+                        
+                        my_bar.progress(80, text="진행률: 80% (AI 실시간 분석 및 리포트 작성 중...)")
+                        st.markdown(f"### 🤖 [{p_name}] AI 심층 진단 작성 중...")
+                        
+                        full_response = st.write_stream(call_gemini_stream_with_fallback(prompt))
+                        
+                        my_bar.progress(100, text="진행률: 100% (진단 완료!)")
+                        time.sleep(1)
+                        my_bar.empty()
+                        
+                        st.session_state.analysis_results[cache_key] = {"text": full_response, "time": now_ts}
+                        st.session_state[f"show_cache_{p_id}"] = True
+                        st.rerun()
 
             col_info, col_del = st.columns([5, 1])
             with col_info:
@@ -1155,10 +1202,14 @@ with tab5:
                         conn.commit()
                         st.rerun()
                         
-            if f"deep_{p_id}" in st.session_state.analysis_results:
+            if st.session_state.get(f"show_cache_{p_id}") and cache_key in st.session_state.analysis_results:
+                cached_report_data = st.session_state.analysis_results[cache_key]
                 with st.expander("📊 AI 포트폴리오 심층 진단 결과", expanded=True):
-                    raw_report = st.session_state.analysis_results[f"deep_{p_id}"]
                     
+                    time_diff_min = int((time.time() - cached_report_data['time']) / 60)
+                    st.success(f"⚡ {time_diff_min}분 전에 작성된 분석 리포트를 즉시 불러왔습니다. (토큰 절약)")
+                    
+                    raw_report = cached_report_data['text']
                     target_price = 0.0
                     match = re.search(r'TARGET_PRICE:\s*([\d,]+)', raw_report)
                     if match:
@@ -1167,34 +1218,66 @@ with tab5:
                     
                     st.write(clean_report)
                     
-                    if st.button("💾 이 리포트 스크랩 (목표가 추적 시작)", key=f"t3_scrap_deep_{p_id}"):
-                        c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                  (f"[{p_name}] 포트폴리오 심층 진단", "", "TOP 30 뉴스 및 실시간 재무 분석 기반", clean_report, datetime.now().strftime("%Y-%m-%d %H:%M"), p_name, p_ticker, current_price, target_price))
-                        conn.commit()
-                        st.success("저장 완료. '스크랩북' 탭에서 AI 목표가 적중률을 확인할 수 있습니다.")
+                    col_rp1, col_rp2 = st.columns(2)
+                    with col_rp1:
+                        if st.button("💾 이 리포트 스크랩 (목표가 추적 시작)", key=f"t3_scrap_deep_{p_id}", use_container_width=True):
+                            c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                      (f"[{p_name}] 포트폴리오 심층 진단", "", "TOP 30 뉴스 및 실시간 재무 분석 기반", clean_report, datetime.now().strftime("%Y-%m-%d %H:%M"), p_name, p_ticker, current_price, target_price))
+                            conn.commit()
+                            st.success("저장 완료. '스크랩북' 탭에서 AI 목표가 적중률을 확인할 수 있습니다.")
+                    with col_rp2:
+                        if st.button("🔄 최신 데이터로 강제 재분석 (토큰 소모)", key=f"force_re_{p_id}", use_container_width=True):
+                            del st.session_state.analysis_results[cache_key]
+                            del st.session_state[f"show_cache_{p_id}"]
+                            st.rerun()
             
-            if is_ai_picked:
-                st.caption("✨ 직접적인 비즈니스 키워드가 포함된 뉴스가 없어 AI가 선별한 최근 주요 뉴스입니다.")
-                
-            # --- [추가된 기능] 뉴스 섹션을 접이식(Expander)으로 압축하여 가독성 개선 ---
-            if port_news_all:
-                with st.expander(f"📰 '{p_name}' 관련 최신 뉴스 보기 ({len(port_news_all[:10])}건)", expanded=False):
-                    for i, news in enumerate(port_news_all[:10]):
+            if port_news_all or raw_news:
+                with st.expander(f"📰 '{p_name}' 관련 최신 뉴스 보기", expanded=False):
+                    
+                    news_to_display = st.session_state.get(f"ai_filtered_news_{p_id}", port_news_all[:10])
+                    
+                    if st.session_state.get(f"ai_filtered_news_{p_id}"):
+                        st.success("✨ AI가 30개의 원본 기사를 읽고, 숨은 호재와 투자 맥락이 담긴 기사만 선별해냈습니다. (심층 진단 시 앙상블 분석 적용됨)")
+                    else:
+                        st.caption(f"⚡ 1차 필터(트렌드 키워드)로 스크리닝된 뉴스 {len(news_to_display)}건입니다.")
+                        if st.button("✨ AI 문맥 정밀 필터링 가동 (숨은 호재 찾기)", key=f"ai_filter_btn_{p_id}"):
+                            with st.spinner("AI가 기사 문맥을 정밀하게 읽고 옥석을 가려내는 중... (비용 절감을 위해 Lite 모델 전담 호출)"):
+                                prompt = f"다음은 '{p_name}' 관련 최근 뉴스 {len(raw_news[:30])}건입니다.\n"
+                                for idx, n in enumerate(raw_news[:30]):
+                                    prompt += f"[{idx}] {n['title']} : {n['summary']}\n"
+                                prompt += "\n위 기사들 중, 제목에 뻔한 단어가 없더라도 주식 투자자 관점에서 기업 가치에 큰 영향을 미칠 수 있는(우회적 호재/악재 등) 가장 중요한 기사의 인덱스를 JSON 배열(예: [0, 2, 5]) 형태로 최대 7개만 출력하십시오."
+                                
+                                try:
+                                    # 문맥 분석도 비용 절감을 위해 Lite 모델 전용 호출 사용
+                                    res = call_gemini_with_fallback(prompt, is_json=True, use_lite=True)
+                                    match = re.search(r'\[.*?\]', res, re.DOTALL)
+                                    if match:
+                                        indices = json.loads(match.group(0))
+                                        st.session_state[f"ai_filtered_news_{p_id}"] = [raw_news[:30][i] for i in indices if i < len(raw_news[:30])]
+                                        st.rerun()
+                                except Exception as e:
+                                    st.error("AI 필터링 중 오류가 발생했거나, 한도가 초과되었습니다.")
+                    
+                    st.markdown("---")
+                    for i, news in enumerate(news_to_display):
                         st.markdown(f"**[{news['title']}]({news['link']})**")
                         st.caption(f"{news['published']} | {news['summary'][:150]}...")
                         
                         col_btn1, col_btn2 = st.columns([1, 4])
                         with col_btn1:
-                            if st.button("🤖 AI 심층 분석", key=f"t3_btn_{p_id}_{i}"):
+                            if st.button("🤖 개별 심층 분석", key=f"t3_btn_{p_id}_{i}"):
                                 with st.spinner("분석 중..."):
                                     prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
-                                    st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
+                                    n_cache_key = f"n_{news['link']}"
+                                    st.session_state.analysis_results[n_cache_key] = {"text": call_gemini_with_fallback(prompt), "time": time.time()}
                         
-                        if news['link'] in st.session_state.analysis_results:
-                            st.info(st.session_state.analysis_results[news['link']])
-                        st.markdown("---")
+                        n_cache_key = f"n_{news['link']}"
+                        n_cached_data = st.session_state.analysis_results.get(n_cache_key)
+                        if n_cached_data and isinstance(n_cached_data, dict):
+                            st.info(n_cached_data['text'])
+                        st.markdown("<br>", unsafe_allow_html=True)
             else:
-                st.info(f"'{p_name}' 관련 최근 7일 이내 뉴스가 없습니다. (새 뉴스 보기 버튼을 눌러보십시오.)")
+                st.info(f"'{p_name}' 관련 최근 뉴스가 없습니다. (새 뉴스 보기 버튼을 눌러보십시오.)")
     else: st.info("등록된 관심종목이 없습니다.")
 
 # [탭 6: 스크랩북 및 적중률 트래킹]
