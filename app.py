@@ -472,6 +472,7 @@ def call_gemini_stream_with_fallback(prompt):
         ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
         ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하로 2.5-flash가 우회 적용되었습니다.)*'),
         ('gemini-1.5-flash', '\n\n*(💡 2.5 모델 과부하로 1.5-flash가 우회 적용되었습니다.)*')
+        ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1 flash lite가 우회 적용되었습니다.)*)
     ]
     
     for model_name, fallback_msg in models_to_try:
