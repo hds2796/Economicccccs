@@ -402,7 +402,7 @@ def call_gemini_with_fallback(prompt, is_json=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     models_to_try = [
-        ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
+        ('gemini-3.5-flash', ''),
         ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하/오류로 인해 2.5-flash가 우회 적용되었습니다.)*'),
         ('gemini-3.1-flash-lite', '\n\n*(💡 2.5 모델 과부하/오류로 인해 3.1 Flash Lite가 우회 적용되었습니다.)*')
     ]
@@ -646,6 +646,10 @@ with tab1:
     col_r1, col_r2 = st.columns([4, 1])
     with col_r2:
         if st.button("🔄 실시간 뉴스 갱신", key="refresh_realtime", use_container_width=True):
+            # 실시간 갱신 시 과거 페이지를 불러오지 않도록 인덱스 및 캐시를 완전히 초기화
+            st.session_state.realtime_start = 1
+            st.session_state.seen_realtime = set()
+            get_naver_news.clear()
             fetch_unique_realtime_news(realtime_query)
             st.session_state.realtime_analysis = None
             st.rerun()
@@ -1033,6 +1037,7 @@ with tab6:
     for s_id, s_title, s_link, s_summary, s_analysis, s_date, s_name, s_ticker, s_saved_price, s_target_price in scraps:
         with st.expander(f"[{s_date}] {s_title}"):
             
+            # 💡 티커가 비어있어도 종목명과 타겟 프라이스가 있으면 추적 기능이 렌더링되도록 조건 완화
             if s_name and s_target_price > 0:
                 current_price = get_stock_current_price(s_ticker or s_name)
                 
