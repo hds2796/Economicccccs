@@ -427,7 +427,7 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# 💡 [정상화 완료] AI 호출 (일일 한도 초과 시 무한 로딩 방지 적용)
+# 💡 [정상화 완료] AI 호출 (무한 로딩 방지 패치)
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False):
     if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
@@ -440,13 +440,11 @@ def call_gemini_with_fallback(prompt, is_json=False):
         ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1 Flash Lite가 우회 적용되었습니다.)*')
     ]
     
-    # 일일 한도 등 치명적 에러 감지 키워드
     quota_keywords = ["quota exceeded", "quota", "billing"]
     fallback_keywords = ["429", "resource_exhausted", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
     last_exception = None
     
     for model_name, fallback_msg in models_to_try:
-        # 빠른 실패를 위해 최대 재시도는 2번으로 제한
         for attempt in range(2): 
             try:
                 res = client.models.generate_content(model=model_name, contents=prompt).text
@@ -457,7 +455,6 @@ def call_gemini_with_fallback(prompt, is_json=False):
                 error_str = str(e).lower()
                 last_exception = e
                 
-                # 일일 한도(Quota/Billing) 문제일 경우 즉시 반복문 탈출 (무한 로딩 방지)
                 if any(q in error_str for q in quota_keywords):
                     raise Exception(f"일일 API 사용 한도가 초과되었습니다. 유료 결제 계정 상태를 확인하세요. (에러: {e})")
                     
@@ -465,7 +462,7 @@ def call_gemini_with_fallback(prompt, is_json=False):
                     break 
                     
                 if any(k in error_str for k in fallback_keywords):
-                    time.sleep(1.0) # 일시적 과부하일 때만 짧게 1초 대기
+                    time.sleep(1.0)
                     continue
                 break 
                 
@@ -967,10 +964,11 @@ with tab4:
                             s_name = data[0].strip()
                             s_ticker = data[1].strip()
                             try:
-                                s_price = float(re.sub(r'[^\d.]', '', data[2]))
+                                # 수정: AI가 생성한 가격 데이터를 무시하고 스크랩하는 순간 진짜 실시간 가격을 긁어오도록 강제 적용
+                                s_price = get_stock_current_price(s_ticker if s_ticker else s_name)
                                 t_price = float(re.sub(r'[^\d.]', '', data[3]))
                             except:
-                                s_price = 0.0
+                                s_price = get_stock_current_price(s_ticker if s_ticker else s_name)
                                 t_price = 0.0
                             
                             if s_name and t_price > 0:
@@ -980,7 +978,7 @@ with tab4:
                                 
                     if saved_count > 0:
                         conn.commit()
-                        st.success(f"{saved_count}개의 추천종목이 개별적으로 스크랩북에 저장되었습니다! 탭 6에서 목표가 달성률을 추적하세요.")
+                        st.success(f"{saved_count}개의 추천종목이 개별적으로 스크랩북에 저장되었습니다! 탭 6에서 실시간 목표가 달성률을 추적하세요.")
                     else:
                         c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                   (f"🎯 AI 맞춤 추천종목 ({investment_horizon.split(' ')[0]})", "", "설정 기간에 맞춘 전략적 추천", display_report, datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
