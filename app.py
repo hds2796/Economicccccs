@@ -338,11 +338,10 @@ def fetch_unique_realtime_news(query):
             expanded_query_raw = ""
             for _ in range(2):
                 try:
-                    time.sleep(3)
                     expanded_query_raw = client.models.generate_content(model='gemini-3.1-flash-lite', contents=prompt).text
                     break
                 except Exception:
-                    time.sleep(4)
+                    time.sleep(2)
             
             expanded_query = re.sub(r'[^가-힣a-zA-Z0-9|]', '', expanded_query_raw).strip()
             if not expanded_query or len(expanded_query) < 2:
@@ -428,7 +427,7 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# 💡 [에러 수정 완료] AI 호출 및 실시간 스트리밍 제어 함수
+# 💡 [정상화 완료] AI 호출 (일일 한도 초과 시 무한 로딩 방지 적용)
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False):
     if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
@@ -441,13 +440,15 @@ def call_gemini_with_fallback(prompt, is_json=False):
         ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1 Flash Lite가 우회 적용되었습니다.)*')
     ]
     
-    fallback_keywords = ["429", "resource_exhausted", "quota", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
+    # 일일 한도 등 치명적 에러 감지 키워드
+    quota_keywords = ["quota exceeded", "quota", "billing"]
+    fallback_keywords = ["429", "resource_exhausted", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
     last_exception = None
     
     for model_name, fallback_msg in models_to_try:
-        for attempt in range(3): 
+        # 빠른 실패를 위해 최대 재시도는 2번으로 제한
+        for attempt in range(2): 
             try:
-                time.sleep(3.5)
                 res = client.models.generate_content(model=model_name, contents=prompt).text
                 if not is_json and fallback_msg:
                     res += fallback_msg
@@ -455,13 +456,20 @@ def call_gemini_with_fallback(prompt, is_json=False):
             except Exception as e:
                 error_str = str(e).lower()
                 last_exception = e
-                if "not found" in error_str or "404" in error_str: break 
+                
+                # 일일 한도(Quota/Billing) 문제일 경우 즉시 반복문 탈출 (무한 로딩 방지)
+                if any(q in error_str for q in quota_keywords):
+                    raise Exception(f"일일 API 사용 한도가 초과되었습니다. 유료 결제 계정 상태를 확인하세요. (에러: {e})")
+                    
+                if "not found" in error_str or "404" in error_str: 
+                    break 
+                    
                 if any(k in error_str for k in fallback_keywords):
-                    time.sleep(5)
+                    time.sleep(1.0) # 일시적 과부하일 때만 짧게 1초 대기
                     continue
                 break 
-    raise Exception(f"현재 무료 서버 풀이 가득 찼습니다. 잠시 후 버튼을 다시 눌러주세요. (에러: {last_exception})")
-
+                
+    raise Exception(f"API 호출 실패 (서버 오류 지속). (에러: {last_exception})")
 
 def call_gemini_stream_with_fallback(prompt):
     if not GEMINI_API_KEY:
@@ -477,20 +485,24 @@ def call_gemini_stream_with_fallback(prompt):
         ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1 Flash Lite가 우회 적용되었습니다.)*')
     ]
     
+    quota_keywords = ["quota exceeded", "quota", "billing"]
+    
     for model_name, fallback_msg in models_to_try:
         try:
-            time.sleep(3.0)
             response = client.models.generate_content_stream(model=model_name, contents=prompt)
             for chunk in response:
                 if chunk.text:
                     yield chunk.text
             yield fallback_msg
             return
-        except Exception:
-            time.sleep(4.0)
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(q in error_str for q in quota_keywords):
+                yield f"\n\n🚨 일일 API 사용 한도가 초과되었습니다. 대시보드를 사용할 수 없습니다."
+                return
             continue
             
-    yield "\n\n일시적인 무료 서버 풀 과부하로 분석을 완료할 수 없습니다. 잠시 후 다시 시도해주세요."
+    yield "\n\n서버 과부하로 분석을 완료할 수 없습니다. 잠시 후 다시 시도해주세요."
 
 
 # =======================================================
@@ -607,7 +619,12 @@ def build_prompt_recommend(news_list, market_data_str, investment_horizon):
             f"3. 🥉 추천종목 3: [종목명]\n"
             f"- 선정 근거: ...\n"
             f"- 투자 전략: ...\n"
-            f"- 💰 목표가: ... / 손절가: ...")
+            f"- 💰 목표가: ... / 손절가: ...\n\n"
+            f"※ 중요: 리포트 맨 마지막 줄에 시스템 추적을 위해 추천종목 3개의 데이터를 아래와 같이 기재하십시오. (다른 설명 없이 형식만 유지할 것)\n"
+            f"[TRACKING_DATA]\n"
+            f"종목명1|티커1|현재가1(숫자만)|목표가1(숫자만)\n"
+            f"종목명2|티커2|현재가2(숫자만)|목표가2(숫자만)\n"
+            f"종목명3|티커3|현재가3(숫자만)|목표가3(숫자만)")
 
 def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str):
     fin_data = get_financial_data(ticker)
@@ -638,7 +655,7 @@ def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, q
 # =======================================================
 # 4. 상단 대시보드 및 UI 구성
 # =======================================================
-st.title("📊 Project2_Stock (무료 티어 최적화 모드)")
+st.title("📊 Project2_Stock")
 market_data = get_market_data()
 
 market_data_str = ", ".join([f"{k}: {v['current']:,.2f}({v['diff_pct']:+.2f}%)" for k, v in market_data.items() if v.get('current', 0) > 0])
@@ -712,7 +729,7 @@ with tab1:
                     st.caption(f"{news['published']}")
                     st.write(news['summary'])
                     if st.button("이 기사 심층 분석", key=f"tr_btn_{news['link']}"):
-                        with st.spinner("기사 내용 분석 중 (무료 서버 속도 조절 중...)..."):
+                        with st.spinner("기사 내용 분석 중..."):
                             prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
                             st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                     
@@ -796,7 +813,7 @@ with tab2:
                     st.write(news['summary'])
                     
                     if st.button("이 기사 심층 분석", key=f"t1_btn_{news['link']}"):
-                        with st.spinner("기사 내용 분석 중 (무료 서버 속도 조절 중...)..."):
+                        with st.spinner("기사 내용 분석 중..."):
                             prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
                             st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                     
@@ -871,7 +888,7 @@ with tab3:
                 with st.expander(f"📰 {news['title']}"):
                     st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
                     if st.button("AI 분석 실행", key=f"t2_btn_{news['link']}"):
-                        with st.spinner("분석 중 (무료 서버 속도 조절 중...)..."):
+                        with st.spinner("분석 중..."):
                             prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
                             st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                     
@@ -929,13 +946,51 @@ with tab4:
             st.warning("분석할 만한 최신 유망 뉴스가 부족합니다.")
     
     if st.session_state.get('today_recommendation'):
+        raw_report = st.session_state.today_recommendation
+        
+        # UI 화면에는 백그라운드 추적용 데이터 포맷([TRACKING_DATA])을 가리고 출력함
+        display_report = raw_report.split("[TRACKING_DATA]")[0].strip() if "[TRACKING_DATA]" in raw_report else raw_report
+        
         with st.expander("🎯 AI 맞춤 추천종목 리포트 보기", expanded=True):
-            st.write(st.session_state.today_recommendation)
-            if st.button("💾 추천종목 리포트 스크랩", key="scrap_rec"):
-                c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                          (f"🎯 AI 맞춤 추천종목 ({investment_horizon.split(' ')[0]})", "", "설정 기간에 맞춘 전략적 추천 (목표가/손절가 포함)", st.session_state.today_recommendation, datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
-                conn.commit()
-                st.success("저장 완료")
+            st.write(display_report)
+            
+            if st.button("💾 추천종목 리포트 전체 스크랩 (목표가 추적 시작)", key="scrap_rec"):
+                if "[TRACKING_DATA]" in raw_report:
+                    parts = raw_report.split("[TRACKING_DATA]")
+                    clean_report = parts[0].strip()
+                    tracking_lines = parts[1].strip().split('\n')
+                    
+                    saved_count = 0
+                    for line in tracking_lines:
+                        data = line.split('|')
+                        if len(data) >= 4:
+                            s_name = data[0].strip()
+                            s_ticker = data[1].strip()
+                            try:
+                                s_price = float(re.sub(r'[^\d.]', '', data[2]))
+                                t_price = float(re.sub(r'[^\d.]', '', data[3]))
+                            except:
+                                s_price = 0.0
+                                t_price = 0.0
+                            
+                            if s_name and t_price > 0:
+                                c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                          (f"🎯 AI 추천종목: {s_name} ({investment_horizon.split(' ')[0]})", "", "AI 맞춤 추천종목 발굴 리포트", clean_report, datetime.now().strftime("%Y-%m-%d %H:%M"), s_name, s_ticker, s_price, t_price))
+                                saved_count += 1
+                                
+                    if saved_count > 0:
+                        conn.commit()
+                        st.success(f"{saved_count}개의 추천종목이 개별적으로 스크랩북에 저장되었습니다! 탭 6에서 목표가 달성률을 추적하세요.")
+                    else:
+                        c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                  (f"🎯 AI 맞춤 추천종목 ({investment_horizon.split(' ')[0]})", "", "설정 기간에 맞춘 전략적 추천", display_report, datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
+                        conn.commit()
+                        st.success("스크랩북 저장 완료 (종목 식별 데이터 부족)")
+                else:
+                    c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                              (f"🎯 AI 맞춤 추천종목 ({investment_horizon.split(' ')[0]})", "", "설정 기간에 맞춘 전략적 추천 (목표가/손절가 포함)", display_report, datetime.now().strftime("%Y-%m-%d %H:%M"), "", "", 0.0, 0.0))
+                    conn.commit()
+                    st.success("스크랩북 저장 완료")
 
 # [탭 5: 관심종목 및 포트폴리오 관리]
 with tab5:
@@ -1123,7 +1178,7 @@ with tab5:
                         st.caption(news['published'])
                         st.write(news['summary'])
                         if st.button("이 개별 뉴스 분석", key=f"t3_btn_{p_id}_{i}"):
-                            with st.spinner("분석 중 (무료 서버 속도 조절 중...)..."):
+                            with st.spinner("분석 중..."):
                                 prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
                                 st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                         
