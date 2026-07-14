@@ -919,11 +919,10 @@ with tab5:
             
             search_keywords = [k.strip() for k in (p_query or p_name).split(" OR ")]
             broad_query = "|".join(search_keywords)
-            raw_news = get_naver_news(broad_query, display=100, start=start_idx, sort_type="sim") 
+            raw_news = get_naver_news(broad_query, display=100, start=start_idx, sort_type="date") 
             
             now = datetime.now(timezone.utc)
             raw_news = [n for n in raw_news if (now - n.get('raw_date', now)) <= timedelta(hours=24)]
-            raw_news.sort(key=lambda x: x.get('raw_date', now), reverse=True)
             
             if not raw_news:
                 st.session_state.port_starts[p_id] = 1
