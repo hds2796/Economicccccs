@@ -466,19 +466,29 @@ def call_gemini_stream_with_fallback(prompt):
         return
         
     client = genai.Client(api_key=GEMINI_API_KEY)
-    models_to_try = ['gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-1.5-flash']
     
-    for model_name in models_to_try:
+    # 각 모델별로 호출 성공 시 화면 맨 끝에 띄워줄 안내 문구 매핑
+    models_to_try = [
+        ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
+        ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하로 2.5-flash가 우회 적용되었습니다.)*'),
+        ('gemini-1.5-flash', '\n\n*(💡 2.5 모델 과부하로 1.5-flash가 우회 적용되었습니다.)*')
+    ]
+    
+    for model_name, fallback_msg in models_to_try:
         try:
+            # 스트림 연결 시도
             response = client.models.generate_content_stream(model=model_name, contents=prompt)
             for chunk in response:
                 if chunk.text:
                     yield chunk.text
+            
+            # 스트리밍 답변이 완벽히 끝나면, 성공한 모델의 우회 문구를 화면 맨 끝에 출력
+            yield fallback_msg
             return
         except Exception:
             continue
+            
     yield "\n\n일시적인 서버 과부하로 분석을 완료할 수 없습니다. 잠시 후 다시 시도해주세요."
-
 # =======================================================
 # 재무 데이터 및 AI 프롬프트 생성 함수들
 # =======================================================
