@@ -335,7 +335,6 @@ def fetch_unique_realtime_news(query):
         st.session_state.seen_realtime = set()
         try:
             prompt = f"'{query}' 검색어로 최신 뉴스가 3개 이하로 부족합니다. '경제'나 '시사' 같은 카테고리 명칭 대신, 현재 뉴스에 자주 등장하는 구체적인 '경제 관련 핵심 용어'와 '시사 관련 핵심 용어' 5개를 '|' 기호로 연결하여 출력하십시오. (예: 금리|환율|물가|부동산|선거)"
-            # 단순 키워드 발굴은 Lite 모델 전담으로 호출
             expanded_query_raw = call_gemini_with_fallback(prompt, is_json=False, use_lite=True)
             expanded_query = re.sub(r'[^가-힣a-zA-Z0-9|]', '', expanded_query_raw).strip()
             if not expanded_query or len(expanded_query) < 2:
@@ -421,13 +420,12 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# 💡 [정교화 완료] AI 호출 (Lite 모델 분리 기능 추가)
+# 💡 AI 호출 로직
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
     client = genai.Client(api_key=GEMINI_API_KEY)
     
-    # use_lite가 True면 단순 노가다 작업을 위해 비용이 가장 저렴한 3.1-lite만 단독으로 호출
     if use_lite:
         models_to_try = [('gemini-3.1-flash-lite', '')]
     else:
@@ -497,7 +495,6 @@ def call_gemini_stream_with_fallback(prompt):
             
     yield "\n\n서버 과부하로 분석을 완료할 수 없습니다. 잠시 후 다시 시도해주세요."
 
-# 24시간 단위 캐싱: AI를 활용한 트렌드 호재/악재 키워드 자동 추출 (Lite 모델 전담)
 @st.cache_data(ttl=86400)
 def get_dynamic_business_keywords():
     try:
@@ -1042,7 +1039,6 @@ with tab5:
                 ticker = ""
                 search_query = new_stock.strip()
                 try:
-                    # 단순 티커 발굴도 비용 절감을 위해 Lite 모델 전담 호출
                     res = call_gemini_with_fallback(prompt, is_json=True, use_lite=True)
                     match = re.search(r'\{.*\}', res, re.DOTALL)
                     if match:
@@ -1071,9 +1067,10 @@ with tab5:
         
         port_data_cache = {}
         with st.spinner("⚡ 1차 텍스트 망으로 전체 관심종목 뉴스를 초고속 수집 중입니다..."):
-            def fetch_single_portfolio_data(p):
+            
+            def fetch_single_portfolio_data(task_data):
+                p, start_idx = task_data
                 p_id, p_name, p_query, p_ticker, p_is_owned, p_avg_price, p_quantity = p
-                start_idx = st.session_state.port_starts.get(p_id, 1)
 
                 current_price = get_stock_current_price(p_ticker or p_name)
                 search_keywords = [k.strip() for k in (p_query or p_name).split(" OR ")]
@@ -1098,8 +1095,13 @@ with tab5:
 
                 return p_id, current_price, port_news_all, raw_news
 
+            tasks = []
+            for p in portfolio:
+                p_id = p[0]
+                tasks.append((p, st.session_state.port_starts.get(p_id, 1)))
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-                results = executor.map(fetch_single_portfolio_data, portfolio)
+                results = executor.map(fetch_single_portfolio_data, tasks)
                 for res in results:
                     p_id, c_price, p_news, r_news = res
                     port_data_cache[p_id] = {"price": c_price, "news": p_news, "raw_news": r_news}
@@ -1138,7 +1140,6 @@ with tab5:
                         my_bar = st.progress(0, text="진행률: 0% (대기 중...)")
                         my_bar.progress(30, text="진행률: 30% (실시간 재무 데이터 매핑 중...)")
                         
-                        # --- [앙상블 결합 로직] 1차 필터 기사(10개) + AI 정밀 필터 기사(최대 7개) 합치기 ---
                         ai_news = st.session_state.get(f"ai_filtered_news_{p_id}", [])
                         if ai_news:
                             combined_news = port_news_all + ai_news
@@ -1248,7 +1249,6 @@ with tab5:
                                 prompt += "\n위 기사들 중, 제목에 뻔한 단어가 없더라도 주식 투자자 관점에서 기업 가치에 큰 영향을 미칠 수 있는(우회적 호재/악재 등) 가장 중요한 기사의 인덱스를 JSON 배열(예: [0, 2, 5]) 형태로 최대 7개만 출력하십시오."
                                 
                                 try:
-                                    # 문맥 분석도 비용 절감을 위해 Lite 모델 전용 호출 사용
                                     res = call_gemini_with_fallback(prompt, is_json=True, use_lite=True)
                                     match = re.search(r'\[.*?\]', res, re.DOTALL)
                                     if match:
