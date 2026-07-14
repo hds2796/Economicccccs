@@ -338,10 +338,11 @@ def fetch_unique_realtime_news(query):
             expanded_query_raw = ""
             for _ in range(2):
                 try:
+                    time.sleep(3)
                     expanded_query_raw = client.models.generate_content(model='gemini-3.1-flash-lite', contents=prompt).text
                     break
                 except Exception:
-                    time.sleep(2)
+                    time.sleep(4)
             
             expanded_query = re.sub(r'[^가-힣a-zA-Z0-9|]', '', expanded_query_raw).strip()
             if not expanded_query or len(expanded_query) < 2:
@@ -427,8 +428,41 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# 💡 [핵심 추가] AI 호출 로직: 일반 호출(JSON용) 및 스트리밍 호출(타자기 효과)
+# 💡 [에러 수정 완료] AI 호출 및 실시간 스트리밍 제어 함수
 # =======================================================
+def call_gemini_with_fallback(prompt, is_json=False):
+    if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    models_to_try = [
+        ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
+        ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하로 2.5-flash가 우회 적용되었습니다.)*'),
+        ('gemini-1.5-flash', '\n\n*(💡 2.5 모델 과부하로 1.5-flash가 우회 적용되었습니다.)*'),
+        ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1 Flash Lite가 우회 적용되었습니다.)*')
+    ]
+    
+    fallback_keywords = ["429", "resource_exhausted", "quota", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
+    last_exception = None
+    
+    for model_name, fallback_msg in models_to_try:
+        for attempt in range(3): 
+            try:
+                time.sleep(3.5)
+                res = client.models.generate_content(model=model_name, contents=prompt).text
+                if not is_json and fallback_msg:
+                    res += fallback_msg
+                return res
+            except Exception as e:
+                error_str = str(e).lower()
+                last_exception = e
+                if "not found" in error_str or "404" in error_str: break 
+                if any(k in error_str for k in fallback_keywords):
+                    time.sleep(5)
+                    continue
+                break 
+    raise Exception(f"현재 무료 서버 풀이 가득 찼습니다. 잠시 후 버튼을 다시 눌러주세요. (에러: {last_exception})")
+
+
 def call_gemini_stream_with_fallback(prompt):
     if not GEMINI_API_KEY:
         yield "Gemini API 키 오류"
@@ -445,7 +479,6 @@ def call_gemini_stream_with_fallback(prompt):
     
     for model_name, fallback_msg in models_to_try:
         try:
-            # 스트림 시작 전 무료 한도 보호를 위한 안전 마진 확보
             time.sleep(3.0)
             response = client.models.generate_content_stream(model=model_name, contents=prompt)
             for chunk in response:
@@ -459,57 +492,7 @@ def call_gemini_stream_with_fallback(prompt):
             
     yield "\n\n일시적인 무료 서버 풀 과부하로 분석을 완료할 수 없습니다. 잠시 후 다시 시도해주세요."
 
-    fallback_keywords = ["429", "resource_exhausted", "quota", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
-    last_exception = None
-    
-    for model_name, fallback_msg in models_to_try:
-        for attempt in range(2):
-            try:
-                res = client.models.generate_content(model=model_name, contents=prompt).text
-                if not is_json and fallback_msg:
-                    res += fallback_msg
-                return res
-            except Exception as e:
-                error_str = str(e).lower()
-                last_exception = e
-                if "not found" in error_str or "404" in error_str: break 
-                if any(k in error_str for k in fallback_keywords):
-                    time.sleep(2)
-                    continue
-                break 
-    raise Exception(f"API 호출 한도 초과입니다. (에러: {last_exception})")
 
-def call_gemini_stream_with_fallback(prompt):
-    if not GEMINI_API_KEY:
-        yield "Gemini API 키 오류"
-        return
-        
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    
-    # 각 모델별로 호출 성공 시 화면 맨 끝에 띄워줄 안내 문구 매핑
-  models_to_try = [
-        ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
-        ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하로 2.5-flash가 우회 적용되었습니다.)*'),
-        ('gemini-1.5-flash', '\n\n*(💡 2.5 모델 과부하로 1.5-flash가 우회 적용되었습니다.)*'),
-        ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1 Flash Lite가 우회 적용되었습니다.)*')
-    ]
-    
-    
-    for model_name, fallback_msg in models_to_try:
-        try:
-            # 스트림 연결 시도
-            response = client.models.generate_content_stream(model=model_name, contents=prompt)
-            for chunk in response:
-                if chunk.text:
-                    yield chunk.text
-            
-            # 스트리밍 답변이 완벽히 끝나면, 성공한 모델의 우회 문구를 화면 맨 끝에 출력
-            yield fallback_msg
-            return
-        except Exception:
-            continue
-            
-    yield "\n\n일시적인 서버 과부하로 분석을 완료할 수 없습니다. 잠시 후 다시 시도해주세요."
 # =======================================================
 # 재무 데이터 및 AI 프롬프트 생성 함수들
 # =======================================================
@@ -655,7 +638,7 @@ def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, q
 # =======================================================
 # 4. 상단 대시보드 및 UI 구성
 # =======================================================
-st.title("📊 Project2_Stock")
+st.title("📊 Project2_Stock (무료 티어 최적화 모드)")
 market_data = get_market_data()
 
 market_data_str = ", ".join([f"{k}: {v['current']:,.2f}({v['diff_pct']:+.2f}%)" for k, v in market_data.items() if v.get('current', 0) > 0])
@@ -729,7 +712,7 @@ with tab1:
                     st.caption(f"{news['published']}")
                     st.write(news['summary'])
                     if st.button("이 기사 심층 분석", key=f"tr_btn_{news['link']}"):
-                        with st.spinner("기사 내용 분석 중..."):
+                        with st.spinner("기사 내용 분석 중 (무료 서버 속도 조절 중...)..."):
                             prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
                             st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                     
@@ -813,7 +796,7 @@ with tab2:
                     st.write(news['summary'])
                     
                     if st.button("이 기사 심층 분석", key=f"t1_btn_{news['link']}"):
-                        with st.spinner("기사 내용 분석 중..."):
+                        with st.spinner("기사 내용 분석 중 (무료 서버 속도 조절 중...)..."):
                             prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
                             st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                     
@@ -888,7 +871,7 @@ with tab3:
                 with st.expander(f"📰 {news['title']}"):
                     st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
                     if st.button("AI 분석 실행", key=f"t2_btn_{news['link']}"):
-                        with st.spinner("분석 중..."):
+                        with st.spinner("분석 중 (무료 서버 속도 조절 중...)..."):
                             prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
                             st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                     
@@ -1140,7 +1123,7 @@ with tab5:
                         st.caption(news['published'])
                         st.write(news['summary'])
                         if st.button("이 개별 뉴스 분석", key=f"t3_btn_{p_id}_{i}"):
-                            with st.spinner("분석 중..."):
+                            with st.spinner("분석 중 (무료 서버 속도 조절 중...)..."):
                                 prompt = build_prompt_single_news(news['title'], news['summary'], market_data_str)
                                 st.session_state.analysis_results[news['link']] = call_gemini_with_fallback(prompt)
                         
