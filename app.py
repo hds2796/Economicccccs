@@ -468,12 +468,13 @@ def call_gemini_stream_with_fallback(prompt):
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     # 각 모델별로 호출 성공 시 화면 맨 끝에 띄워줄 안내 문구 매핑
-    models_to_try = [
+  models_to_try = [
         ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
         ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하로 2.5-flash가 우회 적용되었습니다.)*'),
-        ('gemini-1.5-flash', '\n\n*(💡 2.5 모델 과부하로 1.5-flash가 우회 적용되었습니다.)*')
-        ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1-flash-lite가 우회 적용되었습니다.)*)
+        ('gemini-1.5-flash', '\n\n*(💡 2.5 모델 과부하로 1.5-flash가 우회 적용되었습니다.)*'),
+        ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1 Flash Lite가 우회 적용되었습니다.)*')
     ]
+    
     
     for model_name, fallback_msg in models_to_try:
         try:
