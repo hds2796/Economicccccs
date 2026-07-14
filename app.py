@@ -299,7 +299,17 @@ def fetch_unique_realtime_news(query):
         st.session_state.seen_realtime = set()
         try:
             prompt = f"'{query}' 검색어로 최신 뉴스가 3개 이하로 부족합니다. '경제'나 '시사' 같은 카테고리 명칭 대신, 현재 뉴스에 자주 등장하는 구체적인 '경제 관련 핵심 용어'와 '시사 관련 핵심 용어' 5개를 '|' 기호로 연결하여 출력하십시오. (예: 금리|환율|물가|부동산|선거)"
-            expanded_query_raw = call_gemini_with_fallback(prompt, is_json=True)
+            
+            # 검색어 확장(양 채우기) 전용 AI 모델 (3.1 Flash Lite) 지정 호출
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            expanded_query_raw = ""
+            for _ in range(2):
+                try:
+                    expanded_query_raw = client.models.generate_content(model='gemini-3.1-flash-lite', contents=prompt).text
+                    break
+                except Exception:
+                    time.sleep(2)
+            
             expanded_query = re.sub(r'[^가-힣a-zA-Z0-9|]', '', expanded_query_raw).strip()
             
             # AI가 빈 값을 반환할 경우 최후의 수단(하드코딩) 적용
@@ -392,7 +402,7 @@ def call_gemini_with_fallback(prompt, is_json=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     models_to_try = [
-        ('gemini-3.5-flash', '\n\n*(💡 3.5 모델이 적용되었습니다.)*'),
+        ('gemini-3.5-flash', ''),
         ('gemini-2.5-flash', '\n\n*(💡 3.5 모델 과부하/오류로 인해 2.5-flash가 우회 적용되었습니다.)*'),
         ('gemini-3.1-flash-lite', '\n\n*(💡 2.5 모델 과부하/오류로 인해 3.1 Flash Lite가 우회 적용되었습니다.)*')
     ]
@@ -627,7 +637,8 @@ with tab1:
     st.subheader("📰 실시간 경제·시사 뉴스 분석")
     st.write("네이버 뉴스에 방금 송고된 최신 경제, 시사, 정치 기사를 실시간(최신순)으로 수집하고 트렌드를 분석합니다.")
     
-    realtime_query = "증시|금융|정책|코스피|코스닥|환율|물가|부동산|인플레이션|유가|코인|실업|규제|법안|세금|협상"
+    # 네이버 API 쿼리 길이 제한 우회: 핵심 키워드 5개로 축소
+    realtime_query = "증시|금융|환율|물가|부동산"
     
     if not st.session_state.current_realtime_news:
         fetch_unique_realtime_news(realtime_query)
@@ -681,7 +692,9 @@ with tab1:
 with tab2:
     st.subheader("오늘의 핵심 경제 뉴스")
     st.write("주식 시장과 연관성이 높은 핵심 경제 기사를 정확도순으로 수집합니다.")
-    eco_query = "경제|증시|주식|금융|코스피|코스닥|금리|환율|인플레이션|수출|실적|정책|규제|법안|세금|예산|협상"
+    
+    # 네이버 API 쿼리 길이 제한 우회: 핵심 키워드를 7개로 소폭 확장
+    eco_query = "경제|증시|주식|코스피|코스닥|금리|실적"
     
     if not st.session_state.current_eco_news:
         fetch_unique_eco_news(eco_query)
@@ -744,7 +757,7 @@ with tab3:
         "반도체": "반도체|삼성전자|SK하이닉스", 
         "2차전지": "2차전지|전기차|배터리", 
         "바이오": "바이오|제약|신약", 
-        "금융/밸류업": "금융|은행|밸류업|증권|금리", 
+        "금융/밸류업": "금융|은행|밸류업|증권", 
         "IT/플랫폼": "IT|플랫폼|네이버|카카오|인공지능", 
         "방산/조선": "방산|조선|K방산"
     }
