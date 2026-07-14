@@ -429,8 +429,11 @@ def fetch_unique_sector_news(sector_name, query):
 # =======================================================
 # 💡 [핵심 추가] AI 호출 로직: 일반 호출(JSON용) 및 스트리밍 호출(타자기 효과)
 # =======================================================
-def call_gemini_with_fallback(prompt, is_json=False):
-    if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
+def call_gemini_stream_with_fallback(prompt):
+    if not GEMINI_API_KEY:
+        yield "Gemini API 키 오류"
+        return
+        
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     models_to_try = [
@@ -440,6 +443,22 @@ def call_gemini_with_fallback(prompt, is_json=False):
         ('gemini-3.1-flash-lite', '\n\n*(💡 1.5 모델 과부하로 3.1 Flash Lite가 우회 적용되었습니다.)*')
     ]
     
+    for model_name, fallback_msg in models_to_try:
+        try:
+            # 스트림 시작 전 무료 한도 보호를 위한 안전 마진 확보
+            time.sleep(3.0)
+            response = client.models.generate_content_stream(model=model_name, contents=prompt)
+            for chunk in response:
+                if chunk.text:
+                    yield chunk.text
+            yield fallback_msg
+            return
+        except Exception:
+            time.sleep(4.0)
+            continue
+            
+    yield "\n\n일시적인 무료 서버 풀 과부하로 분석을 완료할 수 없습니다. 잠시 후 다시 시도해주세요."
+
     fallback_keywords = ["429", "resource_exhausted", "quota", "not found", "404", "503", "high demand", "overloaded", "unavailable"]
     last_exception = None
     
