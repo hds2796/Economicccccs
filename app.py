@@ -213,7 +213,8 @@ def get_market_data():
     results["원/달러 환율"] = fetch_yahoo_direct("KRW=X")
     return results
 
-@st.cache_data(ttl=300)
+# 💡 실시간 반영을 위해 캐시 수명을 60초로 단축!
+@st.cache_data(ttl=60)
 def get_stock_current_price(ticker):
     if not ticker: return 0.0
     try:
@@ -466,9 +467,10 @@ def build_prompt_sector(sector_name, news_list, market_data_str):
     combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
     return f"'{sector_name}' 섹터 분석:\n[지표]: {market_data_str}\n{combined}\n\n1. 🏭 섹터 흐름 요약\n2. 📈 주요 호/악재\n3. 🎯 투자 심리 전망"
 
+# 💡 [AI의 주가 소설 쓰기 원천 차단 패치]
 def build_prompt_recommend(news_list, market_data_str, investment_horizon):
     combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list[:30]])
-    return f"핵심 뉴스 30건 바탕 '{investment_horizon}' 유망 종목 3개 추천:\n[지표]: {market_data_str}\n{combined}\n\n1. 🥇 추천종목 1: [종목명]\n- 선정근거:\n- 💰 목표가/손절가:\n(2, 3번 반복)\n\n마지막에 시스템 추적용 기재:\n[TRACKING_DATA]\n종목명1|티커1|현재가|목표가\n종목명2|티커2|현재가|목표가\n종목명3|티커3|현재가|목표가"
+    return f"핵심 뉴스 30건 바탕 '{investment_horizon}' 유망 종목 3개 추천:\n[지표]: {market_data_str}\n{combined}\n\n1. 🥇 추천종목 1: [종목명]\n- 선정근거:\n- 💰 목표가/손절가:\n(2, 3번 반복)\n\n※ 주의사항: 리포트 본문 내에 '현재가'는 절대 기재하지 마십시오. (실시간 변동되므로 제외)\n\n마지막에 시스템 추적용 기재:\n[TRACKING_DATA]\n종목명1|종목코드(한국은 6자리숫자)|목표가(숫자만)\n종목명2|종목코드|목표가\n종목명3|종목코드|목표가"
 
 def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str):
     fin_data = get_financial_data(ticker)
@@ -647,7 +649,7 @@ with tab3:
                             c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)", (news['title'], news['link'], news['summary'], cached_data['text'], datetime.now().strftime("%Y-%m-%d %H:%M")))
                             conn.commit(); st.success("저장 완료")
 
-# ----------------- [탭 4: 추천 종목] -----------------
+# ----------------- [탭 4: 추천 종목 (실시간 주가 반영 패치 완료)] -----------------
 with tab4:
     st.subheader("🎯 AI 맞춤 추천종목 발굴")
     investment_horizon = st.radio("희망 투자 기간 설정", ["단기 (1~3개월 - 테마/모멘텀/수주)", "중기 (3~6개월 - 실적/사이클/정책)", "중장기 (6개월~1년 - 구조적 성장/시장 지배력)", "장기 (1년 이상 - 배당/안정성/메가트렌드)"], horizontal=True)
@@ -672,21 +674,34 @@ with tab4:
         raw_report = st.session_state.today_recommendation
         display_report = raw_report.split("[TRACKING_DATA]")[0].strip() if "[TRACKING_DATA]" in raw_report else raw_report
         
-        with st.expander("🎯 AI 맞춤 추천 리포트", expanded=True): st.write(display_report)
+        with st.expander("🎯 AI 맞춤 추천 리포트 (현재가는 아래 UI 카드 참조)", expanded=True): 
+            st.write(display_report)
         
         if "[TRACKING_DATA]" in raw_report:
-            st.markdown("### 📌 찜하기 (스크랩 및 관심종목 자동 등록)")
+            st.markdown("### 📌 AI 추천 종목 요약 (실시간 주가 자동 반영)")
             cols = st.columns(3)
+            # 💡 AI가 뱉은 3단 데이터 (종목명|티커|목표가) 파싱 후 실시간 네이버 주가 매핑
             for idx, line in enumerate(raw_report.split("[TRACKING_DATA]")[1].strip().split('\n')):
                 data = line.split('|')
-                if len(data) >= 4:
-                    s_name, s_ticker = data[0].strip(), data[1].strip()
-                    try: t_price = float(re.sub(r'[^\d.]', '', data[3]))
+                if len(data) >= 3:
+                    s_name = data[0].strip()
+                    s_ticker = data[1].strip()
+                    try: t_price = float(re.sub(r'[^\d.]', '', data[-1]))
                     except: t_price = 0.0
+                    
                     if s_name and t_price > 0:
                         with cols[idx % 3]:
+                            # 방금 네이버에서 긁어온 100% 진짜 실시간 현재가
+                            s_price = get_stock_current_price(s_ticker or s_name)
+                            
+                            st.info(f"**{s_name}** ({s_ticker})")
+                            st.metric("실시간 현재가", f"{s_price:,.0f}원")
+                            if s_price > 0:
+                                st.metric("AI 목표가", f"{t_price:,.0f}원", f"{((t_price - s_price)/s_price)*100:+.1f}%")
+                            else:
+                                st.metric("AI 목표가", f"{t_price:,.0f}원")
+                                
                             if st.button(f"💾 [{s_name}] 찜하기", key=f"sr_{s_name}_{idx}"):
-                                s_price = get_stock_current_price(s_ticker or s_name)
                                 c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?,?,?,?,?,?,?,?)", (f"🎯 AI 추천종목: {s_name}", "AI 추천 발굴", display_report, datetime.now().strftime("%Y-%m-%d %H:%M"), s_name, s_ticker, s_price, t_price))
                                 c.execute("SELECT id FROM portfolio WHERE stock_name=?", (s_name,))
                                 if not c.fetchone(): c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?,?,?,?,?,?)", (s_name, s_name, s_ticker, 0, 0.0, 0))
@@ -811,7 +826,7 @@ with tab5:
                     if f"n_{n['link']}" in st.session_state.analysis_results:
                         st.info(st.session_state.analysis_results[f"n_{n['link']}"]['text'])
             
-            # 💡 [UI 피드백 적용] 상태 변경 및 삭제 버튼을 종목 박스의 맨 아래로 이동
+            # 💡 상태 변경 및 삭제 버튼을 종목 박스의 맨 아래로 이동
             col_edit1, col_edit2 = st.columns([1, 1])
             with col_edit1:
                 with st.expander("⚙️ 상태 변경"):
@@ -826,14 +841,12 @@ with tab5:
                             c.execute("UPDATE portfolio SET is_owned=?, avg_price=?, quantity=? WHERE id=?", (1 if new_own=="보유중" else 0, final_p, int(nq), p_id))
                             conn.commit(); st.rerun()
             with col_edit2:
-                # 삭제 버튼을 맨 아래에 크게 배치
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("🗑️ 관심종목 삭제", key=f"del_{p_id}", use_container_width=True):
                     c.execute("DELETE FROM portfolio WHERE id=?", (p_id,)); conn.commit(); st.rerun()
 
             st.divider()
 
-        # 화면에 모든 종목 렌더링
         for p in portfolio:
             if p[0] in port_cache: render_stock_box(p, port_cache[p[0]])
 
