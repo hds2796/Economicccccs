@@ -231,7 +231,6 @@ def raw_fetch_naver_disclosures(ticker):
         code_match = re.search(r'\d{6}', ticker)
         if not code_match: return "- 국내 종목이 아닙니다."
         code = code_match.group()
-        
         res = requests.get(f"https://finance.naver.com/item/news_notice.naver?code={code}&page=1", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
@@ -277,6 +276,30 @@ def raw_fetch_supply_demand_trend(ticker):
                     if lines: return "\n".join(lines)
     except: pass
     return "수급 동향 조회 불가 (네이버 구조 변경 또는 통신 지연)"
+
+# =======================================================
+# AI 코어 백엔드 통신 유닛 (정확한 3.5 / 3.1 라인업 지정)
+# =======================================================
+def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    # 사용자님 매핑 피드백 기준에 맞춰 공식 2026 규격으로 엄밀히 바인딩
+    models = [('gemini-3.1-flash-lite', ' ')] if use_lite else [('gemini-3.5-flash', '')]
+    for m, msg in models:
+        try:
+            res = client.models.generate_content(model=m, contents=prompt).text
+            return res + msg if not is_json else res
+        except: continue
+    raise Exception("AI 호출 실패")
+
+def call_gemini_stream_with_fallback(prompt):
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    for m, msg in [('gemini-3.5-flash', '')]:
+        try:
+            for chunk in client.models.generate_content_stream(model=m, contents=prompt):
+                if chunk.text: yield chunk.text
+            yield msg; return
+        except: continue
+    yield "서버 과부하로 출력 불가"
 
 # =======================================================
 # 기존 앱 전용 캐시 래퍼
@@ -345,29 +368,6 @@ def fetch_unique_sector_news(sector_name, query):
             if len(unique_news) == 15: break
     st.session_state.current_sector_news[sector_name] = unique_news
 
-# =======================================================
-# AI 코어 백엔드 통신 유닛
-# =======================================================
-def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    models = [('gemini-3.1-flash-lite', ' ')] if use_lite else [('gemini-3.5-flash', '\n\n*(💡 3.5 모델 적용)*'), ('gemini-2.5-flash', '\n\n*(💡 2.5 우회 적용)*'), ('gemini-3.1-flash-lite', '')]
-    for m, msg in models:
-        try:
-            res = client.models.generate_content(model=m, contents=prompt).text
-            return res + msg if not is_json else res
-        except: continue
-    raise Exception("AI 호출 실패")
-
-def call_gemini_stream_with_fallback(prompt):
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    for m, msg in [('gemini-3.5-flash', '\n\n*(💡 3.5 모델 적용)*'), ('gemini-2.5-flash', '')]:
-        try:
-            for chunk in client.models.generate_content_stream(model=m, contents=prompt):
-                if chunk.text: yield chunk.text
-            yield msg; return
-        except: continue
-    yield "서버 과부하로 출력 불가"
-
 def get_financial_data(ticker):
     try:
         code = re.search(r'\d{6}', ticker)
@@ -403,12 +403,18 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
             f"[예비 후보 데이터 및 보조지표]:\n{candidate_context}\n"
             f"[최신 관련 뉴스 팩트]:\n{combined}\n\n"
             f"위 데이터를 종합 연산하여, '{investment_horizon}' 투자에 부적합하거나 고평가된 종목을 제외하고 최종 3개만 엄선하여 프로페셔널 투자 보고서를 작성하십시오.\n\n"
+            f"⚠️ 절대 주의사항 ⚠️\n"
+            f"1. 목표가와 매수추천가는 반드시 제공된 각 종목의 '현재가'를 기준으로, 현실적인 상승 여력(현재가 대비 +10% ~ +30% 내외)을 고려해 책정하십시오.\n"
+            f"2. 탈락시킨 2개 종목은 아래 '최종 추천 종목' 목록에 절대 중복해서 나타나면 안 됩니다.\n\n"
             f"[보고서 필수 양식]\n"
-            f"1. 🥇 추천종목: [종목명] (티커)\n"
-            f"- 정량적/기술적/뉴스 통합 선정 근거: (재무제표 상태 및 RSI, 뉴스의 재료 신선도를 엮어서 구체적으로 서술)\n"
-            f"- 🎯 퀀트 목표가: [숫자가 포함된 구체적 가격]\n"
-            f"- 💰 정밀 매수 추천가: [현재가 및 이평선 지지선을 고려한 현실적인 진입 추천 가격 설정]\n\n"
-            f"※ 가장 중요: 시스템 파싱을 위해, 보고서 맨 마지막 줄에 시스템 추적용 3개의 데이터를 지정된 형식으로 100% 동일하게 기재하십시오. 다른 기호나 띄어쓰기를 넣지 마십시오.\n"
+            f"### 🗑️ [탈락 종목 2개]\n"
+            f"- [탈락 종목명]: (이유 서술)\n\n"
+            f"### 🏆 [최종 추천 종목 3개]\n"
+            f"1. 추천종목: [종목명] (티커)\n"
+            f"- 통합 선정 근거: (RSI, 지지선, 뉴스를 엮어서 서술)\n"
+            f"- 🎯 퀀트 목표가: [현재가 기반 현실적인 목표 가격]\n"
+            f"- 💰 정밀 매수 추천가: [현재가 및 지지선 기반 현실적인 진입 가격]\n\n"
+            f"※ 가장 중요: 시스템 파싱을 위해, 보고서 맨 마지막 줄에 시스템 추적용 3개의 데이터를 지정된 형식으로 100% 동일하게 기재하십시오.\n"
             f"[TRACKING_DATA]\n"
             f"종목명1|티커1|목표가숫자만|매수추천가숫자만\n"
             f"종목명2|티커2|목표가숫자만|매수추천가숫자만\n"
@@ -417,6 +423,7 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
             f"[TRACKING_DATA]\n"
             f"삼성전자|005930|90000|82000")
 
+# 💡 [관심종목 가이드라인 완성 패치] 손절가(Stop-loss) 요구 조건 명시
 def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str, tech_str, supply_str):
     fin_data = get_financial_data(ticker)
     status = "미보유 관심종목"
@@ -424,7 +431,19 @@ def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, q
         roi = ((current_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
         status = f"보유 중 (평단: {avg_price:,.0f}원, 수량: {quantity}주, 현재가: {current_price:,.0f}원, 수익률: {roi:.2f}%)"
     combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list[:30]])
-    return f"[{stock_name} 심층 진단]\n[지표]\n{market_data_str}\n[내 상태]\n{status}\n[최근 5일 수급 동향]\n{supply_str}\n[보조지표/기술적 수치]\n{tech_str}\n[뉴스]\n{combined}\n[재무]\n{fin_data}\n\n1. 🏢 재무 및 기업 펀더멘털 분석\n2. 🌐 뉴스 및 수급 파급력 종합 분석 (외인/기관 연속성 및 RSI 과열구간 언급 필수)\n3. 📊 포트폴리오 맞춤 진단\n4. 🎯 투자의견\n5. 💰 적정 목표가\n6. 👥 동종업계 비교\n\n마지막줄에 'TARGET_PRICE: 숫자' 필수."
+    return (f"[{stock_name} 심층 진단]\n"
+            f"[시장 지표]\n{market_data_str}\n"
+            f"[내 상태]\n{status}\n"
+            f"[최근 5일 수급 동향]\n{supply_str}\n"
+            f"[보조지표/기술적 수치]\n{tech_str}\n"
+            f"[최신 뉴스]\n{combined}\n"
+            f"[재무]\n{fin_data}\n\n"
+            f"위 데이터를 바탕으로 아래 항목을 포함한 리포트를 작성하십시오.\n"
+            f"1. 🏢 재무 및 기업 펀더멘털 분석\n"
+            f"2. 🌐 뉴스 및 수급 파급력 종합 분석 (외인/기관 연속성 및 RSI 과열구간 언급 필수)\n"
+            f"3. 📊 포트폴리오 맞춤 진단 및 투자의견 (매수/보유/매도)\n"
+            f"4. 💰 적정 목표가 및 손절가 (※ 반드시 현재가 {current_price:,.0f}원을 기준으로 기계적 연산이 아닌 리스크 밴드를 감안한 구체적인 목표 가격과 손절가를 명시할 것)\n\n"
+            f"마지막줄에 파싱을 위해 'TARGET_PRICE: 목표가숫자만' 을 필수로 적어주세요.")
 
 # =======================================================
 # 4. 메인 대시보드 UI
@@ -447,11 +466,10 @@ with tab1:
     realtime_query = "증시|금융|환율|물가|부동산|정책"
     if not st.session_state.current_realtime_news: fetch_unique_realtime_news(realtime_query)
     if st.button("🤖 실시간 뉴스 TOP 20 기반 종합 분석", type="primary", use_container_width=True):
-        st.toast("🧠 Gemini 3.5 Flash 분석 엔진 가동", icon="💡")
         st.session_state.realtime_analysis = st.write_stream(call_gemini_stream_with_fallback(build_prompt_realtime(st.session_state.current_realtime_news[:20], market_data_str)))
         st.rerun()
     if st.session_state.realtime_analysis:
-        st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]` 모델이 분석을 완료했습니다.")
+        st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]`")
         with st.expander("📊 AI 실시간 시황 종합 브리핑", expanded=True):
             st.write(st.session_state.realtime_analysis)
             if st.button("💾 이 리포트 스크랩", key="sc_rt_all"):
@@ -481,7 +499,7 @@ with tab2:
             st.line_chart(dict(zip(dates, scores)))
     
     eco_query = "경제|증시|주식|금리|실적"
-    st.caption("🔍 **AI 퀀트 필터 시스템:** `[💡 Gemini 3.1 Flash-Lite]` 모델이 실시간으로 노이즈 뉴스를 전면 차단 중입니다.")
+    st.caption("🔍 **AI 퀀트 필터 시스템:** `[💡 Gemini 3.1 Flash-Lite]` 정밀 맥락 심사 필터 통과")
     if not st.session_state.current_eco_news: fetch_unique_eco_news(eco_query)
     
     col_e1, col_e2 = st.columns([4, 1])
@@ -497,7 +515,7 @@ with tab2:
 
     if st.session_state.overall_analysis:
         st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]`")
-        st.markdown(f"**방금 측정한 실시간 AI 시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
+        st.markdown(f"**일별 AI 시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
         with st.expander("📝 거시 브리핑 리포트", expanded=True): st.write(st.session_state.overall_analysis['text'])
     
     for i, news in enumerate(st.session_state.current_eco_news):
@@ -517,7 +535,7 @@ with tab3:
     
     col_s1, col_s2, col_s3 = st.columns([2, 1, 1])
     with col_s1: selected_sector = st.selectbox("관심 섹터 선택", list(sectors.keys()))
-    st.caption("🔍 **AI 퀀트 필터 시스템:** `[💡 Gemini 3.1 Flash-Lite]` 모델이 정밀 문맥 필터링 중입니다.")
+    st.caption("🔍 **AI 퀀트 필터 시스템:** `[💡 Gemini 3.1 Flash-Lite]` 팩트 뉴스 레이더")
     if selected_sector not in st.session_state.current_sector_news: fetch_unique_sector_news(selected_sector, sectors[selected_sector])
         
     with col_s2:
@@ -546,8 +564,6 @@ with tab4:
         rec_news = filter_news_with_gemini_lite(raw_rec)
         
         res1 = call_gemini_with_fallback(f"다음 뉴스에서 유망 종목 5개를 골라 JSON 배열로 출력하세요. [{{\"name\":\"종목명\",\"ticker\":\"6자리코드\"}}]\n" + "\n".join([n['title'] for n in rec_news]), is_json=True)
-        
-        # 💡 [유령 에러 차단 패치] try ~ except에서 st.rerun 분리
         success_rec = False
         try:
             candidates = json.loads(re.search(r'\[.*\]', res1, re.S).group())
@@ -557,14 +573,11 @@ with tab4:
                 ctx_str += f"- 종목: {c_info.get('name')}({t})\n  현재가: {get_stock_current_price(t):,.0f}원\n  보조지표: {raw_calculate_technical_indicators(t)}\n  재무: {get_financial_data(t)}\n"
             st.session_state.today_recommendation = call_gemini_with_fallback(build_prompt_recommend_step3(ctx_str, rec_news, market_data_str, investment_horizon))
             success_rec = True
-        except Exception as e: 
-            st.error(f"추천 오류 발생. 다시 시도해 주세요: {e}")
-            
-        if success_rec:
-            st.rerun()
+        except Exception as e: st.error(f"추천 오류 발생. 다시 시도해 주세요: {e}")
+        if success_rec: st.rerun()
 
     if st.session_state.get('today_recommendation'):
-        st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]` 정량/정성 통합 가치 산정")
+        st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]`")
         raw = st.session_state.today_recommendation
         display_report = raw.split("[TRACKING_DATA]")[0].strip()
         st.write(display_report)
@@ -578,7 +591,6 @@ with tab4:
                     name, tick = data[0].strip(), data[1].strip()
                     try: tp = float(re.sub(r'[^\d.]', '', data[2])) if re.sub(r'[^\d.]', '', data[2]) else 0.0
                     except: tp = 0.0
-                    
                     bp = 0.0
                     if len(data) >= 4:
                         try: bp = float(re.sub(r'[^\d.]', '', data[3])) if re.sub(r'[^\d.]', '', data[3]) else 0.0
@@ -695,7 +707,7 @@ with tab5:
 
             if st.session_state.get(f"show_{p_id}"):
                 with st.expander("📝 AI 종합 진단 리포트", expanded=True):
-                    st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]` 모델 분석 본문")
+                    st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]`")
                     rep = st.session_state.analysis_results[cache_key]['text']
                     st.write(re.sub(r'TARGET_PRICE:\s*[\d,]+', '', rep).strip())
                     tp = float(m.group(1).replace(',','')) if (m := re.search(r'TARGET_PRICE:\s*([\d,]+)', rep)) else 0.0
@@ -787,4 +799,3 @@ with tab7:
                 for s in db['scrapbook']: c.execute("INSERT INTO scrapbook VALUES (" + ",".join(["?"]*len(s)) + ")", s)
                 conn.commit(); st.success(f"복구 완료: {name}"); st.rerun()
             except Exception as e: st.error(f"실패: {e}")
-          
