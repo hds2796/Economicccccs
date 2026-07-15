@@ -31,7 +31,7 @@ st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 NAVER_CLIENT_ID = st.secrets.get("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
-DART_API_KEY = st.secrets.get("DART_API_KEY", "")
+# 💡 DART API 키는 이제 더 이상 쓰지 않습니다! (네이버 직통 크롤링으로 대체)
 
 # --- [데이터베이스 설정 및 스키마 업데이트] ---
 conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
@@ -132,7 +132,6 @@ if 'realtime_start' not in st.session_state: st.session_state.realtime_start = 1
 if 'seen_realtime' not in st.session_state: st.session_state.seen_realtime = set()
 if 'eco_start' not in st.session_state: st.session_state.eco_start = 1
 if 'seen_eco' not in st.session_state: st.session_state.seen_eco = set()
-# 💡 초고속 화면 렌더링용 내부 메모리 캐시 창고
 if 'port_data_cache' not in st.session_state: st.session_state.port_data_cache = {}
 
 @st.cache_data(ttl=60)
@@ -227,17 +226,33 @@ def raw_calculate_technical_indicators(ticker):
     except: pass
     return "- 기술적 지표 계산 불가 (데이터 누락)"
 
-def raw_fetch_dart_disclosures(ticker, dart_key):
-    if not dart_key: return "- [알림] Open DART API 키가 등록되지 않았습니다."
+# 💡 [핵심 패치] DART API 폐기 및 네이버 전자공시 직통 크롤링 탑재
+def raw_fetch_naver_disclosures(ticker):
+    """DART API의 8자리 고유번호 한계를 극복하기 위해 네이버 증권 전자공시 직접 파싱"""
     try:
         code_match = re.search(r'\d{6}', ticker)
         if not code_match: return "- 국내 종목이 아닙니다."
-        b_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
-        res = requests.get(f"https://opendart.fss.or.kr/api/list.json?crtfc_key={dart_key}&corp_code={code_match.group()}&bgn_de={b_date}&pblntf_ty=A&pblntf_ty=B&pblntf_ty=C", timeout=2).json()
-        if res.get('status') == '000' and res.get('list'):
-            return "\n".join([f"• [{i['report_nm']}] ({i['pblntf_dt'][:4]}-{i['pblntf_dt'][4:6]}-{i['pblntf_dt'][6:]})" for i in res['list'][:5]])
-        return "- 최근 30일 내 주요 공시 없음"
-    except: return "- DART 서버 통신 오류"
+        code = code_match.group()
+        # 네이버 금융 전자공시 전용 iframe URL
+        res = requests.get(f"https://finance.naver.com/item/news_notice.naver?code={code}&page=1", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            rows = soup.select("table.type5 tr")
+            lines = []
+            for tr in rows:
+                td_title = tr.find('td', class_='title')
+                td_info = tr.find('td', class_='info')
+                td_date = tr.find('td', class_='date')
+                if td_title and td_date:
+                    title = td_title.text.strip()
+                    date_str = td_date.text.strip()
+                    info_str = td_info.text.strip() if td_info else "공시"
+                    lines.append(f"• [{info_str}] ({date_str}) {title}")
+                    if len(lines) >= 5: break
+            if lines:
+                return "\n".join(lines)
+    except: pass
+    return "- 공시 동향 조회 불가 (장시간 지연 또는 구조 변경)"
 
 def raw_fetch_supply_demand_trend(ticker):
     try:
@@ -267,12 +282,6 @@ def get_stock_current_price(ticker): return raw_get_stock_current_price(ticker)
 @st.cache_data(ttl=300)
 def get_naver_news(query, display=100, start=1, sort_type="date"): 
     return raw_fetch_naver_news(query, display, start, sort_type, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)
-
-CORE_BUSINESS_KWS = ["실적", "목표가", "수주", "합병", "M&A", "공급", "계약", "개발", "배당", "전망", "투자", "매출", "영업이익", "흑자", "독점"]
-
-def filter_core_news(raw_news_list):
-    filtered = [n for n in raw_news_list if any(kw in n['title'] or kw in n['summary'] for kw in CORE_BUSINESS_KWS)]
-    return filtered if len(filtered) >= 5 else raw_news_list[:20]
 
 def filter_news_with_gemini_lite(raw_news_list):
     if not raw_news_list: return []
@@ -332,7 +341,7 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# AI 코어 프롬프트 빌더 (Gemini 3.5 Flash 전용 구역)
+# AI 코어 프롬프트 빌더 
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -518,7 +527,6 @@ with tab5:
         avg_p = c1.text_input("평단가", value="0")
         qty = c2.number_input("수량", min_value=0, value=0)
         
-        # 💡 유령 등록 원천 차단 로직 (try~except에서 st.rerun 분리)
         if st.form_submit_button("➕ 종목 등록") and new_s:
             with st.spinner("정보 분석 중..."):
                 res = call_gemini_with_fallback(f"한국주식 '{new_s}'의 야후티커와 검색어 JSON으로 줘. {{'ticker':'', 'query':''}}", is_json=True, use_lite=True)
@@ -527,16 +535,12 @@ with tab5:
                     data = json.loads(re.search(r'\{.*\}', res, re.S).group())
                     try: final_avg_p = float(avg_p.replace(',', ''))
                     except: final_avg_p = 0.0
-                    
                     c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?,?,?,?,?,?)", 
                               (new_s.strip(), data.get('query', new_s), data.get('ticker', ''), 1 if st_owned=="보유중" else 0, final_avg_p, qty))
                     conn.commit()
                     success = True
-                except Exception as e:
-                    st.error(f"등록 실패: {e}")
-                
-                if success:
-                    st.rerun() # 정상적으로 저장 완료 시에만 새로고침
+                except Exception as e: st.error(f"등록 실패: {e}")
+                if success: st.rerun() 
 
     c.execute("SELECT id, stock_name, search_query, ticker, is_owned, avg_price, quantity FROM portfolio")
     portfolio = c.fetchall()
@@ -546,26 +550,24 @@ with tab5:
         tasks_to_run = []
         now_ts = time.time()
         
-        # 💡 거북이 삭제 원천 차단 (60초 자체 메모리 캐시 로직 도입)
         for p in portfolio:
             p_id = p[0]
-            # 최근 60초 안에 긁어온 데이터가 메모리에 있으면 그대로 재사용!
             if p_id in st.session_state.port_data_cache and (now_ts - st.session_state.port_data_cache[p_id]['time'] < 60):
                 port_cache[p_id] = st.session_state.port_data_cache[p_id]['data']
             else:
-                # 메모리에 없거나 60초가 지났으면 새로 가져오기 리스트에 추가
-                tasks_to_run.append((p, st.session_state.port_starts.get(p_id, 1), NAVER_CLIENT_ID, NAVER_CLIENT_SECRET, DART_API_KEY))
+                tasks_to_run.append((p, st.session_state.port_starts.get(p_id, 1), NAVER_CLIENT_ID, NAVER_CLIENT_SECRET))
 
         if tasks_to_run:
             with st.spinner("⚡ 퀀트 레이더 가동: 실시간 주가 및 뉴스 스크래핑 중..."):
                 def fetch_stock_raw_worker(p_tuple):
-                    p, start_idx, cid, sec, dart_k = p_tuple
+                    p, start_idx, cid, sec = p_tuple
                     p_id, name, query, ticker, owned, avg, qnt = p
                     
                     cur_p = raw_get_stock_current_price(ticker or name)
                     tech = raw_calculate_technical_indicators(ticker or name)
                     supply = raw_fetch_supply_demand_trend(ticker or name)
-                    dart = raw_fetch_dart_disclosures(ticker or name, dart_k)
+                    # 💡 DART 대신 네이버 전자공시 파싱 작동
+                    dart = raw_fetch_naver_disclosures(ticker or name) 
                     
                     broad = "|".join([k.strip() for k in (query or name).split(" OR ")])
                     raw_news = raw_fetch_naver_news(broad, display=50, start=start_idx, sort_type="date", cid=cid, secret=sec)
@@ -575,7 +577,6 @@ with tab5:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                     for r in executor.map(fetch_stock_raw_worker, tasks_to_run): 
                         port_cache[r[0]] = r
-                        # 긁어온 데이터를 자체 메모리 캐시 창고에 저장!
                         st.session_state.port_data_cache[r[0]] = {'data': r, 'time': now_ts}
 
         @st.fragment
@@ -619,7 +620,7 @@ with tab5:
                         c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?,?,?,?,?,?,?,?)", (f"[{name}] 리포트", "심층 퀀트 진단", rep, datetime.now().strftime("%Y-%m-%d %H:%M"), name, ticker, cur_price, tp)); conn.commit(); st.success("저장 완료")
                     if c2.button("🔄 재분석", key=f"force_{p_id}"): del st.session_state.analysis_results[cache_key]; st.rerun()
 
-            with st.expander("🏢 Open DART 30일 이내 주요 공시 목록", expanded=False):
+            with st.expander("🏢 네이버 전자공시 최근 주요 목록", expanded=False):
                 st.markdown(dart_str)
                 if "•" in dart_str and st.button("🤖 공시 AI 원포인트 요약", key=f"dart_ai_{p_id}"):
                     st.session_state.analysis_results[f"dart_res_{p_id}"] = call_gemini_with_fallback(f"[{name}] 공시 요약 요청:\n{dart_str}")
@@ -643,7 +644,6 @@ with tab5:
                 if st.button("🗑️ 관심종목 삭제", key=f"del_{p_id}", use_container_width=True): 
                     c.execute("DELETE FROM portfolio WHERE id=?", (p_id,))
                     conn.commit()
-                    # 💡 메모리 캐시에서도 해당 종목 삭제
                     if p_id in st.session_state.port_data_cache:
                         del st.session_state.port_data_cache[p_id]
                     st.rerun()
@@ -652,7 +652,7 @@ with tab5:
         for p in portfolio:
             if p[0] in port_cache: render_stock_box(p, port_cache[p[0]])
 
-# ----------------- [탭 6: 스크랩북 및 탭 7: 백업] -----------------
+# ----------------- [탭 6: 스크랩북 및 탭 7: 백업 기존 로직 완벽 연동] -----------------
 with tab6:
     st.subheader("📁 내 스크랩북 & AI 예측 트래킹")
     c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price FROM scrapbook ORDER BY id DESC")
