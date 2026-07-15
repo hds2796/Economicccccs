@@ -364,7 +364,7 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# AI 호출 로직
+# 💡 AI 호출 로직
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
@@ -732,7 +732,6 @@ with tab5:
                 if not fact_news: fact_news = [n for n in get_naver_news(name, display=50, start=start_idx, sort_type="sim") if is_within_7_days(n['published'])][:10]
                 return p_id, cur_p, fact_news, raw
 
-            # 💡 [해결완료] 쓰레드 시작 전에 session_state 값을 튜플로 묶어서 안전하게 던져줌
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                 tasks = [(p, st.session_state.port_starts.get(p[0], 1)) for p in portfolio]
                 for r in executor.map(fetch_p, tasks): port_cache[r[0]] = r
@@ -791,23 +790,6 @@ with tab5:
                     if c2.button("🔄 강제 재분석 (토큰 소모)", key=f"force_{p_id}", use_container_width=True):
                         del st.session_state.analysis_results[cache_key]; st.rerun()
 
-            col_edit1, col_edit2 = st.columns([1, 1])
-            with col_edit1:
-                with st.expander("⚙️ 상태 변경"):
-                    with st.form(key=f"edit_{p_id}"):
-                        new_own = st.radio("보유", ["미보유", "보유중"], index=1 if is_owned else 0)
-                        na_p = st.text_input("평단", value=f"{int(avg_price)}")
-                        nq = st.number_input("수량", min_value=0, value=int(quantity))
-                        if st.form_submit_button("수정"):
-                            try: final_p = float(na_p.replace(',', ''))
-                            except: final_p = 0.0
-                            if new_own == "미보유": final_p, nq = 0.0, 0
-                            c.execute("UPDATE portfolio SET is_owned=?, avg_price=?, quantity=? WHERE id=?", (1 if new_own=="보유중" else 0, final_p, int(nq), p_id))
-                            conn.commit(); st.rerun()
-            with col_edit2:
-                if st.button("🗑️ 관심종목 삭제", key=f"del_{p_id}"):
-                    c.execute("DELETE FROM portfolio WHERE id=?", (p_id,)); conn.commit(); st.rerun()
-
             with st.expander(f"📰 '{name}' 최신 뉴스 ({len(fact_news)}건)", expanded=False):
                 if st.button("✨ AI 문맥 정밀 필터 가동", key=f"ai_f_{p_id}"):
                     with st.spinner("Lite 모델이 옥석을 가려내는 중..."):
@@ -828,8 +810,30 @@ with tab5:
                             st.session_state.analysis_results[f"n_{n['link']}"] = {"text": call_gemini_with_fallback(build_prompt_single_news(n['title'], n['summary'], market_data_str))}
                     if f"n_{n['link']}" in st.session_state.analysis_results:
                         st.info(st.session_state.analysis_results[f"n_{n['link']}"]['text'])
+            
+            # 💡 [UI 피드백 적용] 상태 변경 및 삭제 버튼을 종목 박스의 맨 아래로 이동
+            col_edit1, col_edit2 = st.columns([1, 1])
+            with col_edit1:
+                with st.expander("⚙️ 상태 변경"):
+                    with st.form(key=f"edit_{p_id}"):
+                        new_own = st.radio("보유", ["미보유", "보유중"], index=1 if is_owned else 0)
+                        na_p = st.text_input("평단", value=f"{int(avg_price)}")
+                        nq = st.number_input("수량", min_value=0, value=int(quantity))
+                        if st.form_submit_button("수정"):
+                            try: final_p = float(na_p.replace(',', ''))
+                            except: final_p = 0.0
+                            if new_own == "미보유": final_p, nq = 0.0, 0
+                            c.execute("UPDATE portfolio SET is_owned=?, avg_price=?, quantity=? WHERE id=?", (1 if new_own=="보유중" else 0, final_p, int(nq), p_id))
+                            conn.commit(); st.rerun()
+            with col_edit2:
+                # 삭제 버튼을 맨 아래에 크게 배치
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("🗑️ 관심종목 삭제", key=f"del_{p_id}", use_container_width=True):
+                    c.execute("DELETE FROM portfolio WHERE id=?", (p_id,)); conn.commit(); st.rerun()
+
             st.divider()
 
+        # 화면에 모든 종목 렌더링
         for p in portfolio:
             if p[0] in port_cache: render_stock_box(p, port_cache[p[0]])
 
@@ -868,14 +872,15 @@ with tab6:
                 cl1.download_button("📄 HTML 저장", html, f"Report_{s[0]}.html", "text/html")
                 if cl2.button("🗑️ 삭제", key=f"sd_{s[0]}"):
                     c.execute("DELETE FROM scrapbook WHERE id=?", (s[0],)); conn.commit(); st.rerun()
-    else: st.info("저장된 스크랩 리포트가 없습니다.")
+    else:
+        st.info("저장된 스크랩 리포트가 없습니다.")
 
 # ----------------- [탭 7: 설정 및 백업] -----------------
 with tab7:
     st.subheader("⚙️ 데이터 관리")
     c.execute("SELECT COUNT(*) FROM oauth_creds")
-    is_authenticated = c.fetchone()[0] > 0
     
+    is_authenticated = c.fetchone()[0] > 0
     if not is_authenticated:
         try:
             flow = Flow.from_client_config(json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"]), scopes=SCOPES, redirect_uri=st.secrets["REDIRECT_URI"])
