@@ -335,6 +335,7 @@ with tab5:
         for p in portfolio:
             if p[0] in port_cache: render_stock_box(p, port_cache[p[0]])
 
+# [탭 6: 스크랩북 및 적중률 트래킹] (0으로 나누기 에러 수정 완료)
 with tab6:
     st.subheader("📁 내 스크랩북 & AI 예측 트래킹")
     c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price FROM scrapbook ORDER BY id DESC")
@@ -344,10 +345,16 @@ with tab6:
             with st.expander(f"[{s[5]}] {s[1]}"):
                 if s[6] and s[9] > 0:
                     cur = get_stock_current_price(s[7] or s[6])
+                    
+                    # 💡 0으로 나누기(ZeroDivisionError) 방지 로직
+                    actual_roi = ((cur - s[8]) / s[8]) * 100 if s[8] > 0 else 0.0
+                    achievement_rate = (cur / s[9]) * 100 if s[9] > 0 else 0.0
+                    
                     c1, c2, c3 = st.columns(3)
                     c1.metric("저장가", f"{s[8]:,.0f}")
-                    c2.metric("실시간", f"{cur:,.0f}", f"{((cur-s[8])/s[8])*100:+.2f}%")
-                    c3.metric("AI 목표가", f"{s[9]:,.0f}", f"{(cur/s[9])*100:.1f}% 달성")
+                    c2.metric("실시간", f"{cur:,.0f}", f"{actual_roi:+.2f}%")
+                    c3.metric("AI 목표가", f"{s[9]:,.0f}", f"{achievement_rate:.1f}% 달성")
+                
                 st.write(s[4])
                 if st.button("🗑️ 삭제", key=f"sd_{s[0]}"):
                     c.execute("DELETE FROM scrapbook WHERE id=?", (s[0],)); conn.commit(); st.rerun()
