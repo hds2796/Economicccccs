@@ -338,7 +338,6 @@ def get_fallback_models(use_lite):
     return [
         ('gemini-3.5-flash', 'Gemini 3.5 Flash'),
         ('gemini-3-flash-preview', 'gemini-3-flash-preview (Fallback)'),
-        ('gemini-2.5-flash', 'gemini-2.5-flash (Fallback)'),
         ('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite (Fallback)')
     ]
 
