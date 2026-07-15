@@ -102,7 +102,7 @@ handle_oauth_callback()
 
 def init_drive_service():
     c.execute("SELECT creds FROM oauth_creds")
-    row = r if (r := c.fetchone()) else None
+    row = c.fetchone()
     if row:
         try: return build('drive', 'v3', credentials=Credentials.from_authorized_user_info(json.loads(row[0]), SCOPES))
         except: pass
@@ -170,7 +170,6 @@ def clean_html(raw_html):
 # 💡 순수 파이썬 코어 로직 (스트림릿 캐시 독립) - 초고속 멀티쓰레딩용
 # =======================================================
 def raw_get_stock_current_price(ticker):
-    """스트림릿 캐시 우회 순수 주가 조회 함수"""
     if not ticker: return 0.0
     try:
         code_match = re.search(r'\d{6}', ticker)
@@ -184,7 +183,6 @@ def raw_get_stock_current_price(ticker):
     return 0.0
 
 def raw_fetch_naver_news(query, display=100, start=1, sort_type="date", cid="", secret=""):
-    """스트림릿 캐시 우회 순수 뉴스 파서"""
     if not cid or not secret: return []
     queries = [q.strip() for q in query.split('|') if q.strip()]
     all_items = []
@@ -204,7 +202,6 @@ def raw_fetch_naver_news(query, display=100, start=1, sort_type="date", cid="", 
     return unique[:display]
 
 def raw_calculate_technical_indicators(ticker):
-    """스트림릿 캐시 우회 순수 기술적 지표 계산"""
     try:
         code_match = re.search(r'\d{6}', ticker)
         df = yf.Ticker(f"{code_match.group()}.KS" if code_match else ticker).history(period="60d")
@@ -215,13 +212,13 @@ def raw_calculate_technical_indicators(ticker):
             delta = df['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(14).mean().iloc[-1]
             loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
-            rsi = 100 - (100 / (1 + (gain / loss))) if loss > 0 else 100
+            rs = gain / loss if loss > 0 else 0
+            rsi = 100 - (100 / (1 + rs)) if loss > 0 else 100
             return f"- 20일선: {ma20:,.0f}원 (현재가대비 {((cur-ma20)/ma20)*100:+.1f}%)\n- 60일선: {ma60:,.0f}원\n- RSI(14): {rsi:.1f} ({'과열🔴' if rsi>=70 else '침체🔵' if rsi<=30 else '중립⚖️'})"
     except: pass
     return "- 기술적 지표 계산 불가"
 
 def raw_fetch_dart_disclosures(ticker, dart_key):
-    """스트림릿 캐시 우회 순수 DART 호출"""
     if not dart_key: return "- [알림] Open DART API 키가 등록되지 않았습니다."
     try:
         code_match = re.search(r'\d{6}', ticker)
@@ -234,7 +231,6 @@ def raw_fetch_dart_disclosures(ticker, dart_key):
     except: return "- DART 서버 통신 오류"
 
 def raw_fetch_supply_demand_trend(ticker):
-    """스트림릿 캐시 우회 순수 수급 데이터 크롤링"""
     try:
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
@@ -253,13 +249,43 @@ def raw_fetch_supply_demand_trend(ticker):
     return "- 수급 동향 조회 불가"
 
 # =======================================================
+# 💡 [핵심 패치] Gemini Lite 모델을 이용한 스마트 AI 판사 엔진
+# =======================================================
+def filter_news_with_gemini_lite(raw_news_list):
+    """키워드 대신 가볍고 빠른 Gemini 3.1 Flash-Lite 판사를 불러와 문맥으로 필터링"""
+    if not raw_news_list: return []
+    
+    # 50개 리스트의 제목만 모아 직관적인 프롬프트 작성
+    context_lines = []
+    for idx, n in enumerate(raw_news_list):
+        context_lines.append(f"[{idx}] {n['title']}")
+    context_block = "\n".join(context_lines)
+    
+    prompt = (
+        f"너는 베테랑 헤지펀드 매니저야. 아래의 최신 뉴스 제목 50개 목록을 읽고, "
+        f"단순 시황 요약이나 영양가 없는 자극성 찌라시는 모두 탈락시키고, "
+        f"기업의 실적/수주/공급계약/M&A/제도변경 등 주가 및 펀더멘털에 실제로 지대한 영향을 줄 진짜 '알짜 기사'의 인덱스 번호만 골라내라.\n\n"
+        f"[뉴스 목록]\n{context_block}\n\n"
+        f"반드시 다른 부연설명 없이 파이썬 배열 형식만 출력해라. 예: [0, 3, 15, 22]"
+    )
+    
+    try:
+        res = call_gemini_with_fallback(prompt, is_json=True, use_lite=True)
+        matched_indices = json.loads(re.search(r'\[.*\]', res).group())
+        filtered_result = [raw_news_list[i] for i in matched_indices if i < len(raw_news_list)]
+        if filtered_result: return filtered_result
+    except: pass
+    return raw_news_list[:12] # 만에 하나 에러 발생 시에만 기본 최신순 상위 상판 반환
+
+# =======================================================
 # 기존 앱 전용 캐시 래퍼 (메인 쓰레드 구동용)
 # =======================================================
 @st.cache_data(ttl=60)
 def get_stock_current_price(ticker): return raw_get_stock_current_price(ticker)
 
 @st.cache_data(ttl=300)
-def get_naver_news(query, display=100, start=1, sort_type="date"): return raw_fetch_naver_news(query, display, start, sort_type, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)
+def get_naver_news(query, display=100, start=1, sort_type="date"): 
+    return raw_fetch_naver_news(query, display, start, sort_type, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)
 
 def fetch_unique_realtime_news(query):
     unique_news = []
@@ -276,30 +302,37 @@ def fetch_unique_realtime_news(query):
 def fetch_unique_eco_news(query):
     unique_news = []
     attempts = 0
-    while len(unique_news) < 10 and st.session_state.eco_start <= 900 and attempts < 3:
-        batch = get_naver_news(query, display=10, start=st.session_state.eco_start, sort_type="sim")
-        st.session_state.eco_start += 10; attempts += 1
+    while len(unique_news) < 15 and st.session_state.eco_start <= 900 and attempts < 4:
+        # 무조건 최신순(date)으로 다량 수집 후 뇌(Gemini Lite)로 알짜만 정밀 분류
+        batch = get_naver_news(query, display=50, start=st.session_state.eco_start, sort_type="date")
+        st.session_state.eco_start += 50; attempts += 1
         if not batch: break
-        for n in batch:
+        
+        # 💡 AI 판사 가동
+        core_batch = filter_news_with_gemini_lite(batch)
+        for n in core_batch:
             if n['link'] not in st.session_state.seen_eco: unique_news.append(n); st.session_state.seen_eco.add(n['link'])
-            if len(unique_news) == 10: break
+            if len(unique_news) == 15: break
     st.session_state.current_eco_news = unique_news
 
 def fetch_unique_sector_news(sector_name, query):
     if sector_name not in st.session_state.sector_starts: st.session_state.sector_starts[sector_name] = 1; st.session_state.seen_sectors[sector_name] = set()
     unique_news = []
     attempts = 0
-    while len(unique_news) < 10 and st.session_state.sector_starts[sector_name] <= 900 and attempts < 3:
-        batch = get_naver_news(query, display=30, start=st.session_state.sector_starts[sector_name], sort_type="sim")
-        st.session_state.sector_starts[sector_name] += 30; attempts += 1
+    while len(unique_news) < 15 and st.session_state.sector_starts[sector_name] <= 900 and attempts < 4:
+        batch = get_naver_news(query, display=50, start=st.session_state.sector_starts[sector_name], sort_type="date")
+        st.session_state.sector_starts[sector_name] += 50; attempts += 1
         if not batch: break
-        for n in batch:
+        
+        # 💡 AI 판사 가동
+        core_batch = filter_news_with_gemini_lite(batch)
+        for n in core_batch:
             if n['link'] not in st.session_state.seen_sectors[sector_name]: unique_news.append(n); st.session_state.seen_sectors[sector_name].add(n['link'])
-            if len(unique_news) == 10: break
+            if len(unique_news) == 15: break
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# AI 코어 프롬프트 빌더
+# AI 코어 프롬프트 빌더 (Gemini 3.5 Flash 전용 구역)
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -365,7 +398,7 @@ with tab1:
     realtime_query = "증시|금융|환율|물가|부동산|정책"
     if not st.session_state.current_realtime_news: fetch_unique_realtime_news(realtime_query)
     if st.button("🤖 실시간 뉴스 TOP 20 기반 종합 분석", type="primary", use_container_width=True):
-        st.session_state.realtime_analysis = st.write_stream(call_gemini_stream_with_fallback(build_prompt_realtime(st.session_state.current_realtime_news[:20], market_data_str)))
+        st.session_state.realtime_analysis = st.write_stream(call_gemini_stream_with_fallback(f"최신 실시간 뉴스 종합 브리핑:\n[지표]: {market_data_str}\n" + "\n".join([f"- {n['title']}" for n in st.session_state.current_realtime_news[:20]]) + "\n\n1. 🔔 핵심 이슈 요약\n2. 📉 경제/증시 파급력\n3. 🎯 리스크 및 섹터"))
         st.rerun()
     if st.session_state.realtime_analysis:
         with st.expander("📊 AI 실시간 시황 종합 브리핑", expanded=True):
@@ -382,35 +415,74 @@ with tab1:
                 st.info(st.session_state.analysis_results[f"news_{news['link']}"]['text'])
 
 with tab2:
-    st.subheader("오늘의 핵심 경제 뉴스")
+    st.subheader("今日 오늘의 핵심 경제 뉴스 (AI 판사 검수 완료)")
     c.execute("SELECT check_date, score FROM market_score_history ORDER BY id DESC LIMIT 15")
     if hist := c.fetchall():
         with st.expander("📈 AI 시장 심리 지수 추이 그래프", expanded=False): st.line_chart(dict(zip([r[0][5:] for r in reversed(hist)], [r[1] for r in reversed(hist)])))
+    
     eco_query = "경제|증시|주식|금리|실적"
     if not st.session_state.current_eco_news: fetch_unique_eco_news(eco_query)
-    if st.button("🤖 TOP 50 뉴스 기반 시장 브리핑 생성", type="primary"):
-        res = call_gemini_with_fallback(build_prompt_overall(get_naver_news(eco_query, display=50, sort_type="sim"), market_data_str))
-        score = int(m.group(1)) if (m := re.search(r'SCORE:\s*(\d+)', res)) else 50
-        c.execute("INSERT INTO market_score_history (check_date, score) VALUES (?, ?)", (datetime.now().strftime("%Y-%m-%d %H:%M"), score)); conn.commit()
-        st.session_state.overall_analysis = {"text": re.sub(r'SCORE:\s*\d+', '', res).strip(), "score": score}; st.rerun()
+    
+    col_e1, col_e2 = st.columns([4, 1])
+    with col_e1:
+        if st.button("🤖 AI 종합 마켓 브리핑 리포트 생성", type="primary", use_container_width=True):
+            res = call_gemini_with_fallback(build_prompt_overall(get_naver_news(eco_query, display=50, sort_type="date"), market_data_str))
+            score = int(m.group(1)) if (m := re.search(r'SCORE:\s*(\d+)', res)) else 50
+            c.execute("INSERT INTO market_score_history (check_date, score) VALUES (?, ?)", (datetime.now().strftime("%Y-%m-%d %H:%M"), score)); conn.commit()
+            st.session_state.overall_analysis = {"text": re.sub(r'SCORE:\s*\d+', '', res).strip(), "score": score}; st.rerun()
+    with col_e2:
+        # 💡 무한 페이징 스크롤 엔진 연동 버튼
+        if st.button("🔄 다음 기사 보기", key="next_eco_btn", use_container_width=True):
+            fetch_unique_eco_news(eco_query)
+            st.rerun()
+
     if st.session_state.overall_analysis:
         st.markdown(f"**AI 시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
         with st.expander("📝 거시 브리핑 리포트", expanded=True): st.write(st.session_state.overall_analysis['text'])
+    
+    for i, news in enumerate(st.session_state.current_eco_news):
+        with st.expander(f"📰 {news['title']}"):
+            st.markdown(f"[원문 읽기]({news['link']}) | {news['published']}")
+            st.caption(news['summary'])
+            if st.button("이 기사 심층 분석", key=f"t1_btn_{news['link']}"):
+                with st.spinner("분석 중..."):
+                    st.session_state.analysis_results[f"eco_{news['link']}"] = {"text": call_gemini_with_fallback(build_prompt_single_news(news['title'], news['summary'], market_data_str)), "time": time.time()}
+            if f"eco_{news['link']}" in st.session_state.analysis_results:
+                st.write(st.session_state.analysis_results[f"eco_{news['link']}"]['text'])
 
 with tab3:
-    sectors = {"반도체": "반도체|삼성전자|SK하이닉스", "2차전지": "2차전지|배터리", "바이오": "바이오|제약|신약", "금융/밸류업": "금융|밸류업", "IT/플랫폼": "IT|네이버|카카오"}
-    selected_sector = st.selectbox("관심 섹터 선택", list(sectors.keys()))
+    st.subheader("📑 섹터별 핵심 비즈니스 뉴스")
+    sectors = {"반도체": "반도체|삼성전자|SK하이닉스", "2차전지": "2차전지|배터리|양극재", "바이오": "바이오|제약|신약|FDA", "금융/밸류업": "금융|은행|밸류업", "IT/플랫폼": "IT|네이버|카카오"}
+    
+    col_s1, col_s2, col_s3 = st.columns([2, 1, 1])
+    with col_s1: selected_sector = st.selectbox("관심 섹터 선택", list(sectors.keys()))
     if selected_sector not in st.session_state.current_sector_news: fetch_unique_sector_news(selected_sector, sectors[selected_sector])
-    if st.button("🤖 섹터 종합 분석", type="primary"):
-        st.session_state[f'sec_sum_{selected_sector}'] = call_gemini_with_fallback(build_prompt_sector(selected_sector, get_naver_news(sectors[selected_sector], display=20, sort_type="sim"), market_data_str))
+        
+    with col_s2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🤖 이 섹터 종합 리포트", type="primary", use_container_width=True):
+            st.session_state[f'sec_sum_{selected_sector}'] = call_gemini_with_fallback(build_prompt_sector(selected_sector, get_naver_news(sectors[selected_sector], display=20, sort_type="date"), market_data_str))
+    with col_s3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        # 💡 섹터 무한 페이징 연동 버튼
+        if st.button("🔄 다음 섹터 뉴스 보기", key="next_sec_btn", use_container_width=True):
+            fetch_unique_sector_news(selected_sector, sectors[selected_sector])
+            st.rerun()
+
     if f'sec_sum_{selected_sector}' in st.session_state:
         with st.info(st.session_state[f'sec_sum_{selected_sector}']): pass
+
+    for i, news in enumerate(st.session_state.current_sector_news.get(selected_sector, [])):
+        with st.expander(f"🏭 {news['title']}"):
+            st.markdown(f"[원문 읽기]({news['link']}) | {news['published']}\n\n{news['summary']}")
 
 with tab4:
     st.subheader("🎯 AI 맞춤 추천종목 발굴 (2-Step 퀀트 필터링)")
     investment_horizon = st.radio("투자 기간 설정", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
     if st.button("🚀 유망 종목 정밀 발굴 가동", type="primary", use_container_width=True):
-        rec_news = get_naver_news("특징주|수주|실적|목표가", display=30, sort_type="sim")
+        raw_rec = get_naver_news("특징주|수주|실적|목표가", display=100, sort_type="date")
+        rec_news = filter_news_with_gemini_lite(raw_rec)
+        
         res1 = call_gemini_with_fallback(f"다음 뉴스에서 유망 종목 5개를 골라 JSON 배열로 출력하세요. [{{\"name\":\"종목명\",\"ticker\":\"6자리코드\"}}]\n" + "\n".join([n['title'] for n in rec_news]), is_json=True)
         try:
             candidates = json.loads(re.search(r'\[.*\]', res1, re.S).group())
@@ -460,31 +532,24 @@ with tab5:
     portfolio = c.fetchall()
     
     if portfolio:
-        all_kws = ["주가","실적","목표가","수주","공급","M&A"]
         port_cache = {}
-        
         with st.spinner("⚡ 퀀트 레이더 가동: 100% 독립 병렬 스크래핑 엔진 가동 중..."):
-            
-            # 💡 완벽하게 독립된 백그라운드 Worker: 스트림릿 함수(st.xxx)를 단 1줄도 사용하지 않음
             def fetch_stock_raw_worker(p_tuple):
                 p, start_idx, cid, sec, dart_k = p_tuple
                 p_id, name, query, ticker, owned, avg, qnt = p
                 
-                # 순수 파이썬 로직으로만 통신
                 cur_p = raw_get_stock_current_price(ticker or name)
                 tech = raw_calculate_technical_indicators(ticker or name)
                 supply = raw_fetch_supply_demand_trend(ticker or name)
                 dart = raw_fetch_dart_disclosures(ticker or name, dart_k)
                 
                 broad = "|".join([k.strip() for k in (query or name).split(" OR ")])
-                raw_news = raw_fetch_naver_news(broad, display=30, start=start_idx, sort_type="date", cid=cid, secret=sec)
+                raw_news = raw_fetch_naver_news(broad, display=50, start=start_idx, sort_type="date", cid=cid, secret=sec)
                 
-                fact_news = [n for n in raw_news if any(k in n['title'] or k in n['summary'] for k in all_kws)][:10]
-                if not fact_news: fact_news = raw_news[:10]
-                
-                return p_id, cur_p, fact_news, raw_news, tech, supply, dart
+                # 관심종목 내부 필터망 가동
+                fact_news = filter_news_with_gemini_lite(raw_news)
+                return p_id, cur_p, fact_news[:10], raw_news, tech, supply, dart
 
-            # 스트림릿의 간섭을 피해 초고속 동시 출발 (경고 메시지 원천 차단)
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                 tasks = [(p, st.session_state.port_starts.get(p[0], 1), NAVER_CLIENT_ID, NAVER_CLIENT_SECRET, DART_API_KEY) for p in portfolio]
                 for r in executor.map(fetch_stock_raw_worker, tasks): port_cache[r[0]] = r
@@ -557,7 +622,7 @@ with tab5:
         for p in portfolio:
             if p[0] in port_cache: render_stock_box(p, port_cache[p[0]])
 
-# ----------------- [탭 6: 스크랩북 및 탭 7: 백업 기존 로직 완벽 연동] -----------------
+# ----------------- [탭 6: 스크랩북 및 탭 7: 백업] -----------------
 with tab6:
     st.subheader("📁 내 스크랩북 & AI 예측 트래킹")
     c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price FROM scrapbook ORDER BY id DESC")
@@ -595,5 +660,5 @@ with tab7:
                 c.execute("DELETE FROM portfolio"); c.execute("DELETE FROM scrapbook")
                 for p in db['portfolio']: c.execute("INSERT INTO portfolio VALUES (" + ",".join(["?"]*len(p)) + ")", p)
                 for s in db['scrapbook']: c.execute("INSERT INTO scrapbook VALUES (" + ",".join(["?"]*len(s)) + ")", s)
-                conn.commit(); st.success(f"복구 완료: {file_name}"); st.rerun()
+                conn.commit(); st.success(f"복구 완료: {name}"); st.rerun()
             except Exception as e: st.error(f"실패: {e}")
