@@ -195,7 +195,7 @@ def get_market_data():
         try:
             encoded_ticker = urllib.parse.quote(ticker)
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{encoded_ticker}?range=5d&interval=1d"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
             res = requests.get(url, headers=headers, timeout=5)
             data = res.json()
             closes = data['chart']['result'][0]['indicators']['quote'][0]['close']
@@ -364,7 +364,7 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# 💡 AI 호출 로직
+# AI 호출 로직
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
@@ -692,7 +692,7 @@ with tab4:
                                 if not c.fetchone(): c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?,?,?,?,?,?)", (s_name, s_name, s_ticker, 0, 0.0, 0))
                                 conn.commit(); st.success(f"'{s_name}' 찜하기 완료!")
 
-# ----------------- [탭 5: 관심종목 (멀티태스킹 적용)] -----------------
+# ----------------- [탭 5: 관심종목] -----------------
 with tab5:
     st.subheader("⭐️ 내 관심종목 & AI 앙상블 진단")
     with st.form("add_stock"):
@@ -717,9 +717,9 @@ with tab5:
         all_kws = list(set(["주가","실적","목표가","수주","공급","M&A"] + get_dynamic_business_keywords()))
         port_cache = {}
         with st.spinner("⚡ 전체 관심종목 데이터 병렬 동시 수집 중..."):
-            def fetch_p(p):
+            def fetch_p(p_data_tuple):
+                p, start_idx = p_data_tuple
                 p_id, name, query, ticker, owned, avg, qnt = p
-                start_idx = st.session_state.port_starts.get(p_id, 1)
                 cur_p = get_stock_current_price(ticker or name)
                 broad = "|".join([k.strip() for k in (query or name).split(" OR ")])
                 raw = get_naver_news(broad, display=100, start=start_idx)
@@ -732,10 +732,11 @@ with tab5:
                 if not fact_news: fact_news = [n for n in get_naver_news(name, display=50, start=start_idx, sort_type="sim") if is_within_7_days(n['published'])][:10]
                 return p_id, cur_p, fact_news, raw
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as exe:
-                for r in exe.map(fetch_p, portfolio): port_cache[r[0]] = r
+            # 💡 [해결완료] 쓰레드 시작 전에 session_state 값을 튜플로 묶어서 안전하게 던져줌
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                tasks = [(p, st.session_state.port_starts.get(p[0], 1)) for p in portfolio]
+                for r in executor.map(fetch_p, tasks): port_cache[r[0]] = r
 
-        # 💡 [탭 5 핵심] Fragment로 격리된 독립 렌더링 (화면 멈춤 방지)
         @st.fragment
         def render_stock_box(p, p_data):
             p_id, name, query, ticker, is_owned, avg_price, quantity = p
@@ -746,7 +747,7 @@ with tab5:
             
             with col_info:
                 if is_owned:
-                    roi = ((cur_price - avg_price)/avg_price)*100 if avg_price>0 else 0.0
+                    roi = ((cur_price - avg_price)/avg_price)*100 if avg_price > 0 else 0.0
                     st.caption(f"💼 **보유** | 평단:{avg_price:,.0f} | 수량:{quantity} | 현재:{cur_price:,.0f} | 수익률: {'🔴' if roi>0 else '🔵'} {roi:.2f}%")
                 else: st.caption(f"👀 **관심 (미보유)** | 현재가: {cur_price:,.0f}원")
             
@@ -760,13 +761,12 @@ with tab5:
                 else:
                     if st.button("🚀 AI 심층 진단", key=f"run_{p_id}", type="primary"):
                         with st.spinner("🤖 AI 분석 중... (다른 탭 이동 및 클릭 가능)"):
-                            # 앙상블 로직 결합
                             ai_news = st.session_state.get(f"ai_news_{p_id}", [])
                             combined = {n['link']: n for n in (fact_news + ai_news)}.values()
-                            roi_val = ((cur_price - avg_price)/avg_price)*100 if avg_price>0 else 0.0
+                            roi_val = ((cur_price - avg_price)/avg_price)*100 if avg_price > 0 else 0.0
                             status = f"보유중(수익률{roi_val:.1f}%)" if is_owned else "미보유"
                             
-                            prompt = build_deep_dive_prompt(name, ticker, list(combined), status, cur_price, market_data_str)
+                            prompt = build_prompt_deep_dive(name, ticker, list(combined), 1 if is_owned else 0, avg_price, quantity, cur_price, market_data_str)
                             report = call_gemini_with_fallback(prompt)
                             st.session_state.analysis_results[cache_key] = {"text": report, "time": time.time()}
                             st.session_state[f"show_{p_id}"] = True
@@ -830,11 +830,10 @@ with tab5:
                         st.info(st.session_state.analysis_results[f"n_{n['link']}"]['text'])
             st.divider()
 
-        # 화면에 모든 종목 렌더링
         for p in portfolio:
             if p[0] in port_cache: render_stock_box(p, port_cache[p[0]])
 
-# ----------------- [탭 6: 스크랩북] (0 나누기 완벽 방지) -----------------
+# ----------------- [탭 6: 스크랩북] -----------------
 with tab6:
     st.subheader("📁 내 스크랩북 & AI 예측 트래킹")
     c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price FROM scrapbook ORDER BY id DESC")
@@ -852,7 +851,6 @@ with tab6:
             with st.expander(f"[{s[5]}] {s[1]}"):
                 if s[6] and s[9] > 0:
                     cur = get_stock_current_price(s[7] or s[6])
-                    # 💡 ZeroDivisionError 철벽 방어막
                     roi = ((cur - s[8]) / s[8]) * 100 if s[8] > 0 else 0.0
                     ach = (cur / s[9]) * 100 if s[9] > 0 else 0.0
                     
@@ -870,15 +868,12 @@ with tab6:
                 cl1.download_button("📄 HTML 저장", html, f"Report_{s[0]}.html", "text/html")
                 if cl2.button("🗑️ 삭제", key=f"sd_{s[0]}"):
                     c.execute("DELETE FROM scrapbook WHERE id=?", (s[0],)); conn.commit(); st.rerun()
-    else:
-        st.info("저장된 스크랩 리포트가 없습니다.")
+    else: st.info("저장된 스크랩 리포트가 없습니다.")
 
-# ----------------- [탭 7: 설정 및 백업] (문법 오류 픽스 완료) -----------------
+# ----------------- [탭 7: 설정 및 백업] -----------------
 with tab7:
     st.subheader("⚙️ 데이터 관리")
     c.execute("SELECT COUNT(*) FROM oauth_creds")
-    
-    # 💡 바다코끼리 연산자(:=) 에러가 나지 않도록 두 줄로 정상화
     is_authenticated = c.fetchone()[0] > 0
     
     if not is_authenticated:
@@ -910,13 +905,10 @@ with tab7:
         st.divider()
         if st.button("🔄 최신 구글 백업 강제 불러오기 (현재 데이터 덮어씀)"):
             try:
-                data, name = download_latest_from_google_drive()
-                db = json.loads(data.decode('utf-8'))
-                c.execute("DELETE FROM portfolio")
-                c.execute("DELETE FROM scrapbook")
+                content_bytes, file_name = download_latest_from_google_drive()
+                db = json.loads(content_bytes.decode('utf-8'))
+                c.execute("DELETE FROM portfolio"); c.execute("DELETE FROM scrapbook")
                 for p in db['portfolio']: c.execute("INSERT INTO portfolio VALUES (" + ",".join(["?"]*len(p)) + ")", p)
                 for s in db['scrapbook']: c.execute("INSERT INTO scrapbook VALUES (" + ",".join(["?"]*len(s)) + ")", s)
-                conn.commit()
-                st.success(f"복구 완료: {name}")
-                st.rerun()
+                conn.commit(); st.success(f"복구 완료: {file_name}"); st.rerun()
             except Exception as e: st.error(f"실패: {e}")
