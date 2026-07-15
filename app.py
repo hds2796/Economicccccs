@@ -109,14 +109,14 @@ def upload_to_google_drive(json_string):
 
 def download_latest_from_google_drive():
     service = init_drive_service()
-    if not service: raise Exception("구글 로그인 필요")
+    if not service: raise Exception("백업 파일 없음")
     results = service.files().list(q=f"'{st.secrets['GOOGLE_FOLDER_ID']}' in parents and trashed = false", orderBy="modifiedTime desc", pageSize=1).execute()
     files = results.get('files', [])
     if not files: raise Exception("백업 파일 없음")
     return service.files().get_media(fileId=files[0]['id']).execute(), files[0]['name']
 
 # =======================================================
-# 2. 데이터 상태 관리 및 시장 데이터 (S&P 500 패치 완료)
+# 2. 데이터 상태 관리 및 시장 데이터
 # =======================================================
 for key in ['analysis_results', 'seen_realtime', 'seen_eco', 'sector_starts', 'seen_sectors', 'port_starts', 'current_sector_news']:
     if key not in st.session_state: st.session_state[key] = {} if 'starts' in key or 'news' in key or 'sectors' in key or 'results' in key else set()
@@ -188,7 +188,7 @@ def get_naver_news(query, display=100, start=1, sort_type="date"):
     return unique[:display]
 
 # =======================================================
-# 3. AI 코어 엔진 (Lite 모델 분리 & 앙상블 로직)
+# 3. AI 코어 엔진
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -201,7 +201,7 @@ def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
 @st.cache_data(ttl=86400)
 def get_dynamic_keywords():
     try:
-        res = call_gemini_with_fallback("현재 한국 주식 시장 핫 키워드 15개를 '|'로 연결해 출력해줘(예: HBM|밸류업)", use_lite=True)
+        res = call_gemini_with_fallback("현재 한국 주식 시장 핫 키워드 15개를 '|'로 연결해 출력해줘", use_lite=True)
         return re.sub(r'[^가-힣a-zA-Z0-9|]', '', res).strip().split('|')
     except: return ["HBM", "AI", "밸류업", "전고체", "M&A", "실적"]
 
@@ -230,7 +230,6 @@ st.divider()
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📰 실시간", "🔥 핵심경제", "📑 섹터", "🎯 추천", "⭐️ 관심종목", "📁 스크랩", "⚙️ 설정"])
 
-# --- [탭 5: 관심종목] (Fragment 멀티태스킹 적용 핵심 구역) ---
 with tab5:
     st.subheader("⭐️ 내 관심종목 & AI 앙상블 진단")
     
@@ -241,7 +240,7 @@ with tab5:
         avg_p = c1.text_input("평단가", value="0")
         qty = c2.number_input("수량", min_value=0, value=0)
         if st.form_submit_button("➕ 등록") and new_s:
-            res = call_gemini_with_fallback(f"한국주식 '{new_s}'의 야후티커(.KS/.KQ)와 검색어 JSON으로 줘. {{'ticker':'', 'query':''}}", is_json=True, use_lite=True)
+            res = call_gemini_with_fallback(f"한국주식 '{new_s}'의 야후티커 JSON으로 줘. {{'ticker':'', 'query':''}}", is_json=True, use_lite=True)
             try:
                 data = json.loads(re.search(r'\{.*\}', res, re.S).group())
                 c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?,?,?,?,?,?)", (new_s, data['query'], data['ticker'], 1 if st_owned=="보유중" else 0, float(avg_p.replace(',','')), qty))
@@ -261,10 +260,10 @@ with tab5:
                 raw = get_naver_news(query or name, display=50)
                 fact_news = [n for n in raw if any(k in n['title'] or k in n['summary'] for k in all_kws)]
                 return p_id, cur_p, fact_news[:10], raw[:30]
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as exe:
-                for r in exe.map(fetch_p, portfolio): port_cache[r[0]] = r
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                tasks = [(p, st.session_state.port_starts.get(p[0], 1)) for p in portfolio]
+                for r in executor.map(lambda t: fetch_p(t[0]), tasks): port_cache[r[0]] = r
 
-        # --- ⭐️ 우회법 핵심: Fragment 함수 정의 ---
         @st.fragment
         def render_stock_box(p, p_data):
             p_id, name, query, ticker, is_owned, avg_price, quantity = p
@@ -280,7 +279,6 @@ with tab5:
                 else: st.caption(f"👀 **관심** | 현재가: {cur_price:,.0f}원")
             
             with col_btn:
-                # 영구 캐시 확인
                 cache_key = f"deep_{p_id}"
                 has_cache = cache_key in st.session_state.analysis_results
                 
@@ -289,18 +287,16 @@ with tab5:
                         st.session_state[f"show_{p_id}"] = True
                 else:
                     if st.button("🚀 AI 심층 진단", key=f"run_{p_id}", type="primary"):
-                        with st.spinner("🤖 AI가 멀티태스킹 중... (탭 이동 가능)"):
-                            # 앙상블 뉴스 결합
+                        with st.spinner("🤖 AI 분석 중... (탭 이동 가능)"):
                             ai_news = st.session_state.get(f"ai_news_{p_id}", [])
                             combined = {n['link']: n for n in (fact_news + ai_news)}.values()
-                            status = f"보유중(수익률{((cur_price-avg_price)/avg_price)*100:.1f}%)" if is_owned else "미보유"
+                            status = f"보유중" if is_owned else "미보유"
                             prompt = build_deep_dive_prompt(name, ticker, list(combined), status, cur_price, market_str)
                             report = call_gemini_with_fallback(prompt)
                             st.session_state.analysis_results[cache_key] = {"text": report, "time": time.time()}
                             st.session_state[f"show_{p_id}"] = True
                             st.rerun()
 
-            # 리포트 출력 구역
             if st.session_state.get(f"show_{p_id}"):
                 with st.expander("📝 AI 포트폴리오 진단 리포트", expanded=True):
                     rep = st.session_state.analysis_results[cache_key]['text']
@@ -316,16 +312,15 @@ with tab5:
                     if c2.button("🔄 강제 재분석", key=f"force_{p_id}"):
                         del st.session_state.analysis_results[cache_key]; st.rerun()
 
-            # 뉴스 구역
             with st.expander(f"📰 '{name}' 관련 뉴스 보기", expanded=False):
                 if st.button("✨ AI 문맥 정밀 필터 가동", key=f"ai_f_{p_id}"):
-                    with st.spinner("Lite 모델이 옥석 가리는 중..."):
+                    with st.spinner("뉴스 분석 중..."):
                         news_context = "\n".join([f"[{i}] {n['title']}" for i,n in enumerate(raw_news)])
-                        res = call_gemini_with_fallback(f"{news_context}\n위 뉴스 중 호재/악재 기사 인덱스만 JSON [0,1]로 줘", use_lite=True)
+                        res = call_gemini_with_fallback(f"{news_context}\n위 뉴스 중 호재/악재 인덱스만 JSON [0,1]로 줘", use_lite=True)
                         try:
                             idx = json.loads(re.search(r'\[.*\]', res).group())
                             st.session_state[f"ai_news_{p_id}"] = [raw_news[i] for i in idx if i < len(raw_news)]
-                            st.success("필터링 완료 (심층 진단 시 반영됨)")
+                            st.success("필터링 완료")
                         except: pass
                 
                 display_news = st.session_state.get(f"ai_news_{p_id}", fact_news)
@@ -337,13 +332,9 @@ with tab5:
                 c.execute("DELETE FROM portfolio WHERE id=?", (p_id,)); conn.commit(); st.rerun()
             st.divider()
 
-        # 개별 종목 박스 렌더링
         for p in portfolio:
             if p[0] in port_cache: render_stock_box(p, port_cache[p[0]])
 
-# =======================================================
-# 5. 기타 탭 (스크랩북, 백업 등 기존 로직 유지)
-# =======================================================
 with tab6:
     st.subheader("📁 내 스크랩북 & AI 예측 트래킹")
     c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price FROM scrapbook ORDER BY id DESC")
@@ -361,35 +352,46 @@ with tab6:
                 if st.button("🗑️ 삭제", key=f"sd_{s[0]}"):
                     c.execute("DELETE FROM scrapbook WHERE id=?", (s[0],)); conn.commit(); st.rerun()
 
+# --- [탭 7: 설정 및 백업] (들여쓰기 및 바코끼리 연산자 에러 교정 구역) ---
 with tab7:
     st.subheader("⚙️ 데이터 관리")
     c.execute("SELECT COUNT(*) FROM oauth_creds")
     is_authenticated = c.fetchone()[0] > 0
     
     if not is_authenticated:
-        url, state = Flow.from_client_config(json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"])...
-        c.execute("DELETE FROM oauth_store"); c.execute("INSERT INTO oauth_store VALUES (?,?)", (state, Flow.from_client_config(json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"]), scopes=SCOPES, redirect_uri=st.secrets["REDIRECT_URI"]).code_verifier)); conn.commit()
-        st.link_button("👉 구글 드라이브 연동", url)
+        try:
+            flow = Flow.from_client_config(json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"]), scopes=SCOPES, redirect_uri=st.secrets["REDIRECT_URI"])
+            url, state = flow.authorization_url(prompt='consent')
+            c.execute("DELETE FROM oauth_store")
+            c.execute("INSERT INTO oauth_store VALUES (?,?)", (state, flow.code_verifier))
+            conn.commit()
+            st.link_button("👉 구글 드라이브 연동", url)
+        except Exception as e:
+            st.error(f"인증 URL 생성 실패: {e}")
     else:
         if st.button("🚀 구글 드라이브에 지금 백업"):
-            c.execute("SELECT * FROM portfolio"); p_all = c.fetchall()
-            c.execute("SELECT * FROM scrapbook"); s_all = c.fetchall()
+            c.execute("SELECT * FROM portfolio")
+            p_all = c.fetchall()
+            c.execute("SELECT * FROM scrapbook")
+            s_all = c.fetchall()
             try:
                 upload_to_google_drive(json.dumps({"portfolio": p_all, "scrapbook": s_all}, ensure_ascii=False))
                 st.success("백업 완료")
-            except Exception as e: st.error(f"실패: {e}")
+            except Exception as e:
+                st.error(f"실패: {e}")
+                
         if st.button("🔄 최신 백업 불러오기"):
             try:
                 data, name = download_latest_from_google_drive()
                 db = json.loads(data.decode('utf-8'))
-                c.execute("DELETE FROM portfolio"); c.execute("DELETE FROM scrapbook")
-                for p in db['portfolio']: c.execute("INSERT INTO portfolio VALUES (" + ",".join(["?"]*len(p)) + ")", p)
-                for s in db['scrapbook']: c.execute("INSERT INTO scrapbook VALUES (" + ",".join(["?"]*len(s)) + ")", s)
-                conn.commit(); st.success(f"복구 완료: {name}"); st.rerun()
-            except Exception as e: st.error(f"실패: {e}")
-
-# 탭 1~4는 기존의 효율적인 로직을 그대로 유지하되 3.5 모델 호출로 자동 배정됨
-with tab1:
-    if st.button("🕒 실시간 뉴스 브리핑 (최신 20건)"):
-        news = get_naver_news("증시|금융|경제", display=20)
-        st.write_stream(genai.Client(api_key=GEMINI_API_KEY).models.generate_content_stream(model='gemini-3.5-flash', contents=f"뉴스:\n{news}\n요약해줘"))
+                c.execute("DELETE FROM portfolio")
+                c.execute("DELETE FROM scrapbook")
+                for p in db['portfolio']:
+                    c.execute("INSERT INTO portfolio VALUES (" + ",".join(["?"]*len(p)) + ")", p)
+                for s in db['scrapbook']:
+                    c.execute("INSERT INTO scrapbook VALUES (" + ",".join(["?"]*len(s)) + ")", s)
+                conn.commit()
+                st.success(f"복구 완료: {name}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"실패: {e}")
