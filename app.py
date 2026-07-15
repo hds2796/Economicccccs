@@ -31,7 +31,7 @@ st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 NAVER_CLIENT_ID = st.secrets.get("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
-# 💡 DART API 키는 이제 더 이상 쓰지 않습니다! (네이버 직통 크롤링으로 대체)
+DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
 # --- [데이터베이스 설정 및 스키마 업데이트] ---
 conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
@@ -190,7 +190,7 @@ def raw_fetch_naver_news(query, display=100, start=1, sort_type="date", cid="", 
     per_query = max(10, display // len(queries)) if queries else display
     for q in queries:
         try:
-            res = requests.get("https://naverapihub.apigw.ntruss.com/search/v1/news", headers={"X-NCP-APIGW-API-KEY-ID": cid, "X-NCP-APIGW-API-KEY": secret}, params={"query": q, "display": per_query, "start": start, "sort": sort_type, "format": "json"}, timeout=2).json()
+            res = requests.get("https://naverapihub.apigw.ntruss.com/search/v1/news", headers={"X-NCP-APIGW-API-KEY-ID": cid, "X-NCP-APIGW-API-KEY": secret}, params={"query": q, "display": per_query, "start": start, "sort": sort_type, "format": "json"}, timeout=3).json()
             for i in res.get("items", []):
                 try: dt = parsedate_to_datetime(i['pubDate'])
                 except: dt = datetime.now(timezone.utc)
@@ -226,31 +226,40 @@ def raw_calculate_technical_indicators(ticker):
     except: pass
     return "- 기술적 지표 계산 불가 (데이터 누락)"
 
-# 💡 [핵심 패치] DART API 폐기 및 네이버 전자공시 직통 크롤링 탑재
+# 💡 [핵심 패치 2] 구조에 상관없이 주소 링크(notice_read)를 엑스레이 스캔하는 골든 불릿 로직
 def raw_fetch_naver_disclosures(ticker):
-    """DART API의 8자리 고유번호 한계를 극복하기 위해 네이버 증권 전자공시 직접 파싱"""
     try:
         code_match = re.search(r'\d{6}', ticker)
         if not code_match: return "- 국내 종목이 아닙니다."
         code = code_match.group()
-        # 네이버 금융 전자공시 전용 iframe URL
+        
+        # 뉴스/공시 통합 페이지 요청 (타임아웃 3초로 넉넉하게 연장)
         res = requests.get(f"https://finance.naver.com/item/news_notice.naver?code={code}&page=1", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
-            rows = soup.select("table.type5 tr")
+            rows = soup.find_all('tr')
             lines = []
+            
             for tr in rows:
-                td_title = tr.find('td', class_='title')
-                td_info = tr.find('td', class_='info')
-                td_date = tr.find('td', class_='date')
-                if td_title and td_date:
-                    title = td_title.text.strip()
-                    date_str = td_date.text.strip()
-                    info_str = td_info.text.strip() if td_info else "공시"
-                    lines.append(f"• [{info_str}] ({date_str}) {title}")
-                    if len(lines) >= 5: break
+                title_td = tr.find('td', class_='title')
+                date_td = tr.find('td', class_='date')
+                info_td = tr.find('td', class_='info')
+                
+                if title_td and date_td:
+                    a_tag = title_td.find('a')
+                    href = a_tag.get('href', '').lower() if a_tag else ""
+                    
+                    # 💡 스나이핑: 링크에 'notice_read'나 'dart'가 있으면 무조건 공시!
+                    if 'notice_read' in href or 'dart' in href:
+                        title = a_tag.text.strip()
+                        date_str = date_td.text.strip()
+                        info_str = info_td.text.strip() if info_td else "공시"
+                        lines.append(f"• [{info_str}] ({date_str}) {title}")
+                        if len(lines) >= 5: break
+            
             if lines:
                 return "\n".join(lines)
+            return "- 최근 주요 공시가 없습니다."
     except: pass
     return "- 공시 동향 조회 불가 (장시간 지연 또는 구조 변경)"
 
@@ -341,7 +350,7 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# AI 코어 프롬프트 빌더 
+# AI 코어 프롬프트 빌더
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -566,7 +575,7 @@ with tab5:
                     cur_p = raw_get_stock_current_price(ticker or name)
                     tech = raw_calculate_technical_indicators(ticker or name)
                     supply = raw_fetch_supply_demand_trend(ticker or name)
-                    # 💡 DART 대신 네이버 전자공시 파싱 작동
+                    # 💡 골든 불릿 패치가 적용된 공시 크롤러 작동
                     dart = raw_fetch_naver_disclosures(ticker or name) 
                     
                     broad = "|".join([k.strip() for k in (query or name).split(" OR ")])
