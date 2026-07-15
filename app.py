@@ -907,16 +907,3 @@ with tab7:
                 for s in db['scrapbook']: c.execute("INSERT INTO scrapbook VALUES (" + ",".join(["?"]*len(s)) + ")", s)
                 conn.commit(); st.success(f"복구 완료: {name}"); st.rerun()
             except Exception as e: st.error(f"실패: {e}")
-
-# --- [진실의 방: API 모델명 스캐너] ---
-with st.sidebar.expander("🛠️ 내 계정 API 모델명 디버깅"):
-    if st.button("현재 사용 가능한 모델 전체 스캔"):
-        try:
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            models = client.models.list()
-            st.write("### 🔍 사용 가능한 모델 리스트")
-            for m in models:
-                if "flash" in m.name.lower() or "lite" in m.name.lower():
-                    st.code(f"화면 이름: {m.display_name}\n실제 코드: {m.name}")
-        except Exception as e:
-            st.error(f"스캔 실패: {e}")
