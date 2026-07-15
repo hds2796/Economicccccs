@@ -225,10 +225,11 @@ def get_market_data():
 
     for name, ticker in {"S&P 500 (실시간)": "^GSPC", "원/달러 환율": "KRW=X"}.items():
         try:
-            data = yf.Ticker(ticker).history(period="2d")
+            # 주말/휴장일 대응을 위해 넉넉하게 5일 치를 불러옴
+            data = yf.Ticker(ticker).history(period="5d")
             if len(data) >= 2:
-                prev_close = data['Close'].iloc[0]
-                current = data['Close'].iloc[1]
+                prev_close = float(data['Close'].iloc[-2])
+                current = float(data['Close'].iloc[-1])
                 diff = current - prev_close
                 results[name] = {"current": current, "diff": diff, "diff_pct": (diff / prev_close) * 100}
         except: results[name] = {"current": 0, "diff": 0, "diff_pct": 0.0}
@@ -657,7 +658,7 @@ def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, q
 # =======================================================
 # 4. 상단 대시보드 및 UI 구성
 # =======================================================
-st.title("📊 Project2_Stock (하이브리드 엔진)")
+st.title("📊 Project2_Stock")
 market_data = get_market_data()
 
 market_data_str = ", ".join([f"{k}: {v['current']:,.2f}({v['diff_pct']:+.2f}%)" for k, v in market_data.items() if v.get('current', 0) > 0])
@@ -1128,12 +1129,12 @@ with tab5:
             with col_deep:
                 cache_key = f"deep_{p_id}"
                 cached_report = st.session_state.analysis_results.get(cache_key)
-                now_ts = time.time()
                 
-                has_valid_cache = cached_report and isinstance(cached_report, dict) and (now_ts - cached_report.get('time', 0)) < 3600
+                # 영구 캐싱: 이전에 생성된 리포트가 있으면 시간과 무관하게 무조건 불러옴
+                has_valid_cache = cached_report and isinstance(cached_report, dict)
                 
                 if has_valid_cache:
-                    if st.button("📊 캐시된 진단 보기", type="primary", key=f"t3_deep_{p_id}"):
+                    if st.button("📊 저장된 진단 보기", type="primary", key=f"t3_deep_{p_id}"):
                         st.session_state[f"show_cache_{p_id}"] = True
                 else:
                     if st.button("📊 포트폴리오 심층 진단 (TOP 30)", type="primary", key=f"t3_deep_{p_id}"):
@@ -1163,7 +1164,7 @@ with tab5:
                         time.sleep(1)
                         my_bar.empty()
                         
-                        st.session_state.analysis_results[cache_key] = {"text": full_response, "time": now_ts}
+                        st.session_state.analysis_results[cache_key] = {"text": full_response, "time": time.time()}
                         st.session_state[f"show_cache_{p_id}"] = True
                         st.rerun()
 
@@ -1207,8 +1208,8 @@ with tab5:
                 cached_report_data = st.session_state.analysis_results[cache_key]
                 with st.expander("📊 AI 포트폴리오 심층 진단 결과", expanded=True):
                     
-                    time_diff_min = int((time.time() - cached_report_data['time']) / 60)
-                    st.success(f"⚡ {time_diff_min}분 전에 작성된 분석 리포트를 즉시 불러왔습니다. (토큰 절약)")
+                    saved_time = datetime.fromtimestamp(cached_report_data.get('time', time.time())).strftime("%m-%d %H:%M")
+                    st.success(f"⚡ 이전에 작성된 분석 리포트({saved_time})를 즉시 불러왔습니다. (토큰 절약)")
                     
                     raw_report = cached_report_data['text']
                     target_price = 0.0
