@@ -46,7 +46,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS market_score_history
              (id INTEGER PRIMARY KEY AUTOINCREMENT, check_date TEXT, score INTEGER)''')
 conn.commit()
 
-# DB 필드 동적 확장 (추천 매수 진입가 추적용 필드 보강)
 for table, col, dtype in [
     ("portfolio", "search_query", "TEXT"), ("portfolio", "ticker", "TEXT"),
     ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
@@ -232,6 +231,7 @@ def raw_fetch_naver_disclosures(ticker):
         code_match = re.search(r'\d{6}', ticker)
         if not code_match: return "- 국내 종목이 아닙니다."
         code = code_match.group()
+        
         res = requests.get(f"https://finance.naver.com/item/news_notice.naver?code={code}&page=1", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
@@ -251,7 +251,7 @@ def raw_fetch_naver_disclosures(ticker):
                         lines.append(f"[{date_str}] [{info_str}] {title}")
                         if len(lines) >= 5: break
             if lines: return "\n".join(lines)
-            return "최근 30일 이내에 등록된 주요 공시가 없습니다."
+            return "최근 주요 공시가 없습니다."
     except: pass
     return "공시 동향 조회 불가 (장시간 지연 또는 구조 변경)"
 
@@ -264,19 +264,30 @@ def raw_fetch_supply_demand_trend(ticker):
                 soup = BeautifulSoup(res.text, 'html.parser')
                 rows = soup.select("table.type2 tr[onmouseover]")
                 if rows:
-                    cols = rows[0].find_all('td')
-                    if len(cols) >= 7:
-                        inst_txt = cols[5].text.strip().replace(',', '')
-                        frgn_txt = cols[6].text.strip().replace(',', '')
-                        inst = int(inst_txt) if inst_txt.lstrip('+-').isdigit() else 0
-                        frgn = int(frgn_txt) if frgn_txt.lstrip('+-').isdigit() else 0
-                        return f"- 기관 당일 순매매: {inst:+,}주\n- 외국인 당일 순매매: {frgn:+,}주"
+                    lines = []
+                    for row in rows[:5]:
+                        cols = row.find_all('td')
+                        if len(cols) >= 7:
+                            d_str = cols[0].text.strip()
+                            inst_txt = cols[5].text.strip().replace(',', '')
+                            frgn_txt = cols[6].text.strip().replace(',', '')
+                            inst = int(inst_txt) if inst_txt.lstrip('+-').isdigit() else 0
+                            frgn = int(frgn_txt) if frgn_txt.lstrip('+-').isdigit() else 0
+                            lines.append(f"[{d_str}] 기관: {inst:+,}주 / 외인: {frgn:+,}주")
+                    if lines: return "\n".join(lines)
     except: pass
-    return "- 수급 동향 조회 불가 (네이버 구조 변경 또는 통신 지연)"
+    return "수급 동향 조회 불가 (네이버 구조 변경 또는 통신 지연)"
 
 # =======================================================
-# AI 퀀트 필터 시스템 엔진 구역 (Gemini 3.1 Flash-Lite)
+# 기존 앱 전용 캐시 래퍼
 # =======================================================
+@st.cache_data(ttl=60)
+def get_stock_current_price(ticker): return raw_get_stock_current_price(ticker)
+
+@st.cache_data(ttl=300)
+def get_naver_news(query, display=100, start=1, sort_type="date"): 
+    return raw_fetch_naver_news(query, display, start, sort_type, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)
+
 def filter_news_with_gemini_lite(raw_news_list):
     if not raw_news_list: return []
     context_block = "\n".join([f"[{idx}] {n['title']}" for idx, n in enumerate(raw_news_list)])
@@ -294,16 +305,6 @@ def filter_news_with_gemini_lite(raw_news_list):
         if filtered_result: return filtered_result
     except: pass
     return raw_news_list[:12]
-
-# =======================================================
-# 기존 앱 전용 캐시 래퍼
-# =======================================================
-@st.cache_data(ttl=60)
-def get_stock_current_price(ticker): return raw_get_stock_current_price(ticker)
-
-@st.cache_data(ttl=300)
-def get_naver_news(query, display=100, start=1, sort_type="date"): 
-    return raw_fetch_naver_news(query, display, start, sort_type, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)
 
 def fetch_unique_realtime_news(query):
     unique_news = []
@@ -395,7 +396,6 @@ def build_prompt_sector(sector_name, news_list, market_data_str):
     combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
     return f"'{sector_name}' 섹터 분석:\n[지표]: {market_data_str}\n{combined}\n\n1. 🏭 섹터 흐름 요약\n2. 📈 주요 호/악재\n3. 🎯 투자 심리 전망"
 
-# 💡 [매수추천가 패치] 기술적/정량적 지표 및 뉴스를 통합하여 매수추천가를 뽑아내도록 정밀 프롬프트 구조 개편
 def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, investment_horizon):
     combined = "\n".join([f"- {n['title']}" for n in news_list[:20]])
     return (f"당신은 엄격한 헤지펀드 수석 퀀트 애널리스트입니다. 예비 후보 종목들의 기술적 지표, 정량적 재무 상태, 실시간 뉴스 파급력을 바탕으로 정밀 밸류에이션을 집행하십시오.\n\n"
@@ -408,11 +408,14 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
             f"- 정량적/기술적/뉴스 통합 선정 근거: (재무제표 상태 및 RSI, 뉴스의 재료 신선도를 엮어서 구체적으로 서술)\n"
             f"- 🎯 퀀트 목표가: [숫자가 포함된 구체적 가격]\n"
             f"- 💰 정밀 매수 추천가: [현재가 및 이평선 지지선을 고려한 현실적인 진입 추천 가격 설정]\n\n"
-            f"※ 중요1: 보고서 맨 마지막 줄에 시스템 추적 및 자동 UI 연동을 위해 추천종목 3개의 데이터를 아래 마커 형식으로 완벽하게 기재하십시오.\n"
+            f"※ 가장 중요: 시스템 파싱을 위해, 보고서 맨 마지막 줄에 시스템 추적용 3개의 데이터를 지정된 형식으로 100% 동일하게 기재하십시오. 다른 기호나 띄어쓰기를 넣지 마십시오.\n"
             f"[TRACKING_DATA]\n"
             f"종목명1|티커1|목표가숫자만|매수추천가숫자만\n"
             f"종목명2|티커2|목표가숫자만|매수추천가숫자만\n"
-            f"종목명3|티커3|목표가숫자만|매수추천가숫자만")
+            f"종목명3|티커3|목표가숫자만|매수추천가숫자만\n\n"
+            f"예시:\n"
+            f"[TRACKING_DATA]\n"
+            f"삼성전자|005930|90000|82000")
 
 def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str, tech_str, supply_str):
     fin_data = get_financial_data(ticker)
@@ -421,7 +424,7 @@ def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, q
         roi = ((current_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
         status = f"보유 중 (평단: {avg_price:,.0f}원, 수량: {quantity}주, 현재가: {current_price:,.0f}원, 수익률: {roi:.2f}%)"
     combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list[:30]])
-    return f"[{stock_name} 심층 진단]\n[지표]\n{market_data_str}\n[내 상태]\n{status}\n[실시간 수급 동향]\n{supply_str}\n[보조지표/기술적 수치]\n{tech_str}\n[뉴스]\n{combined}\n[재무]\n{fin_data}\n\n1. 🏢 재무 및 기업 펀더멘털 분석\n2. 🌐 뉴스 및 수급 파급력 종합 분석 (외인/기관 동향 및 RSI 과열구간 언급 필수)\n3. 📊 포트폴리오 맞춤 진단\n4. 🎯 투자의견\n5. 💰 적정 목표가\n6. 👥 동종업계 비교\n\n마지막줄에 'TARGET_PRICE: 숫자' 필수."
+    return f"[{stock_name} 심층 진단]\n[지표]\n{market_data_str}\n[내 상태]\n{status}\n[최근 5일 수급 동향]\n{supply_str}\n[보조지표/기술적 수치]\n{tech_str}\n[뉴스]\n{combined}\n[재무]\n{fin_data}\n\n1. 🏢 재무 및 기업 펀더멘털 분석\n2. 🌐 뉴스 및 수급 파급력 종합 분석 (외인/기관 연속성 및 RSI 과열구간 언급 필수)\n3. 📊 포트폴리오 맞춤 진단\n4. 🎯 투자의견\n5. 💰 적정 목표가\n6. 👥 동종업계 비교\n\n마지막줄에 'TARGET_PRICE: 숫자' 필수."
 
 # =======================================================
 # 4. 메인 대시보드 UI
@@ -465,9 +468,17 @@ with tab1:
 
 with tab2:
     st.subheader("今日 오늘의 핵심 경제 뉴스 (AI 퀀트 필터 검수 완료)")
-    c.execute("SELECT check_date, score FROM market_score_history ORDER BY id DESC LIMIT 15")
+    c.execute("""
+        SELECT substr(check_date, 1, 10) as date_day, ROUND(AVG(score), 1) 
+        FROM market_score_history 
+        GROUP BY date_day 
+        ORDER BY date_day DESC LIMIT 15
+    """)
     if hist := c.fetchall():
-        with st.expander("📈 AI 시장 심리 지수 추이 그래프 (동일 일자 중복 계측 가능)", expanded=False): st.line_chart(dict(zip([r[0][5:] for r in reversed(hist)], [r[1] for r in reversed(hist)])))
+        with st.expander("📈 AI 시장 심리 지수 추이 그래프 (일별 평균)", expanded=False): 
+            dates = [r[0][5:] for r in reversed(hist)]
+            scores = [r[1] for r in reversed(hist)]
+            st.line_chart(dict(zip(dates, scores)))
     
     eco_query = "경제|증시|주식|금리|실적"
     st.caption("🔍 **AI 퀀트 필터 시스템:** `[💡 Gemini 3.1 Flash-Lite]` 모델이 실시간으로 노이즈 뉴스를 전면 차단 중입니다.")
@@ -486,7 +497,7 @@ with tab2:
 
     if st.session_state.overall_analysis:
         st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]`")
-        st.markdown(f"**AI 시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
+        st.markdown(f"**방금 측정한 실시간 AI 시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
         with st.expander("📝 거시 브리핑 리포트", expanded=True): st.write(st.session_state.overall_analysis['text'])
     
     for i, news in enumerate(st.session_state.current_eco_news):
@@ -535,6 +546,9 @@ with tab4:
         rec_news = filter_news_with_gemini_lite(raw_rec)
         
         res1 = call_gemini_with_fallback(f"다음 뉴스에서 유망 종목 5개를 골라 JSON 배열로 출력하세요. [{{\"name\":\"종목명\",\"ticker\":\"6자리코드\"}}]\n" + "\n".join([n['title'] for n in rec_news]), is_json=True)
+        
+        # 💡 [유령 에러 차단 패치] try ~ except에서 st.rerun 분리
+        success_rec = False
         try:
             candidates = json.loads(re.search(r'\[.*\]', res1, re.S).group())
             ctx_str = ""
@@ -542,9 +556,13 @@ with tab4:
                 t = c_info.get('ticker', '')
                 ctx_str += f"- 종목: {c_info.get('name')}({t})\n  현재가: {get_stock_current_price(t):,.0f}원\n  보조지표: {raw_calculate_technical_indicators(t)}\n  재무: {get_financial_data(t)}\n"
             st.session_state.today_recommendation = call_gemini_with_fallback(build_prompt_recommend_step3(ctx_str, rec_news, market_data_str, investment_horizon))
+            success_rec = True
+        except Exception as e: 
+            st.error(f"추천 오류 발생. 다시 시도해 주세요: {e}")
+            
+        if success_rec:
             st.rerun()
-        except: st.error("추천 오류 발생. 다시 시도해 주세요.")
-        
+
     if st.session_state.get('today_recommendation'):
         st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]` 정량/정성 통합 가치 산정")
         raw = st.session_state.today_recommendation
@@ -556,19 +574,24 @@ with tab4:
             cols = st.columns(3)
             for idx, line in enumerate(raw.split("[TRACKING_DATA]")[1].strip().split('\n')):
                 data = line.split('|')
-                if len(data) >= 4:
+                if len(data) >= 3:
                     name, tick = data[0].strip(), data[1].strip()
-                    tp = float(re.sub(r'[^\d.]', '', data[2]))
-                    bp = float(re.sub(r'[^\d.]', '', data[3]))
+                    try: tp = float(re.sub(r'[^\d.]', '', data[2])) if re.sub(r'[^\d.]', '', data[2]) else 0.0
+                    except: tp = 0.0
+                    
+                    bp = 0.0
+                    if len(data) >= 4:
+                        try: bp = float(re.sub(r'[^\d.]', '', data[3])) if re.sub(r'[^\d.]', '', data[3]) else 0.0
+                        except: pass
+
                     with cols[idx % 3]:
                         cp = get_stock_current_price(tick)
                         st.info(f"**{name}** ({tick})")
                         st.metric("실시간 현재가", f"{cp:,.0f}원")
                         st.metric("🎯 퀀트 목표가", f"{tp:,.0f}원", f"{((tp - cp)/cp)*100:+.1f}% 여력" if cp > 0 else "")
-                        st.metric("💰 정밀 매수 추천가", f"{bp:,.0f}원", f"현재가 대비 {((bp - cp)/cp)*100:+.1f}%" if cp > 0 else "")
+                        st.metric("💰 정밀 매수 추천가", f"{bp:,.0f}원", f"현재가 대비 {((bp - cp)/cp)*100:+.1f}%" if cp > 0 and bp > 0 else "데이터 없음")
                         
                         if st.button(f"💾 {name} 찜하기", key=f"rec_s_{tick}"):
-                            # 확장된 추천가 필드 반영하여 저장
                             c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, buy_recommend_price, scrap_date) VALUES (?,?,?,?,?,?,?,?)", 
                                       (f"🎯 추천: {name}", display_report, name, tick, cp, tp, bp, datetime.now().strftime("%Y-%m-%d %H:%M")))
                             c.execute("SELECT id FROM portfolio WHERE ticker=?", (tick,))
@@ -650,7 +673,7 @@ with tab5:
                 st.caption("📈 **기술적 수치 지표 (RSI/이평선)**")
                 st.code(tech_str, language="text")
             with c_m2:
-                st.caption("👥 **외국인/기관 당일 매매 동향**")
+                st.caption("👥 **최근 5일 외국인/기관 매매 동향**")
                 st.code(supply_str, language="text")
                 
             col_info, col_btn = st.columns([3, 1])
@@ -726,13 +749,11 @@ with tab6:
             with st.expander(f"[{s[5]}] {s[1]}"):
                 if s[6] and s[9] > 0:
                     cur = get_stock_current_price(s[7] or s[6])
-                    # 매수추천가 추적용 UI 확장 적용
                     cols_sc = st.columns(4)
                     cols_sc[0].metric("저장가(당시주가)", f"{s[8]:,.0f}원")
                     cols_sc[1].metric("실시간 주가", f"{cur:,.0f}원", f"{((cur - s[8]) / s[8]) * 100 if s[8] > 0 else 0.0:+.2f}%")
                     cols_sc[2].metric("🎯 퀀트 목표가", f"{s[9]:,.0f}원", f"{(cur / s[9]) * 100 if s[9] > 0 else 0.0:.1f}% 달성")
                     
-                    # 💡 매수추천가 필드 데이터가 있으면 바인딩
                     b_rec = s[10] if len(s) > 10 and s[10] else 0.0
                     if b_rec > 0:
                         cols_sc[3].metric("💰 정밀 매수 추천가", f"{b_rec:,.0f}원", f"진입대비 {((cur - b_rec)/b_rec)*100:+.1f}%" if cur > 0 else "")
@@ -766,3 +787,4 @@ with tab7:
                 for s in db['scrapbook']: c.execute("INSERT INTO scrapbook VALUES (" + ",".join(["?"]*len(s)) + ")", s)
                 conn.commit(); st.success(f"복구 완료: {name}"); st.rerun()
             except Exception as e: st.error(f"실패: {e}")
+          
