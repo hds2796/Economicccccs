@@ -102,7 +102,7 @@ handle_oauth_callback()
 
 def init_drive_service():
     c.execute("SELECT creds FROM oauth_creds")
-    row = c.fetchone()
+    row = r if (r := c.fetchone()) else None
     if row:
         try: return build('drive', 'v3', credentials=Credentials.from_authorized_user_info(json.loads(row[0]), SCOPES))
         except: pass
@@ -123,7 +123,7 @@ def download_latest_from_google_drive():
     return service.files().get_media(fileId=files[0]['id']).execute(), files[0]['name']
 
 # =======================================================
-# 3. 데이터 상태 관리 및 핵심 로직
+# 3. 데이터 상태 관리 및 캐시된 메인 로직
 # =======================================================
 for key in ['analysis_results', 'overall_analysis', 'realtime_analysis', 'today_recommendation', 'current_realtime_news', 'current_eco_news', 'current_sector_news', 'sector_starts', 'seen_sectors', 'port_starts']:
     if key not in st.session_state: st.session_state[key] = {} if 'news' in key or 'starts' in key or 'sectors' in key or 'results' in key else (None if 'analysis' in key or 'recommendation' in key else [])
@@ -138,7 +138,7 @@ def get_market_data():
     results = {}
     def fetch_naver_realtime(code):
         try:
-            data = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/index/{code}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3).json()['datas'][0]
+            data = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/index/{code}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=2).json()['datas'][0]
             current = float(data['closePrice'].replace(',', ''))
             diff = float(data['compareToPreviousClosePrice'].replace(',', ''))
             diff_pct = float(data['fluctuationsRatio'].replace(',', ''))
@@ -151,7 +151,7 @@ def get_market_data():
 
     def fetch_yahoo_direct(ticker):
         try:
-            res = requests.get(f"https://query2.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?range=5d&interval=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()
+            res = requests.get(f"https://query2.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?range=5d&interval=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=2).json()
             closes = [c for c in res['chart']['result'][0]['indicators']['quote'][0]['close'] if c is not None]
             if len(closes) >= 2:
                 diff = closes[-1] - closes[-2]
@@ -163,32 +163,35 @@ def get_market_data():
     results["원/달러 환율"] = fetch_yahoo_direct("KRW=X")
     return results
 
-@st.cache_data(ttl=60)
-def get_stock_current_price(ticker):
+def clean_html(raw_html):
+    return BeautifulSoup(raw_html, "html.parser").get_text() if raw_html else ""
+
+# =======================================================
+# 💡 순수 파이썬 코어 로직 (스트림릿 캐시 독립) - 초고속 멀티쓰레딩용
+# =======================================================
+def raw_get_stock_current_price(ticker):
+    """스트림릿 캐시 우회 순수 주가 조회 함수"""
     if not ticker: return 0.0
     try:
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
-            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code_match.group()}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code_match.group()}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=2)
             if res.status_code == 200 and res.json().get('datas'): return float(res.json()['datas'][0]['closePrice'].replace(',', ''))
-        res = requests.get(f"https://query2.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?range=2d&interval=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()
+        res = requests.get(f"https://query2.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?range=2d&interval=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=2).json()
         closes = [c for c in res['chart']['result'][0]['indicators']['quote'][0]['close'] if c is not None]
         if closes: return float(closes[-1])
     except: pass
     return 0.0
 
-def clean_html(raw_html):
-    return BeautifulSoup(raw_html, "html.parser").get_text() if raw_html else ""
-
-# 💡 [안정성 패치] 쓰레드 내부에서 직접 호출해도 Streamlit Context가 안 깨지도록 순수 파이썬 로직으로 분리
 def raw_fetch_naver_news(query, display=100, start=1, sort_type="date", cid="", secret=""):
+    """스트림릿 캐시 우회 순수 뉴스 파서"""
     if not cid or not secret: return []
     queries = [q.strip() for q in query.split('|') if q.strip()]
     all_items = []
     per_query = max(10, display // len(queries)) if queries else display
     for q in queries:
         try:
-            res = requests.get("https://naverapihub.apigw.ntruss.com/search/v1/news", headers={"X-NCP-APIGW-API-KEY-ID": cid, "X-NCP-APIGW-API-KEY": secret}, params={"query": q, "display": per_query, "start": start, "sort": sort_type, "format": "json"}, timeout=3).json()
+            res = requests.get("https://naverapihub.apigw.ntruss.com/search/v1/news", headers={"X-NCP-APIGW-API-KEY-ID": cid, "X-NCP-APIGW-API-KEY": secret}, params={"query": q, "display": per_query, "start": start, "sort": sort_type, "format": "json"}, timeout=2).json()
             for i in res.get("items", []):
                 try: dt = parsedate_to_datetime(i['pubDate'])
                 except: dt = datetime.now(timezone.utc)
@@ -200,12 +203,8 @@ def raw_fetch_naver_news(query, display=100, start=1, sort_type="date", cid="", 
         if item['link'] not in seen: seen.add(item['link']); unique.append(item)
     return unique[:display]
 
-@st.cache_data(ttl=300)
-def get_naver_news(query, display=100, start=1, sort_type="date"):
-    return raw_fetch_naver_news(query, display, start, sort_type, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)
-
-# 💡 1번 기능: 기술적 지표 수치 계산 (이평선, RSI)
-def calculate_technical_indicators(ticker):
+def raw_calculate_technical_indicators(ticker):
+    """스트림릿 캐시 우회 순수 기술적 지표 계산"""
     try:
         code_match = re.search(r'\d{6}', ticker)
         df = yf.Ticker(f"{code_match.group()}.KS" if code_match else ticker).history(period="60d")
@@ -219,29 +218,28 @@ def calculate_technical_indicators(ticker):
             rsi = 100 - (100 / (1 + (gain / loss))) if loss > 0 else 100
             return f"- 20일선: {ma20:,.0f}원 (현재가대비 {((cur-ma20)/ma20)*100:+.1f}%)\n- 60일선: {ma60:,.0f}원\n- RSI(14): {rsi:.1f} ({'과열🔴' if rsi>=70 else '침체🔵' if rsi<=30 else '중립⚖️'})"
     except: pass
-    return "- 기술적 지표 계산 실패"
+    return "- 기술적 지표 계산 불가"
 
-# 💡 3번 기능: Open DART API 연동
-def fetch_dart_disclosures(ticker):
-    if not DART_API_KEY: return "- [알림] Open DART API 키가 등록되지 않았습니다."
+def raw_fetch_dart_disclosures(ticker, dart_key):
+    """스트림릿 캐시 우회 순수 DART 호출"""
+    if not dart_key: return "- [알림] Open DART API 키가 등록되지 않았습니다."
     try:
         code_match = re.search(r'\d{6}', ticker)
         if not code_match: return "- 국내 종목이 아닙니다."
         b_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
-        res = requests.get(f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={code_match.group()}&bgn_de={b_date}&pblntf_ty=A&pblntf_ty=B&pblntf_ty=C", timeout=5).json()
+        res = requests.get(f"https://opendart.fss.or.kr/api/list.json?crtfc_key={dart_key}&corp_code={code_match.group()}&bgn_de={b_date}&pblntf_ty=A&pblntf_ty=B&pblntf_ty=C", timeout=2).json()
         if res.get('status') == '000' and res.get('list'):
             return "\n".join([f"• [{i['report_nm']}] ({i['pblntf_dt'][:4]}-{i['pblntf_dt'][4:6]}-{i['pblntf_dt'][6:]})" for i in res['list'][:5]])
         return "- 최근 30일 내 주요 공시 없음"
     except: return "- DART 서버 통신 오류"
 
-# 💡 4번 기능 [완벽 패치]: 네이버 증권 개편 웹페이지 구조 저격 수급 분석기
-def fetch_supply_demand_trend(ticker):
+def raw_fetch_supply_demand_trend(ticker):
+    """스트림릿 캐시 우회 순수 수급 데이터 크롤링"""
     try:
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
-            res = requests.get(f"https://finance.naver.com/item/frgn.naver?code={code_match.group()}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+            res = requests.get(f"https://finance.naver.com/item/frgn.naver?code={code_match.group()}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=2)
             soup = BeautifulSoup(res.text, 'html.parser')
-            # 요약 속성이 바뀐 개편 표 타겟팅
             table = soup.find('table', class_='type2')
             if table:
                 rows = [tr for tr in table.find_all('tr') if tr.get('onmouseover')]
@@ -252,15 +250,23 @@ def fetch_supply_demand_trend(ticker):
                         frgn = int(cols[6].text.strip().replace(',', ''))
                         return f"- 기관 순매매: {inst:+,}주\n- 외국인 순매매: {frgn:+,}주"
     except: pass
-    return "- 수급 동향 조회 불가 (장마감 후 집계 중이거나 구조 변경)"
+    return "- 수급 동향 조회 불가"
+
+# =======================================================
+# 기존 앱 전용 캐시 래퍼 (메인 쓰레드 구동용)
+# =======================================================
+@st.cache_data(ttl=60)
+def get_stock_current_price(ticker): return raw_get_stock_current_price(ticker)
+
+@st.cache_data(ttl=300)
+def get_naver_news(query, display=100, start=1, sort_type="date"): return raw_fetch_naver_news(query, display, start, sort_type, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)
 
 def fetch_unique_realtime_news(query):
     unique_news = []
     attempts = 0
     while len(unique_news) < 20 and st.session_state.realtime_start <= 900 and attempts < 4:
         batch = get_naver_news(query, display=10, start=st.session_state.realtime_start, sort_type="date")
-        st.session_state.realtime_start += 10
-        attempts += 1
+        st.session_state.realtime_start += 10; attempts += 1
         if not batch: break
         for n in batch:
             if n['link'] not in st.session_state.seen_realtime: unique_news.append(n); st.session_state.seen_realtime.add(n['link'])
@@ -272,8 +278,7 @@ def fetch_unique_eco_news(query):
     attempts = 0
     while len(unique_news) < 10 and st.session_state.eco_start <= 900 and attempts < 3:
         batch = get_naver_news(query, display=10, start=st.session_state.eco_start, sort_type="sim")
-        st.session_state.eco_start += 10
-        attempts += 1
+        st.session_state.eco_start += 10; attempts += 1
         if not batch: break
         for n in batch:
             if n['link'] not in st.session_state.seen_eco: unique_news.append(n); st.session_state.seen_eco.add(n['link'])
@@ -281,15 +286,12 @@ def fetch_unique_eco_news(query):
     st.session_state.current_eco_news = unique_news
 
 def fetch_unique_sector_news(sector_name, query):
-    if sector_name not in st.session_state.sector_starts:
-        st.session_state.sector_starts[sector_name] = 1
-        st.session_state.seen_sectors[sector_name] = set()
+    if sector_name not in st.session_state.sector_starts: st.session_state.sector_starts[sector_name] = 1; st.session_state.seen_sectors[sector_name] = set()
     unique_news = []
     attempts = 0
     while len(unique_news) < 10 and st.session_state.sector_starts[sector_name] <= 900 and attempts < 3:
         batch = get_naver_news(query, display=30, start=st.session_state.sector_starts[sector_name], sort_type="sim")
-        st.session_state.sector_starts[sector_name] += 30
-        attempts += 1
+        st.session_state.sector_starts[sector_name] += 30; attempts += 1
         if not batch: break
         for n in batch:
             if n['link'] not in st.session_state.seen_sectors[sector_name]: unique_news.append(n); st.session_state.seen_sectors[sector_name].add(n['link'])
@@ -323,7 +325,7 @@ def get_financial_data(ticker):
     try:
         code = re.search(r'\d{6}', ticker)
         if code:
-            res = requests.get(f"https://finance.daum.net/api/quotes/A{code.group()}?summary=false", headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.daum.net/'}, timeout=3).json()
+            res = requests.get(f"https://finance.daum.net/api/quotes/A{code.group()}?summary=false", headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.daum.net/'}, timeout=2).json()
             return f"- 시총: {res.get('marketCap', 0)/1e8:,.0f}억 원\n- PER: {res.get('per','N/A')}배\n- PBR: {res.get('pbr','N/A')}배"
         info = yf.Ticker(f"{ticker}.KS" if ".K" not in ticker else ticker).info
         return f"- 시총: {info.get('marketCap',0)/1e12:.2f}조 원\n- PER: {info.get('trailingPE','N/A')}배"
@@ -332,6 +334,15 @@ def get_financial_data(ticker):
 def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, investment_horizon):
     combined = "\n".join([f"- {n['title']}" for n in news_list[:20]])
     return f"유망종목 5개 팩트체크 데이터:\n{candidate_context}\n관련 뉴스:\n{combined}\n상황:{market_data_str}\n기간:{investment_horizon}에 맞춰 고평가된 종목을 제외하고 최종 3개 종목만 엄선해 요약 리포트를 작성하세요. 현재가는 리포트 본문에 직접 숫자로 기재하지 마십시오. 마지막 줄 형식 엄수:\n[TRACKING_DATA]\n종목명1|티커1|목표가1(숫자만)\n종목명2|티커2|목표가2\n종목명3|티커3|목표가3"
+
+def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str, tech_str, supply_str):
+    fin_data = get_financial_data(ticker)
+    status = "미보유 관심종목"
+    if is_owned == 1:
+        roi = ((current_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
+        status = f"보유 중 (평단: {avg_price:,.0f}원, 수량: {quantity}주, 현재가: {current_price:,.0f}원, 수익률: {roi:.2f}%)"
+    combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list[:30]])
+    return f"[{stock_name} 심층 진단]\n[지표]\n{market_data_str}\n[내 상태]\n{status}\n[실시간 수급 동향]\n{supply_str}\n[보조지표/기술적 수치]\n{tech_str}\n[뉴스]\n{combined}\n[재무]\n{fin_data}\n\n1. 🏢 재무 및 기업 펀더멘털 분석\n2. 🌐 뉴스 및 수급 파급력 종합 분석 (외인/기관 동향 및 RSI 과열구간 언급 필수)\n3. 📊 포트폴리오 맞춤 진단\n4. 🎯 투자의견\n5. 💰 적정 목표가\n6. 👥 동종업계 비교\n\n마지막줄에 'TARGET_PRICE: 숫자' 필수."
 
 # =======================================================
 # 4. 메인 대시보드 UI
@@ -366,7 +377,7 @@ with tab1:
         with st.expander(f"🕒 {news['title']}"):
             st.markdown(f"[원문 읽기]({news['link']}) | {news['published']}\n\n{news['summary']}")
             if st.button("이 기사 심층 분석", key=f"tr_btn_{news['link']}"):
-                st.session_state.analysis_results[f"news_{news['link']}"] = {"text": call_gemini_with_fallback(build_prompt_single_news(news['title'], news['summary'], market_data_str)), "time": time.time()}
+                st.session_state.analysis_results[f"news_{news['link']}"] = {"text": call_gemini_with_fallback(f"아래 뉴스가 증시에 미칠 영향을 분석하세요.\n[지표]: {market_data_str}\n[제목]: {news['title']}\n[요약]: {news['summary']}\n1. 💡 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"), "time": time.time()}
             if f"news_{news['link']}" in st.session_state.analysis_results:
                 st.info(st.session_state.analysis_results[f"news_{news['link']}"]['text'])
 
@@ -424,11 +435,11 @@ with tab4:
                         cp = get_stock_current_price(tick)
                         st.metric(f"**{name}** ({tick})", f"{cp:,.0f}원", f"목표 {tp:,.0f}원")
                         if st.button(f"💾 {name} 찜하기", key=f"rec_s_{tick}"):
-                            c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, scrap_date) VALUES (?,?,?,?,?,?,?)", (f"🎯 추천: {name}", display_report, name, tick, cp, tp, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                            c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, scrap_date) VALUES (?,?,?,?,?,?,?)", (f"🎯 추천: {name}", raw.split("[TRACKING_DATA]")[0].strip(), name, tick, cp, tp, datetime.now().strftime("%Y-%m-%d %H:%M")))
                             c.execute("INSERT INTO portfolio (stock_name, ticker) VALUES (?,?)", (name, tick)); conn.commit(); st.success("찜하기 완료")
 
 # =======================================================
-# 💡 [탭 5: 관심종목] 백구동 방식 완전히 분리 교정본
+# 💡 [탭 5: 관심종목] 백그라운드 쓰레드 & 스트림릿 완벽 독립 구현
 # =======================================================
 with tab5:
     st.subheader("⭐️ 내 관심종목 & AI 앙상블 진단")
@@ -452,28 +463,30 @@ with tab5:
         all_kws = ["주가","실적","목표가","수주","공급","M&A"]
         port_cache = {}
         
-        with st.spinner("⚡ 퀀트 레이더 가동: 뉴스 + 공시 + 수급 데이터 순수 파이썬 병렬 계측 중..."):
-            # 💡 신분증(Context) 우회법: 쓰레드 내부에서 스트림릿 캐시 API 기능을 호출하지 않음으로써 충돌 차단
+        with st.spinner("⚡ 퀀트 레이더 가동: 100% 독립 병렬 스크래핑 엔진 가동 중..."):
+            
+            # 💡 완벽하게 독립된 백그라운드 Worker: 스트림릿 함수(st.xxx)를 단 1줄도 사용하지 않음
             def fetch_stock_raw_worker(p_tuple):
-                p, start_idx, cid, sec = p_tuple
+                p, start_idx, cid, sec, dart_k = p_tuple
                 p_id, name, query, ticker, owned, avg, qnt = p
                 
-                # 100% 독립된 가벼운 데이터 스크래핑 파이프라인 가동
-                cur_p = get_stock_current_price(ticker or name)
-                tech = calculate_technical_indicators(ticker or name)
-                supply = fetch_supply_demand_trend(ticker or name)
-                dart = fetch_dart_disclosures(ticker or name)
+                # 순수 파이썬 로직으로만 통신
+                cur_p = raw_get_stock_current_price(ticker or name)
+                tech = raw_calculate_technical_indicators(ticker or name)
+                supply = raw_fetch_supply_demand_trend(ticker or name)
+                dart = raw_fetch_dart_disclosures(ticker or name, dart_k)
                 
-                # 스트림릿 내장 캐시 우회 가동
                 broad = "|".join([k.strip() for k in (query or name).split(" OR ")])
-                raw_news = raw_fetch_naver_news(broad, display=50, start=start_idx, sort_type="date", cid=cid, secret=sec)
+                raw_news = raw_fetch_naver_news(broad, display=30, start=start_idx, sort_type="date", cid=cid, secret=sec)
+                
                 fact_news = [n for n in raw_news if any(k in n['title'] or k in n['summary'] for k in all_kws)][:10]
                 if not fact_news: fact_news = raw_news[:10]
                 
                 return p_id, cur_p, fact_news, raw_news, tech, supply, dart
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                tasks = [(p, st.session_state.port_starts.get(p[0], 1), NAVER_CLIENT_ID, NAVER_CLIENT_SECRET) for p in portfolio]
+            # 스트림릿의 간섭을 피해 초고속 동시 출발 (경고 메시지 원천 차단)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                tasks = [(p, st.session_state.port_starts.get(p[0], 1), NAVER_CLIENT_ID, NAVER_CLIENT_SECRET, DART_API_KEY) for p in portfolio]
                 for r in executor.map(fetch_stock_raw_worker, tasks): port_cache[r[0]] = r
 
         @st.fragment
@@ -582,5 +595,5 @@ with tab7:
                 c.execute("DELETE FROM portfolio"); c.execute("DELETE FROM scrapbook")
                 for p in db['portfolio']: c.execute("INSERT INTO portfolio VALUES (" + ",".join(["?"]*len(p)) + ")", p)
                 for s in db['scrapbook']: c.execute("INSERT INTO scrapbook VALUES (" + ",".join(["?"]*len(s)) + ")", s)
-                conn.commit(); st.success(f"복구 완료: {name}"); st.rerun()
+                conn.commit(); st.success(f"복구 완료: {file_name}"); st.rerun()
             except Exception as e: st.error(f"실패: {e}")
