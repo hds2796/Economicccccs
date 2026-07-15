@@ -226,39 +226,30 @@ def raw_calculate_technical_indicators(ticker):
     except: pass
     return "- 기술적 지표 계산 불가 (데이터 누락)"
 
-# 💡 [핵심 패치 2] 구조에 상관없이 주소 링크(notice_read)를 엑스레이 스캔하는 골든 불릿 로직
 def raw_fetch_naver_disclosures(ticker):
     try:
         code_match = re.search(r'\d{6}', ticker)
         if not code_match: return "- 국내 종목이 아닙니다."
         code = code_match.group()
-        
-        # 뉴스/공시 통합 페이지 요청 (타임아웃 3초로 넉넉하게 연장)
         res = requests.get(f"https://finance.naver.com/item/news_notice.naver?code={code}&page=1", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             rows = soup.find_all('tr')
             lines = []
-            
             for tr in rows:
                 title_td = tr.find('td', class_='title')
                 date_td = tr.find('td', class_='date')
                 info_td = tr.find('td', class_='info')
-                
                 if title_td and date_td:
                     a_tag = title_td.find('a')
                     href = a_tag.get('href', '').lower() if a_tag else ""
-                    
-                    # 💡 스나이핑: 링크에 'notice_read'나 'dart'가 있으면 무조건 공시!
                     if 'notice_read' in href or 'dart' in href:
                         title = a_tag.text.strip()
                         date_str = date_td.text.strip()
                         info_str = info_td.text.strip() if info_td else "공시"
                         lines.append(f"• [{info_str}] ({date_str}) {title}")
                         if len(lines) >= 5: break
-            
-            if lines:
-                return "\n".join(lines)
+            if lines: return "\n".join(lines)
             return "- 최근 주요 공시가 없습니다."
     except: pass
     return "- 공시 동향 조회 불가 (장시간 지연 또는 구조 변경)"
@@ -350,7 +341,7 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# AI 코어 프롬프트 빌더
+# 💡 [복구 완료!] AI 코어 프롬프트 빌더 
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -381,6 +372,22 @@ def get_financial_data(ticker):
         info = yf.Ticker(f"{ticker}.KS" if ".K" not in ticker else ticker).info
         return f"- 시총: {info.get('marketCap',0)/1e12:.2f}조 원\n- PER: {info.get('trailingPE','N/A')}배"
     except: return "재무 정보 데이터 누락"
+
+# 💡 [여기가 복구된 핵심 프롬프트 함수들입니다!] 💡
+def build_prompt_single_news(title, summary, market_data_str):
+    return f"아래 뉴스가 증시에 미칠 영향을 분석하세요.\n[지표]: {market_data_str}\n[제목]: {title}\n[요약]: {summary}\n1. 💡 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"
+
+def build_prompt_realtime(news_list, market_data_str):
+    combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
+    return f"최신 실시간 뉴스 {len(news_list)}건 종합 브리핑:\n[지표]: {market_data_str}\n{combined}\n\n1. 🔔 핵심 이슈 요약\n2. 📉 경제/증시 파급력\n3. 🎯 리스크 및 섹터"
+
+def build_prompt_overall(news_list, market_data_str):
+    combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
+    return f"주요 경제 뉴스 {len(news_list)}건 시장 브리핑:\n[지표]: {market_data_str}\n{combined}\n\n1. 🌐 거시 환경 요약\n2. ⚖️ 호악재 분석\n3. 💡 주목 섹터\n4. 🔮 향후 전망\n\n마지막줄에 'SCORE: 숫자' (0~100) 기재."
+
+def build_prompt_sector(sector_name, news_list, market_data_str):
+    combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
+    return f"'{sector_name}' 섹터 분석:\n[지표]: {market_data_str}\n{combined}\n\n1. 🏭 섹터 흐름 요약\n2. 📈 주요 호/악재\n3. 🎯 투자 심리 전망"
 
 def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, investment_horizon):
     combined = "\n".join([f"- {n['title']}" for n in news_list[:20]])
@@ -428,7 +435,7 @@ with tab1:
         with st.expander(f"🕒 {news['title']}"):
             st.markdown(f"[원문 읽기]({news['link']}) | {news['published']}\n\n{news['summary']}")
             if st.button("이 기사 심층 분석", key=f"tr_btn_{news['link']}"):
-                st.session_state.analysis_results[f"news_{news['link']}"] = {"text": call_gemini_with_fallback(f"아래 뉴스가 증시에 미칠 영향을 분석하세요.\n[지표]: {market_data_str}\n[제목]: {news['title']}\n[요약]: {news['summary']}\n1. 💡 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"), "time": time.time()}
+                st.session_state.analysis_results[f"news_{news['link']}"] = {"text": call_gemini_with_fallback(build_prompt_single_news(news['title'], news['summary'], market_data_str)), "time": time.time()}
             if f"news_{news['link']}" in st.session_state.analysis_results:
                 st.info(st.session_state.analysis_results[f"news_{news['link']}"]['text'])
 
@@ -575,7 +582,6 @@ with tab5:
                     cur_p = raw_get_stock_current_price(ticker or name)
                     tech = raw_calculate_technical_indicators(ticker or name)
                     supply = raw_fetch_supply_demand_trend(ticker or name)
-                    # 💡 골든 불릿 패치가 적용된 공시 크롤러 작동
                     dart = raw_fetch_naver_disclosures(ticker or name) 
                     
                     broad = "|".join([k.strip() for k in (query or name).split(" OR ")])
