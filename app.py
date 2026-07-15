@@ -168,20 +168,39 @@ def clean_html(raw_html):
     return BeautifulSoup(raw_html, "html.parser").get_text() if raw_html else ""
 
 # =======================================================
-# 💡 순수 파이썬 코어 로직 (스트림릿 캐시 독립) 
+# 💡 순수 파이썬 코어 로직 (전일대비 등락률 수집 패치)
 # =======================================================
 def raw_get_stock_current_price(ticker):
-    if not ticker: return 0.0
+    """현재가뿐만 아니라 전일 대비 등락폭, 등락률까지 사전(Dict) 형태로 반환합니다."""
+    res_data = {"current": 0.0, "diff": 0.0, "diff_pct": 0.0}
+    if not ticker: return res_data
     try:
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
             res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code_match.group()}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=2)
-            if res.status_code == 200 and res.json().get('datas'): return float(res.json()['datas'][0]['closePrice'].replace(',', ''))
+            if res.status_code == 200 and res.json().get('datas'):
+                data = res.json()['datas'][0]
+                current = float(data['closePrice'].replace(',', ''))
+                diff = float(data['compareToPreviousClosePrice'].replace(',', ''))
+                diff_pct = float(data['fluctuationsRatio'].replace(',', ''))
+                if str(data.get('compareToPreviousPrice', {}).get('code', '3')) in ['4', '5']: 
+                    diff = -abs(diff)
+                    diff_pct = -abs(diff_pct)
+                res_data.update({"current": current, "diff": diff, "diff_pct": diff_pct})
+                return res_data
+                
         res = requests.get(f"https://query2.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?range=2d&interval=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=2).json()
         closes = [c for c in res['chart']['result'][0]['indicators']['quote'][0]['close'] if c is not None]
-        if closes: return float(closes[-1])
+        if len(closes) >= 2:
+            current = float(closes[-1])
+            diff = current - float(closes[-2])
+            diff_pct = (diff / float(closes[-2])) * 100
+            res_data.update({"current": current, "diff": diff, "diff_pct": diff_pct})
+            return res_data
+        elif closes:
+            res_data["current"] = float(closes[-1])
     except: pass
-    return 0.0
+    return res_data
 
 def raw_fetch_naver_news(query, display=100, start=1, sort_type="date", cid="", secret=""):
     if not cid or not secret: return []
@@ -277,56 +296,50 @@ def raw_fetch_supply_demand_trend(ticker):
     except: pass
     return "수급 동향 조회 불가 (네이버 구조 변경 또는 통신 지연)"
 
-
 # =======================================================
-# 💡 [핵심 패치] AI 코어 백엔드 통신 유닛 (한도 초과 완벽 우회 시스템)
+# 💡 AI 코어 백엔드 통신 유닛 (정규 3.5 모델명 및 다이내믹 뱃지 완벽 적용)
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
     
-    # 1. 처음부터 Lite를 쓰라고 지정된 경우 (뉴스 옥석 가리기 등)
     if use_lite:
-        models_to_try = [('gemini-3.1-flash-lite', '')]
-    # 2. 메인 분석인 경우 (3.5 먼저 시도 -> 실패 시 3.1 라이트로 강제 우회)
+        models = [('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite')]
     else:
-        models_to_try = [
-            ('gemini-3.5-flash', ''), 
-            ('gemini-3.1-flash-lite', '\n\n*(🚨 안내: 3.5 모델 한도 초과로 인해 3.1 Lite 모델로 우회 분석되었습니다)*')
+        models = [
+            ('gemini-3.5-flash', 'Gemini 3.5 Flash'),
+            ('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite (Fallback)')
         ]
-        
-    for m, fallback_msg in models_to_try:
+
+    for m, badge_name in models:
         try:
             res = client.models.generate_content(model=m, contents=prompt).text
-            return res if is_json else res + fallback_msg
+            if not is_json:
+                res = f"*(🤖 **엔진 식별 프로토콜:** `[💡 {badge_name}]`)*\n\n" + res
+            return res
         except Exception as e:
-            # 429 Quota 에러가 나면 조용히 다음 모델(3.1 라이트)로 넘어갑니다.
+            if "429" in str(e) or "quota" in str(e).lower():
+                continue
             continue
-            
     raise Exception("모든 AI 모델의 일일 호출 한도가 초과되었거나 서버가 응답하지 않습니다.")
 
 def call_gemini_stream_with_fallback(prompt):
     client = genai.Client(api_key=GEMINI_API_KEY)
-    # 스트리밍 함수에도 동일하게 3.5 -> 3.1 라이트 우회 로직 탑재
-    models_to_try = [
-        ('gemini-3.5-flash', ''), 
-        ('gemini-3.1-flash-lite', '\n\n*(🚨 안내: 3.5 모델 한도 초과로 인해 3.1 Lite 모델로 우회 분석되었습니다)*')
+    models = [
+        ('gemini-3.5-flash', 'Gemini 3.5 Flash'),
+        ('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite (Fallback)')
     ]
-    
-    for m, fallback_msg in models_to_try:
+    for m, badge_name in models:
         try:
             response = client.models.generate_content_stream(model=m, contents=prompt)
+            yield f"*(🤖 **엔진 식별 프로토콜:** `[💡 {badge_name}]`)*\n\n"
             for chunk in response:
-                if chunk.text: 
-                    yield chunk.text
-            # 우회해서 성공했다면 마지막에 안내 문구를 추가로 뱉어줍니다.
-            if fallback_msg: 
-                yield fallback_msg
-            return # 성공했으면 바로 함수 종료
+                if chunk.text: yield chunk.text
+            return
         except Exception as e:
+            if "429" in str(e) or "quota" in str(e).lower():
+                continue
             continue
-            
-    yield "\n\n🚨 **서버 과부하:** 모든 AI 모델의 일일 호출 한도가 완전 초과되었습니다."
-
+    yield "\n\n🚨 **서버 과부하:** 모든 AI 모델의 일일 호출 한도가 초과되었습니다."
 
 # =======================================================
 # 기존 앱 전용 캐시 래퍼 및 뉴스 필터
@@ -427,7 +440,7 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
     combined = "\n".join([f"- {n['title']}" for n in news_list[:20]])
     return (f"당신은 엄격한 헤지펀드 수석 퀀트 애널리스트입니다. 아래 데이터를 바탕으로 정밀 밸류에이션을 집행하십시오.\n\n"
             f"[시장 거시 상황]: {market_data_str}\n"
-            f"[예비 후보 5종목 팩트체크 데이터 (현재가 포함)]:\n{candidate_context}\n"
+            f"[예비 후보 5종목 팩트체크 데이터 (현재가 및 등락률 포함)]:\n{candidate_context}\n"
             f"[최신 관련 뉴스 팩트]:\n{combined}\n\n"
             f"위 데이터를 분석하여, '{investment_horizon}' 투자에 부적합한 종목 2개를 먼저 제외하고, 최종 3개만 엄선하여 보고서를 작성하십시오.\n\n"
             f"⚠️ 절대 주의사항 ⚠️\n"
@@ -493,6 +506,7 @@ with tab1:
     realtime_query = "증시|금융|환율|물가|부동산|정책"
     if not st.session_state.current_realtime_news: fetch_unique_realtime_news(realtime_query)
     if st.button("🤖 실시간 뉴스 TOP 20 기반 종합 분석", type="primary", use_container_width=True):
+        st.toast("🧠 AI 분석 엔진 가동", icon="💡")
         st.session_state.realtime_analysis = st.write_stream(call_gemini_stream_with_fallback(build_prompt_realtime(st.session_state.current_realtime_news[:20], market_data_str)))
         st.rerun()
     if st.session_state.realtime_analysis:
@@ -510,7 +524,7 @@ with tab1:
                 st.info(st.session_state.analysis_results[f"news_{news['link']}"]['text'])
 
 with tab2:
-    st.subheader("今日 오늘의 핵심 경제 뉴스 (AI 퀀트 필터 검수 완료)")
+    st.subheader("今日 오늘의 핵심 경제 뉴스")
     c.execute("""
         SELECT substr(check_date, 1, 10) as date_day, ROUND(AVG(score), 1) 
         FROM market_score_history 
@@ -583,6 +597,7 @@ with tab4:
         st.toast("⚡ Step 1: AI 퀀트 필터망 가동 중", icon="⚙️")
         rec_news = filter_news_with_gemini_lite(raw_rec)
         
+        st.toast("⚡ Step 2: 후보 종목 추출 중...", icon="⚙️")
         res1 = call_gemini_with_fallback(f"다음 뉴스에서 유망 종목 5개를 골라 JSON 배열로 출력하세요. [{{\"name\":\"종목명\",\"ticker\":\"6자리코드\"}}]\n" + "\n".join([n['title'] for n in rec_news]), is_json=True)
         success_rec = False
         try:
@@ -590,7 +605,11 @@ with tab4:
             ctx_str = ""
             for c_info in candidates[:5]:
                 t = c_info.get('ticker', '')
-                ctx_str += f"- 종목: {c_info.get('name')}({t})\n  현재가: {get_stock_current_price(t):,.0f}원\n  보조지표: {raw_calculate_technical_indicators(t)}\n  재무: {get_financial_data(t)}\n"
+                p_info = get_stock_current_price(t)
+                cp, dpct = p_info["current"], p_info["diff_pct"]
+                ctx_str += f"- 종목: {c_info.get('name')}({t})\n  현재가: {cp:,.0f}원 (전일대비 {dpct:+.2f}%)\n  보조지표: {raw_calculate_technical_indicators(t)}\n  재무: {get_financial_data(t)}\n"
+            
+            st.toast("🧠 Step 3: 메인 AI 밸류에이션 및 정밀 목표가 산정 중...", icon="💡")
             st.session_state.today_recommendation = call_gemini_with_fallback(build_prompt_recommend_step3(ctx_str, rec_news, market_data_str, investment_horizon))
             success_rec = True
         except Exception as e: st.error(f"추천 오류 발생. 다시 시도해 주세요: {e}")
@@ -616,9 +635,10 @@ with tab4:
                         except: pass
 
                     with cols[idx % 3]:
-                        cp = get_stock_current_price(tick)
+                        p_info = get_stock_current_price(tick)
+                        cp, dpct = p_info["current"], p_info["diff_pct"]
                         st.info(f"**{name}** ({tick})")
-                        st.metric("실시간 현재가", f"{cp:,.0f}원")
+                        st.metric("실시간 현재가", f"{cp:,.0f}원", f"전일대비 {dpct:+.2f}%")
                         st.metric("🎯 퀀트 목표가", f"{tp:,.0f}원", f"{((tp - cp)/cp)*100:+.1f}% 여력" if cp > 0 else "")
                         st.metric("💰 정밀 매수 추천가", f"{bp:,.0f}원", f"현재가 대비 {((bp - cp)/cp)*100:+.1f}%" if cp > 0 and bp > 0 else "데이터 없음")
                         
@@ -678,7 +698,7 @@ with tab5:
                     p, start_idx, cid, sec = p_tuple
                     p_id, name, query, ticker, owned, avg, qnt = p
                     
-                    cur_p = raw_get_stock_current_price(ticker or name)
+                    p_info = raw_get_stock_current_price(ticker or name)
                     tech = raw_calculate_technical_indicators(ticker or name)
                     supply = raw_fetch_supply_demand_trend(ticker or name)
                     dart = raw_fetch_naver_disclosures(ticker or name) 
@@ -686,7 +706,7 @@ with tab5:
                     broad = "|".join([k.strip() for k in (query or name).split(" OR ")])
                     raw_news = raw_fetch_naver_news(broad, display=50, start=start_idx, sort_type="date", cid=cid, secret=sec)
                     fact_news = filter_news_with_gemini_lite(raw_news)
-                    return p_id, cur_p, fact_news[:10], raw_news, tech, supply, dart
+                    return p_id, p_info, fact_news[:10], raw_news, tech, supply, dart
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                     for r in executor.map(fetch_stock_raw_worker, tasks_to_run): 
@@ -696,8 +716,10 @@ with tab5:
         @st.fragment
         def render_stock_box(p, p_data):
             p_id, name, query, ticker, is_owned, avg_price, quantity = p
-            cur_price, fact_news, raw_news, tech_str, supply_str, dart_str = p_data[1], p_data[2], p_data[3], p_data[4], p_data[5], p_data[6]
-            
+            p_info, fact_news, raw_news, tech_str, supply_str, dart_str = p_data[1], p_data[2], p_data[3], p_data[4], p_data[5], p_data[6]
+            cur_price = p_info["current"]
+            cur_diff_pct = p_info["diff_pct"]
+
             st.markdown(f"### 📌 [{name}]")
             c_m1, c_m2 = st.columns(2)
             with c_m1:
@@ -711,8 +733,8 @@ with tab5:
             with col_info:
                 if is_owned:
                     roi = ((cur_price - avg_price)/avg_price)*100 if avg_price > 0 else 0.0
-                    st.caption(f"💼 **보유** | 평단:{avg_price:,.0f} | 수량:{quantity} | 현재:{cur_price:,.0f} | 수익률: {'🔴' if roi>0 else '🔵'} {roi:.2f}%")
-                else: st.caption(f"👀 **관심** | 현재가: {cur_price:,.0f}원")
+                    st.caption(f"💼 **보유** | 평단:{avg_price:,.0f} | 수량:{quantity} | 현재:{cur_price:,.0f}원 ({cur_diff_pct:+.2f}%) | 수익률: {'🔴' if roi>0 else '🔵'} {roi:.2f}%")
+                else: st.caption(f"👀 **관심** | 현재가: {cur_price:,.0f}원 ({cur_diff_pct:+.2f}%)")
             
             with col_btn:
                 cache_key = f"deep_{p_id}"
@@ -735,7 +757,7 @@ with tab5:
                     if c2.button("🔄 재분석", key=f"force_{p_id}"): del st.session_state.analysis_results[cache_key]; st.rerun()
 
             with st.expander("🏢 네이버 전자공시 최근 5회 현황", expanded=False):
-                st.text_area(label="최신 전자공시 스트리밍", value=dart_str, height=140, disabled=True, label_visibility="collapsed")
+                st.text_area(label="최신 전자공시 스트리밍", value=dart_str, height=140, disabled=True, label_visibility="collapsed", key=f"dart_ta_{p_id}")
                 if "•" in dart_str or "[" in dart_str:
                     if st.button("🤖 공시 AI 원포인트 요약", key=f"dart_ai_{p_id}"):
                         st.session_state.analysis_results[f"dart_res_{p_id}"] = call_gemini_with_fallback(f"[{name}] 공시 요약 요청:\n{dart_str}")
@@ -777,10 +799,14 @@ with tab6:
         for s in scraps:
             with st.expander(f"[{s[5]}] {s[1]}"):
                 if s[6] and s[9] > 0:
-                    cur = get_stock_current_price(s[7] or s[6])
+                    p_info = get_stock_current_price(s[7] or s[6])
+                    cur = p_info["current"]
+                    cur_diff_pct = p_info["diff_pct"]
+                    
                     cols_sc = st.columns(4)
                     cols_sc[0].metric("저장가(당시주가)", f"{s[8]:,.0f}원")
-                    cols_sc[1].metric("실시간 주가", f"{cur:,.0f}원", f"{((cur - s[8]) / s[8]) * 100 if s[8] > 0 else 0.0:+.2f}%")
+                    return_pct = ((cur - s[8]) / s[8]) * 100 if s[8] > 0 else 0.0
+                    cols_sc[1].metric("실시간 주가", f"{cur:,.0f}원", f"일일 {cur_diff_pct:+.2f}% / 누적 {return_pct:+.2f}%")
                     cols_sc[2].metric("🎯 퀀트 목표가", f"{s[9]:,.0f}원", f"{(cur / s[9]) * 100 if s[9] > 0 else 0.0:.1f}% 달성")
                     
                     b_rec = s[10] if len(s) > 10 and s[10] else 0.0
