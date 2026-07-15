@@ -231,6 +231,10 @@ def raw_calculate_technical_indicators(ticker):
         else:
             df = yf.Ticker(ticker).history(period="1y")
             
+        # 💡 [핵심 패치] 결측치(NaN) 정제: 이빨 빠진 쓰레기 데이터를 연산 전에 청소합니다.
+        if df is not None and not df.empty:
+            df = df.dropna(subset=['Close']) # 종가가 비어있는 행은 완전히 삭제!
+            
         if df is not None and len(df) >= 60:
             cur = float(df['Close'].iloc[-1])
             ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
@@ -255,13 +259,17 @@ def raw_calculate_technical_indicators(ticker):
             rs = gain / loss if loss > 0 else 0
             rsi = 100 - (100 / (1 + rs)) if loss > 0 else 100
             
+            # 숫자 포맷팅 시 nan으로 인한 에러 방지를 위해 방어벽 추가
+            if sum([import_math.isnan(x) for x in [ma20, ma60, high52, low52, bb_upper, bb_lower, macd_osc, rsi]]) > 0:
+                 return "- 기술적 지표 계산 불가 (유효한 데이터 부족)"
+            
             return (f"- 20일선/60일선: {ma20:,.0f}원 / {ma60:,.0f}원\n"
                     f"- 52주 최고/최저가: {high52:,.0f}원 / {low52:,.0f}원\n"
                     f"- 볼린저밴드 상단/하단: {bb_upper:,.0f}원 / {bb_lower:,.0f}원\n"
                     f"- MACD 오실레이터: {macd_osc:+.2f} ({'상승🔴' if macd_osc>0 else '하락🔵'})\n"
                     f"- RSI(14): {rsi:.1f} ({'과열🔴' if rsi>=70 else '침체🔵' if rsi<=30 else '중립⚖️'})")
     except: pass
-    return "- 기술적 지표 누락"
+    return "- 기술적 지표 연산 불가 (데이터 누락)"
 
 def raw_fetch_naver_disclosures(ticker):
     try:
