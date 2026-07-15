@@ -221,6 +221,7 @@ def raw_fetch_naver_news(query, display=100, start=1, sort_type="date", cid="", 
     return unique[:display]
 
 def raw_calculate_technical_indicators(ticker):
+    import math
     try:
         df = None
         code_match = re.search(r'\d{6}', ticker)
@@ -231,21 +232,21 @@ def raw_calculate_technical_indicators(ticker):
         else:
             df = yf.Ticker(ticker).history(period="1y")
             
-        # 💡 [핵심 패치] 결측치(NaN) 정제: 이빨 빠진 쓰레기 데이터를 연산 전에 청소합니다.
         if df is not None and not df.empty:
-            df = df.dropna(subset=['Close']) # 종가가 비어있는 행은 완전히 삭제!
+            df = df.dropna(subset=['Close']) # 종가 없는 날은 삭제
             
-        if df is not None and len(df) >= 60:
-            cur = float(df['Close'].iloc[-1])
+        if df is not None and len(df) >= 2: 
+            # 💡 [핵심 패치] 꼼수 제거. 엄격하게 20일, 60일 거래일이 꽉 차야만 연산! 모자라면 자연스럽게 NaN 발생.
             ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
             ma60 = float(df['Close'].rolling(60).mean().iloc[-1])
             
+            # 52주 고점/저점도 최소 100일 이상의 데이터가 있을 때만 인정
             high52 = float(df['High'].rolling(252, min_periods=100).max().iloc[-1])
             low52 = float(df['Low'].rolling(252, min_periods=100).min().iloc[-1])
             
             std20 = float(df['Close'].rolling(20).std().iloc[-1])
-            bb_upper = ma20 + (std20 * 2)
-            bb_lower = ma20 - (std20 * 2)
+            bb_upper = float(ma20 + (std20 * 2))
+            bb_lower = float(ma20 - (std20 * 2))
             
             exp12 = df['Close'].ewm(span=12, adjust=False).mean()
             exp26 = df['Close'].ewm(span=26, adjust=False).mean()
@@ -257,20 +258,25 @@ def raw_calculate_technical_indicators(ticker):
             gain = (delta.where(delta > 0, 0)).rolling(14).mean().iloc[-1]
             loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
             rs = gain / loss if loss > 0 else 0
-            rsi = 100 - (100 / (1 + rs)) if loss > 0 else 100
+            rsi = float(100 - (100 / (1 + rs)) if loss > 0 else 100)
             
-            # 숫자 포맷팅 시 nan으로 인한 에러 방지를 위해 방어벽 추가
-            if sum([import_math.isnan(x) for x in [ma20, ma60, high52, low52, bb_upper, bb_lower, macd_osc, rsi]]) > 0:
-                 return "- 기술적 지표 계산 불가 (유효한 데이터 부족)"
+            # 💡 포맷팅 헬퍼: NaN(데이터 없음)일 경우 에러 대신 "데이터 부족" 정직하게 출력
+            def fmt(val, is_price=True):
+                if math.isnan(val): return "데이터 부족"
+                return f"{val:,.0f}원" if is_price else f"{val:+.2f}"
+                
+            def fmt_rsi(val):
+                if math.isnan(val): return "데이터 부족"
+                return f"{val:.1f} ({'과열🔴' if val>=70 else '침체🔵' if val<=30 else '중립⚖️'})"
             
-            return (f"- 20일선/60일선: {ma20:,.0f}원 / {ma60:,.0f}원\n"
-                    f"- 52주 최고/최저가: {high52:,.0f}원 / {low52:,.0f}원\n"
-                    f"- 볼린저밴드 상단/하단: {bb_upper:,.0f}원 / {bb_lower:,.0f}원\n"
-                    f"- MACD 오실레이터: {macd_osc:+.2f} ({'상승🔴' if macd_osc>0 else '하락🔵'})\n"
-                    f"- RSI(14): {rsi:.1f} ({'과열🔴' if rsi>=70 else '침체🔵' if rsi<=30 else '중립⚖️'})")
-    except: pass
+            return (f"- 20일선/60일선: {fmt(ma20)} / {fmt(ma60)}\n"
+                    f"- 52주 최고/최저가: {fmt(high52)} / {fmt(low52)}\n"
+                    f"- 볼린저밴드 상단/하단: {fmt(bb_upper)} / {fmt(bb_lower)}\n"
+                    f"- MACD 오실레이터: {fmt(macd_osc, False)} ({'상승🔴' if not math.isnan(macd_osc) and macd_osc>0 else '하락🔵' if not math.isnan(macd_osc) else ''})\n"
+                    f"- RSI(14): {fmt_rsi(rsi)}")
+    except Exception as e: 
+        pass
     return "- 기술적 지표 연산 불가 (데이터 누락)"
-
 def raw_fetch_naver_disclosures(ticker):
     try:
         code_match = re.search(r'\d{6}', ticker)
