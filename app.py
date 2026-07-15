@@ -12,6 +12,9 @@ import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
+# 💡 [에러 해결용 핵심 라이브러리 추가] 멀티쓰레딩 신분증 복사용
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+
 # 로컬 및 클라우드 환경 테스트 시 HTTPS 오류 우회
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
@@ -33,7 +36,7 @@ st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 NAVER_CLIENT_ID = st.secrets.get("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
-DART_API_KEY = st.secrets.get("DART_API_KEY", "")  # 💡 DART API 키 추가
+DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
 # --- [데이터베이스 설정 및 스키마 업데이트] ---
 conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
@@ -44,7 +47,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS portfolio
              (id INTEGER PRIMARY KEY AUTOINCREMENT, stock_name TEXT)''')
 c.execute('''CREATE TABLE IF NOT EXISTS oauth_store (state TEXT, verifier TEXT)''')
 c.execute('''CREATE TABLE IF NOT EXISTS oauth_creds (creds TEXT)''')
-# 💡 2번 기능: 시장 심리 지수(SCORE) 히스토리 트래킹 테이블 생성
 c.execute('''CREATE TABLE IF NOT EXISTS market_score_history 
              (id INTEGER PRIMARY KEY AUTOINCREMENT, check_date TEXT, score INTEGER)''')
 conn.commit()
@@ -239,7 +241,6 @@ def get_stock_current_price(ticker):
     except: pass
     return 0.0
 
-# 💡 1번 기능: 기술적 지표 수치 계산기 (AI 프롬프트 주입용)
 def calculate_technical_indicators(ticker):
     try:
         code_match = re.search(r'\d{6}', ticker)
@@ -260,7 +261,6 @@ def calculate_technical_indicators(ticker):
     except: pass
     return "- 기술적 지표 계산 불가 (데이터 누락)"
 
-# 💡 3번 기능: Open DART API 실시간 공시 수집기 (무료 팩트체크용)
 def fetch_dart_disclosures(ticker):
     if not DART_API_KEY: return "- [알림] Open DART API 키가 설정되지 않아 공시를 불러올 수 없습니다."
     try:
@@ -268,20 +268,18 @@ def fetch_dart_disclosures(ticker):
         if not code_match: return "- 국내 종목 코드가 아닙니다."
         code = code_match.group()
         
-        # 최근 30일 이내의 주요 공시 탐색
         b_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
         url = f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={code}&bgn_de={b_date}&pblntf_ty=A&pblntf_ty=B&pblntf_ty=C"
         res = requests.get(url, timeout=5).json()
         
         if res.get('status') == '000' and res.get('list'):
             lines = []
-            for item in res['list'][:5]: # 최신 5개만 노출
+            for item in res['list'][:5]:
                 lines.append(f"• [{item['rcept_no']}] ({item['pblntf_dt'][:4]}-{item['pblntf_dt'][4:6]}-{item['pblntf_dt'][6:]}) {item['report_nm']} [접수처: {item['flr_nm']}]")
             return "\n".join(lines)
         return "- 최근 30일 이내에 등록된 주요 자본/경영 공시가 없습니다."
     except: return "- DART 서버 통신 오류"
 
-# 💡 4번 기능: 당일 기관/외국인 가상 수급동향 (네이버 실시간 수급 파싱 우회)
 def fetch_supply_demand_trend(ticker):
     try:
         code_match = re.search(r'\d{6}', ticker)
@@ -532,7 +530,6 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
             f"종목명2|티커2|목표가2(숫자만)\n"
             f"종목명3|티커3|목표가3(숫자만)")
 
-# 💡 1번(기술적 지표), 4번(수급 데이터) 수치 정보를 심층 분석 프롬프트에 자동 병합 주입
 def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str, tech_str, supply_str):
     fin_data = get_financial_data(ticker)
     status = "미보유 관심종목"
@@ -618,7 +615,6 @@ with tab2:
     st.subheader("오늘의 핵심 경제 뉴스")
     st.write("주식 시장과 연관성이 높은 핵심 경제 기사를 정확도순으로 수집합니다.")
     
-    # 💡 2번 기능: 시장 심리 히스토리 트래킹용 차트 상단 배치
     c.execute("SELECT check_date, score FROM market_score_history ORDER BY id DESC LIMIT 15")
     hist_data = c.fetchall()
     if hist_data:
@@ -649,7 +645,6 @@ with tab2:
             match = re.search(r'SCORE:\s*(\d+)', full_response)
             score = int(match.group(1)) if match else 50
             
-            # 💡 2번 기능: 점수가 생성되면 영구 보관용 DB에 자동 저장
             c.execute("INSERT INTO market_score_history (check_date, score) VALUES (?, ?)", (datetime.now().strftime("%Y-%m-%d %H:%M"), score))
             conn.commit()
             
@@ -802,7 +797,7 @@ with tab4:
                                 if not c.fetchone(): c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?,?,?,?,?,?)", (s_name, s_name, s_ticker, 0, 0.0, 0))
                                 conn.commit(); st.success(f"'{s_name}' 찜하기 완료!")
 
-# ----------------- [탭 5: 관심종목 (초고속 병렬 퀀트 패치 완료)] -----------------
+# ----------------- [탭 5: 관심종목] -----------------
 with tab5:
     st.subheader("⭐️ 내 관심종목 & AI 앙상블 진단")
     with st.form("add_stock"):
@@ -827,17 +822,14 @@ with tab5:
         all_kws = list(set(["주가","실적","목표가","수주","공급","M&A"] + get_dynamic_business_keywords()))
         port_cache = {}
         with st.spinner("⚡ 1/4/3번 동시 수집: 실시간 주가 + 수급 동향 + 기술적 보조지표 + DART 최신공시 초고속 병렬 처리 중..."):
-            # 💡 속도 향상법: AI가 없는 순수 연산/크롤링 작업을 하나의 쓰레드 패키지로 묶어 초고속 동시 출발
+            
             def fetch_p(p_data_tuple):
                 p, start_idx = p_data_tuple
                 p_id, name, query, ticker, owned, avg, qnt = p
                 cur_p = get_stock_current_price(ticker or name)
                 
-                # 병렬 수집 1번 기능: 기술적 지표 자동 연산
                 tech_indicators_str = calculate_technical_indicators(ticker or name)
-                # 병렬 수집 4번 기능: 네이버 순매매 수급 동향 파싱
                 supply_demand_str = fetch_supply_demand_trend(ticker or name)
-                # 병렬 수집 3번 기능: Open DART 무료 공시 리스트업
                 dart_disclosures_str = fetch_dart_disclosures(ticker or name)
                 
                 broad = "|".join([k.strip() for k in (query or name).split(" OR ")])
@@ -852,9 +844,18 @@ with tab5:
                 
                 return p_id, cur_p, fact_news, raw, tech_indicators_str, supply_demand_str, dart_disclosures_str
 
+            # 💡 [핵심 패치] 메인 쓰레드의 '스트림릿 신분증(Context)'을 복사
+            ctx = get_script_run_ctx()
+            
+            def fetch_p_with_ctx(p_data_tuple):
+                # 💡 백그라운드 일꾼(쓰레드)들에게 신분증을 걸어줌
+                add_script_run_ctx(ctx=ctx)
+                return fetch_p(p_data_tuple)
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                 tasks = [(p, st.session_state.port_starts.get(p[0], 1)) for p in portfolio]
-                for r in executor.map(fetch_p, tasks): port_cache[r[0]] = r
+                # 💡 신분증을 장착한 새 함수로 맵핑 변경
+                for r in executor.map(fetch_p_with_ctx, tasks): port_cache[r[0]] = r
 
         @st.fragment
         def render_stock_box(p, p_data):
@@ -863,13 +864,12 @@ with tab5:
             
             st.markdown(f"### 📌 [{name}]")
             
-            # 상단 레이아웃에 기술적 수치 및 당일 매매수급 계측 데이터 노출
             c_m1, c_m2 = st.columns(2)
             with c_m1:
-                st.caption("📈 **1번 기술적 수치 지표 (RSI/이평선)**")
+                st.caption("📈 **기술적 수치 지표 (RSI/이평선)**")
                 st.code(tech_str, language="text")
             with c_m2:
-                st.caption("👥 **4번 외국인/기관 당일 매매 동향**")
+                st.caption("👥 **외국인/기관 당일 매매 동향**")
                 st.code(supply_str, language="text")
                 
             col_info, col_btn = st.columns([3, 1])
@@ -890,8 +890,6 @@ with tab5:
                         with st.spinner("🤖 퀀트 결합 진단서 작성 중... (탭 이동 가능)"):
                             ai_news = st.session_state.get(f"ai_news_{p_id}", [])
                             combined = {n['link']: n for n in (fact_news + ai_news)}.values()
-                            
-                            # 💡 1번, 4번 데이터를 포함해 입체적 애널리스트 프롬프트 발행
                             prompt = build_prompt_deep_dive(name, ticker, list(combined), 1 if is_owned else 0, avg_price, quantity, cur_price, market_data_str, tech_str, supply_str)
                             report = call_gemini_with_fallback(prompt)
                             st.session_state.analysis_results[cache_key] = {"text": report, "time": time.time()}
@@ -915,10 +913,9 @@ with tab5:
                     if c2.button("🔄 강제 재분석 (토큰 소모)", key=f"force_{p_id}", use_container_width=True):
                         del st.session_state.analysis_results[cache_key]; st.rerun()
 
-            # 💡 3번 기능: DART 공시 무료 상시 노출 구역 (해석 버튼을 누를 때만 AI 작동하여 비용 세이브)
-            with st.expander(f"🏢 3번 Open DART 최근 주요 공시 확인하기", expanded=False):
+            with st.expander(f"🏢 Open DART 최근 주요 공시 확인하기", expanded=False):
                 st.markdown(dart_str)
-                if "•" in dart_str: # 공시 정보가 존재하는 경우에만 해석 버튼 노출
+                if "•" in dart_str:
                     if st.button("🤖 발견된 최신 공시들 AI 정밀 해석 요청 (토큰 소모)", key=f"dart_ai_{p_id}"):
                         with st.spinner("공시 전문 구조 분석 중..."):
                             prompt_dart = f"[{name}]의 최근 공시 목록입니다.\n{dart_str}\n\n이 중에서 자본 변동, 경영권, 대규모 계약 등 주가에 지대한 영향을 주는 핵심 공시가 있다면 투자자 관점에서 호재인지 악재인지 쉽고 날카롭게 원포인트 요약해 주십시오."
@@ -947,7 +944,6 @@ with tab5:
                     if f"n_{n['link']}" in st.session_state.analysis_results:
                         st.info(st.session_state.analysis_results[f"n_{n['link']}"]['text'])
             
-            # 하단 관리 버튼 배치
             col_edit1, col_edit2 = st.columns([1, 1])
             with col_edit1:
                 with st.expander("⚙️ 상태 변경"):
@@ -1005,7 +1001,8 @@ with tab6:
                 cl1.download_button("📄 HTML 저장", html, f"Report_{s[0]}.html", "text/html")
                 if cl2.button("🗑️ 삭제", key=f"sd_{s[0]}"):
                     c.execute("DELETE FROM scrapbook WHERE id=?", (s[0],)); conn.commit(); st.rerun()
-    else: st.info("저장된 스크랩 리포트가 없습니다.")
+    else:
+        st.info("저장된 스크랩 리포트가 없습니다.")
 
 # ----------------- [탭 7: 설정 및 백업] -----------------
 with tab7:
