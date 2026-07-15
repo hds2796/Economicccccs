@@ -6,6 +6,7 @@ import json
 import os
 import io
 import time
+import urllib.parse
 import yfinance as yf
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
@@ -201,6 +202,7 @@ if 'port_starts' not in st.session_state: st.session_state.port_starts = {}
 @st.cache_data(ttl=60)
 def get_market_data():
     results = {}
+    
     def fetch_naver_realtime(code):
         try:
             url = f"https://polling.finance.naver.com/api/realtime/domestic/index/{code}"
@@ -223,16 +225,31 @@ def get_market_data():
     results["코스피 (실시간)"] = fetch_naver_realtime("KOSPI")
     results["코스닥 (실시간)"] = fetch_naver_realtime("KOSDAQ")
 
-    for name, ticker in {"S&P 500 (실시간)": "^GSPC", "원/달러 환율": "KRW=X"}.items():
+    def fetch_yahoo_direct(ticker):
         try:
-            # 주말/휴장일 대응을 위해 넉넉하게 5일 치를 불러옴
-            data = yf.Ticker(ticker).history(period="5d")
-            if len(data) >= 2:
-                prev_close = float(data['Close'].iloc[-2])
-                current = float(data['Close'].iloc[-1])
+            encoded_ticker = urllib.parse.quote(ticker)
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{encoded_ticker}?range=5d&interval=1d"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5'
+            }
+            res = requests.get(url, headers=headers, timeout=5)
+            data = res.json()
+            closes = data['chart']['result'][0]['indicators']['quote'][0]['close']
+            closes = [c for c in closes if c is not None]
+            
+            if len(closes) >= 2:
+                prev_close = float(closes[-2])
+                current = float(closes[-1])
                 diff = current - prev_close
-                results[name] = {"current": current, "diff": diff, "diff_pct": (diff / prev_close) * 100}
-        except: results[name] = {"current": 0, "diff": 0, "diff_pct": 0.0}
+                return {"current": current, "diff": diff, "diff_pct": (diff / prev_close) * 100}
+        except: pass
+        return {"current": 0, "diff": 0, "diff_pct": 0.0}
+
+    results["S&P 500 (실시간)"] = fetch_yahoo_direct("^GSPC")
+    results["원/달러 환율"] = fetch_yahoo_direct("KRW=X")
+    
     return results
 
 @st.cache_data(ttl=300)
@@ -250,9 +267,15 @@ def get_stock_current_price(ticker):
                 if data.get('datas'):
                     return float(data['datas'][0]['closePrice'].replace(',', ''))
                     
-        data = yf.Ticker(ticker).history(period="1d")
-        if not data.empty:
-            return float(data['Close'].iloc[-1])
+        encoded_ticker = urllib.parse.quote(ticker)
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{encoded_ticker}?range=2d&interval=1d"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
+        res = requests.get(url, headers=headers, timeout=5)
+        data = res.json()
+        closes = data['chart']['result'][0]['indicators']['quote'][0]['close']
+        closes = [c for c in closes if c is not None]
+        if closes:
+            return float(closes[-1])
     except Exception:
         pass
     return 0.0
@@ -421,7 +444,7 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# 💡 AI 호출 로직
+# 💡 AI 호출 및 하이브리드 필터링 엔진
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     if not GEMINI_API_KEY: raise Exception("Gemini API 키 오류")
@@ -983,14 +1006,15 @@ with tab4:
                     s_name = data[0].strip()
                     s_ticker = data[1].strip()
                     try:
+                        s_price = get_stock_current_price(s_ticker if s_ticker else s_name)
                         t_price = float(re.sub(r'[^\d.]', '', data[3]))
                     except:
+                        s_price = get_stock_current_price(s_ticker if s_ticker else s_name)
                         t_price = 0.0
                     
                     if s_name and t_price > 0:
                         with cols[idx % 3]:
                             if st.button(f"💾 [{s_name}] 찜하기", key=f"scrap_rec_{s_name}_{idx}"):
-                                s_price = get_stock_current_price(s_ticker if s_ticker else s_name)
                                 c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                           (f"🎯 AI 추천종목: {s_name} ({investment_horizon.split(' ')[0]})", "", "AI 맞춤 추천종목 발굴 리포트", display_report, datetime.now().strftime("%Y-%m-%d %H:%M"), s_name, s_ticker, s_price, t_price))
                                 
@@ -1130,7 +1154,7 @@ with tab5:
                 cache_key = f"deep_{p_id}"
                 cached_report = st.session_state.analysis_results.get(cache_key)
                 
-                # 영구 캐싱: 이전에 생성된 리포트가 있으면 시간과 무관하게 무조건 불러옴
+                # 영구 유지 캐싱 적용
                 has_valid_cache = cached_report and isinstance(cached_report, dict)
                 
                 if has_valid_cache:
@@ -1141,6 +1165,7 @@ with tab5:
                         my_bar = st.progress(0, text="진행률: 0% (대기 중...)")
                         my_bar.progress(30, text="진행률: 30% (실시간 재무 데이터 매핑 중...)")
                         
+                        # [앙상블 결합 로직] 1차 팩트 기사(10개) + AI 정밀 필터 기사(7개) 합치기
                         ai_news = st.session_state.get(f"ai_filtered_news_{p_id}", [])
                         if ai_news:
                             combined_news = port_news_all + ai_news
