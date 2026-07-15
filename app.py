@@ -363,7 +363,7 @@ with tab6:
 
 with tab7:
     st.subheader("⚙️ 데이터 관리")
-   c.execute("SELECT COUNT(*) FROM oauth_creds")
+    c.execute("SELECT COUNT(*) FROM oauth_creds")
     is_authenticated = c.fetchone()[0] > 0
     
     if not is_authenticated:
