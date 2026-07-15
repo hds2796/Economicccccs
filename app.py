@@ -147,8 +147,12 @@ def get_market_data():
             res = requests.get(f"https://query2.finance.yahoo.com/v8/finance/chart/{encoded}?range=5d&interval=1d", headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}, timeout=5).json()
             closes = [c for c in res['chart']['result'][0]['indicators']['quote'][0]['close'] if c is not None]
             if len(closes) >= 2:
-                diff = closes[-1] - closes[-2]
-                return {"current": closes[-1], "diff": diff, "diff_pct": (diff / closes[-2]) * 100}
+                prev_close = float(closes[-2])
+                current = float(closes[-1])
+                diff = current - prev_close
+                # 0으로 나누기 방지
+                diff_pct = (diff / prev_close) * 100 if prev_close > 0 else 0.0
+                return {"current": current, "diff": diff, "diff_pct": diff_pct}
         except: pass
         return {"current": 0, "diff": 0, "diff_pct": 0.0}
 
@@ -274,7 +278,8 @@ with tab5:
             
             with col_info:
                 if is_owned:
-                    roi = ((cur_price - avg_price)/avg_price)*100 if avg_price>0 else 0
+                    # 0으로 나누기 방지
+                    roi = ((cur_price - avg_price)/avg_price)*100 if avg_price > 0 else 0.0
                     st.caption(f"💼 **보유** | 평단:{avg_price:,.0f} | 수량:{quantity} | 현재:{cur_price:,.0f} | 수익률: {'🔴' if roi>0 else '🔵'} {roi:.2f}%")
                 else: st.caption(f"👀 **관심** | 현재가: {cur_price:,.0f}원")
             
@@ -290,7 +295,9 @@ with tab5:
                         with st.spinner("🤖 AI 분석 중... (탭 이동 가능)"):
                             ai_news = st.session_state.get(f"ai_news_{p_id}", [])
                             combined = {n['link']: n for n in (fact_news + ai_news)}.values()
-                            status = f"보유중" if is_owned else "미보유"
+                            # 0으로 나누기 방지
+                            roi_val = ((cur_price - avg_price)/avg_price)*100 if avg_price > 0 else 0.0
+                            status = f"보유중(수익률{roi_val:.1f}%)" if is_owned else "미보유"
                             prompt = build_deep_dive_prompt(name, ticker, list(combined), status, cur_price, market_str)
                             report = call_gemini_with_fallback(prompt)
                             st.session_state.analysis_results[cache_key] = {"text": report, "time": time.time()}
@@ -314,7 +321,7 @@ with tab5:
 
             with st.expander(f"📰 '{name}' 관련 뉴스 보기", expanded=False):
                 if st.button("✨ AI 문맥 정밀 필터 가동", key=f"ai_f_{p_id}"):
-                    with st.spinner("뉴스 분석 중..."):
+                    with st.spinner("Lite 모델이 옥석 가리는 중..."):
                         news_context = "\n".join([f"[{i}] {n['title']}" for i,n in enumerate(raw_news)])
                         res = call_gemini_with_fallback(f"{news_context}\n위 뉴스 중 호재/악재 인덱스만 JSON [0,1]로 줘", use_lite=True)
                         try:
@@ -335,7 +342,6 @@ with tab5:
         for p in portfolio:
             if p[0] in port_cache: render_stock_box(p, port_cache[p[0]])
 
-# [탭 6: 스크랩북 및 적중률 트래킹] (0으로 나누기 에러 수정 완료)
 with tab6:
     st.subheader("📁 내 스크랩북 & AI 예측 트래킹")
     c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price FROM scrapbook ORDER BY id DESC")
@@ -346,7 +352,7 @@ with tab6:
                 if s[6] and s[9] > 0:
                     cur = get_stock_current_price(s[7] or s[6])
                     
-                    # 💡 0으로 나누기(ZeroDivisionError) 방지 로직
+                    # 💡 스크랩북 0으로 나누기(ZeroDivisionError) 완벽 방지
                     actual_roi = ((cur - s[8]) / s[8]) * 100 if s[8] > 0 else 0.0
                     achievement_rate = (cur / s[9]) * 100 if s[9] > 0 else 0.0
                     
@@ -354,17 +360,16 @@ with tab6:
                     c1.metric("저장가", f"{s[8]:,.0f}")
                     c2.metric("실시간", f"{cur:,.0f}", f"{actual_roi:+.2f}%")
                     c3.metric("AI 목표가", f"{s[9]:,.0f}", f"{achievement_rate:.1f}% 달성")
-                
                 st.write(s[4])
                 if st.button("🗑️ 삭제", key=f"sd_{s[0]}"):
                     c.execute("DELETE FROM scrapbook WHERE id=?", (s[0],)); conn.commit(); st.rerun()
 
-# --- [탭 7: 설정 및 백업] (들여쓰기 및 바코끼리 연산자 에러 교정 구역) ---
 with tab7:
     st.subheader("⚙️ 데이터 관리")
     c.execute("SELECT COUNT(*) FROM oauth_creds")
-    is_authenticated = c.fetchone()[0] > 0
     
+    # 💡 바다코끼리 연산자 에러 수정 완료
+    is_authenticated = c.fetchone()[0] > 0
     if not is_authenticated:
         try:
             flow = Flow.from_client_config(json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"]), scopes=SCOPES, redirect_uri=st.secrets["REDIRECT_URI"])
@@ -377,28 +382,23 @@ with tab7:
             st.error(f"인증 URL 생성 실패: {e}")
     else:
         if st.button("🚀 구글 드라이브에 지금 백업"):
-            c.execute("SELECT * FROM portfolio")
-            p_all = c.fetchall()
-            c.execute("SELECT * FROM scrapbook")
-            s_all = c.fetchall()
+            c.execute("SELECT * FROM portfolio"); p_all = c.fetchall()
+            c.execute("SELECT * FROM scrapbook"); s_all = c.fetchall()
             try:
                 upload_to_google_drive(json.dumps({"portfolio": p_all, "scrapbook": s_all}, ensure_ascii=False))
                 st.success("백업 완료")
-            except Exception as e:
-                st.error(f"실패: {e}")
-                
+            except Exception as e: st.error(f"실패: {e}")
         if st.button("🔄 최신 백업 불러오기"):
             try:
                 data, name = download_latest_from_google_drive()
                 db = json.loads(data.decode('utf-8'))
-                c.execute("DELETE FROM portfolio")
-                c.execute("DELETE FROM scrapbook")
-                for p in db['portfolio']:
-                    c.execute("INSERT INTO portfolio VALUES (" + ",".join(["?"]*len(p)) + ")", p)
-                for s in db['scrapbook']:
-                    c.execute("INSERT INTO scrapbook VALUES (" + ",".join(["?"]*len(s)) + ")", s)
-                conn.commit()
-                st.success(f"복구 완료: {name}")
-                st.rerun()
-            except Exception as e:
-                st.error(f"실패: {e}")
+                c.execute("DELETE FROM portfolio"); c.execute("DELETE FROM scrapbook")
+                for p in db['portfolio']: c.execute("INSERT INTO portfolio VALUES (" + ",".join(["?"]*len(p)) + ")", p)
+                for s in db['scrapbook']: c.execute("INSERT INTO scrapbook VALUES (" + ",".join(["?"]*len(s)) + ")", s)
+                conn.commit(); st.success(f"복구 완료: {name}"); st.rerun()
+            except Exception as e: st.error(f"실패: {e}")
+
+with tab1:
+    if st.button("🕒 실시간 뉴스 브리핑 (최신 20건)"):
+        news = get_naver_news("증시|금융|경제", display=20)
+        st.write_stream(genai.Client(api_key=GEMINI_API_KEY).models.generate_content_stream(model='gemini-3.5-flash', contents=f"뉴스:\n{news}\n요약해줘"))
