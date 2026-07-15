@@ -102,7 +102,7 @@ handle_oauth_callback()
 
 def init_drive_service():
     c.execute("SELECT creds FROM oauth_creds")
-    row = c.fetchone()
+    row = r if (r := c.fetchone()) else None
     if row:
         try: return build('drive', 'v3', credentials=Credentials.from_authorized_user_info(json.loads(row[0]), SCOPES))
         except: pass
@@ -167,7 +167,7 @@ def clean_html(raw_html):
     return BeautifulSoup(raw_html, "html.parser").get_text() if raw_html else ""
 
 # =======================================================
-# 💡 순수 파이썬 코어 로직 (스트림릿 캐시 독립) - 초고속 멀티쓰레딩용
+# 💡 순수 파이썬 코어 로직 (스트림릿 캐시 독립) 
 # =======================================================
 def raw_get_stock_current_price(ticker):
     if not ticker: return 0.0
@@ -202,10 +202,19 @@ def raw_fetch_naver_news(query, display=100, start=1, sort_type="date", cid="", 
     return unique[:display]
 
 def raw_calculate_technical_indicators(ticker):
+    """코스피(.KS)와 코스닥(.KQ)을 모두 지원하는 지표 계산기"""
     try:
+        df = None
         code_match = re.search(r'\d{6}', ticker)
-        df = yf.Ticker(f"{code_match.group()}.KS" if code_match else ticker).history(period="60d")
-        if len(df) >= 20:
+        if code_match:
+            code = code_match.group()
+            df = yf.Ticker(f"{code}.KS").history(period="60d")
+            # 코스피에서 안 나오면 코스닥으로 2차 시도
+            if df.empty: df = yf.Ticker(f"{code}.KQ").history(period="60d")
+        else:
+            df = yf.Ticker(ticker).history(period="60d")
+            
+        if df is not None and len(df) >= 20:
             cur = float(df['Close'].iloc[-1])
             ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
             ma60 = float(df['Close'].rolling(60).mean().iloc[-1])
@@ -216,7 +225,7 @@ def raw_calculate_technical_indicators(ticker):
             rsi = 100 - (100 / (1 + rs)) if loss > 0 else 100
             return f"- 20일선: {ma20:,.0f}원 (현재가대비 {((cur-ma20)/ma20)*100:+.1f}%)\n- 60일선: {ma60:,.0f}원\n- RSI(14): {rsi:.1f} ({'과열🔴' if rsi>=70 else '침체🔵' if rsi<=30 else '중립⚖️'})"
     except: pass
-    return "- 기술적 지표 계산 불가"
+    return "- 기술적 지표 계산 불가 (데이터 누락)"
 
 def raw_fetch_dart_disclosures(ticker, dart_key):
     if not dart_key: return "- [알림] Open DART API 키가 등록되지 않았습니다."
@@ -231,31 +240,52 @@ def raw_fetch_dart_disclosures(ticker, dart_key):
     except: return "- DART 서버 통신 오류"
 
 def raw_fetch_supply_demand_trend(ticker):
+    """CSS 정밀 타겟팅으로 네이버 구조 변경 방어 완벽 패치"""
     try:
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
-            res = requests.get(f"https://finance.naver.com/item/frgn.naver?code={code_match.group()}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=2)
-            soup = BeautifulSoup(res.text, 'html.parser')
-            table = soup.find('table', class_='type2')
-            if table:
-                rows = [tr for tr in table.find_all('tr') if tr.get('onmouseover')]
+            res = requests.get(f"https://finance.naver.com/item/frgn.naver?code={code_match.group()}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, 'html.parser')
+                # 표 전체를 찾지 않고, 마우스 오버(일별 데이터 행) 효과가 있는 tr만 정밀 저격
+                rows = soup.select("table.type2 tr[onmouseover]")
                 if rows:
                     cols = rows[0].find_all('td')
                     if len(cols) >= 7:
-                        inst = int(cols[5].text.strip().replace(',', ''))
-                        frgn = int(cols[6].text.strip().replace(',', ''))
-                        return f"- 기관 순매매: {inst:+,}주\n- 외국인 순매매: {frgn:+,}주"
+                        inst_txt = cols[5].text.strip().replace(',', '')
+                        frgn_txt = cols[6].text.strip().replace(',', '')
+                        
+                        inst = int(inst_txt) if inst_txt.lstrip('+-').isdigit() else 0
+                        frgn = int(frgn_txt) if frgn_txt.lstrip('+-').isdigit() else 0
+                        
+                        return f"- 기관 당일 순매매: {inst:+,}주\n- 외국인 당일 순매매: {frgn:+,}주"
     except: pass
-    return "- 수급 동향 조회 불가"
+    return "- 수급 동향 조회 불가 (네이버 구조 변경 또는 통신 지연)"
 
 # =======================================================
-# 💡 [핵심 패치] Gemini Lite 모델을 이용한 스마트 AI 판사 엔진
+# 기존 앱 전용 캐시 래퍼 (메인 쓰레드 구동용)
 # =======================================================
+@st.cache_data(ttl=60)
+def get_stock_current_price(ticker): return raw_get_stock_current_price(ticker)
+
+@st.cache_data(ttl=300)
+def get_naver_news(query, display=100, start=1, sort_type="date"): 
+    return raw_fetch_naver_news(query, display, start, sort_type, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)
+
+# 💡 하이브리드 필터링 적용 (최신순 + 핵심 비즈니스 키워드 분류)
+CORE_BUSINESS_KWS = ["실적", "목표가", "수주", "합병", "M&A", "공급", "계약", "개발", "배당", "전망", "투자", "매출", "영업이익", "흑자", "독점"]
+
+def filter_core_news(raw_news_list):
+    """일반 뉴스 중 비즈니스 팩트가 담긴 핵심 뉴스만 1차로 걸러내는 내부 필터망"""
+    filtered = []
+    for n in raw_news_list:
+        if any(kw in n['title'] or kw in n['summary'] for kw in CORE_BUSINESS_KWS):
+            filtered.append(n)
+    return filtered if len(filtered) >= 5 else raw_news_list[:20]
+
+# 💡 Gemini Lite 모델을 이용한 스마트 AI 판사 엔진
 def filter_news_with_gemini_lite(raw_news_list):
-    """키워드 대신 가볍고 빠른 Gemini 3.1 Flash-Lite 판사를 불러와 문맥으로 필터링"""
     if not raw_news_list: return []
-    
-    # 50개 리스트의 제목만 모아 직관적인 프롬프트 작성
     context_lines = []
     for idx, n in enumerate(raw_news_list):
         context_lines.append(f"[{idx}] {n['title']}")
@@ -275,17 +305,7 @@ def filter_news_with_gemini_lite(raw_news_list):
         filtered_result = [raw_news_list[i] for i in matched_indices if i < len(raw_news_list)]
         if filtered_result: return filtered_result
     except: pass
-    return raw_news_list[:12] # 만에 하나 에러 발생 시에만 기본 최신순 상위 상판 반환
-
-# =======================================================
-# 기존 앱 전용 캐시 래퍼 (메인 쓰레드 구동용)
-# =======================================================
-@st.cache_data(ttl=60)
-def get_stock_current_price(ticker): return raw_get_stock_current_price(ticker)
-
-@st.cache_data(ttl=300)
-def get_naver_news(query, display=100, start=1, sort_type="date"): 
-    return raw_fetch_naver_news(query, display, start, sort_type, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)
+    return raw_news_list[:12]
 
 def fetch_unique_realtime_news(query):
     unique_news = []
@@ -303,12 +323,10 @@ def fetch_unique_eco_news(query):
     unique_news = []
     attempts = 0
     while len(unique_news) < 15 and st.session_state.eco_start <= 900 and attempts < 4:
-        # 무조건 최신순(date)으로 다량 수집 후 뇌(Gemini Lite)로 알짜만 정밀 분류
         batch = get_naver_news(query, display=50, start=st.session_state.eco_start, sort_type="date")
         st.session_state.eco_start += 50; attempts += 1
         if not batch: break
         
-        # 💡 AI 판사 가동
         core_batch = filter_news_with_gemini_lite(batch)
         for n in core_batch:
             if n['link'] not in st.session_state.seen_eco: unique_news.append(n); st.session_state.seen_eco.add(n['link'])
@@ -324,7 +342,6 @@ def fetch_unique_sector_news(sector_name, query):
         st.session_state.sector_starts[sector_name] += 50; attempts += 1
         if not batch: break
         
-        # 💡 AI 판사 가동
         core_batch = filter_news_with_gemini_lite(batch)
         for n in core_batch:
             if n['link'] not in st.session_state.seen_sectors[sector_name]: unique_news.append(n); st.session_state.seen_sectors[sector_name].add(n['link'])
@@ -398,7 +415,7 @@ with tab1:
     realtime_query = "증시|금융|환율|물가|부동산|정책"
     if not st.session_state.current_realtime_news: fetch_unique_realtime_news(realtime_query)
     if st.button("🤖 실시간 뉴스 TOP 20 기반 종합 분석", type="primary", use_container_width=True):
-        st.session_state.realtime_analysis = st.write_stream(call_gemini_stream_with_fallback(f"최신 실시간 뉴스 종합 브리핑:\n[지표]: {market_data_str}\n" + "\n".join([f"- {n['title']}" for n in st.session_state.current_realtime_news[:20]]) + "\n\n1. 🔔 핵심 이슈 요약\n2. 📉 경제/증시 파급력\n3. 🎯 리스크 및 섹터"))
+        st.session_state.realtime_analysis = st.write_stream(call_gemini_stream_with_fallback(build_prompt_realtime(st.session_state.current_realtime_news[:20], market_data_str)))
         st.rerun()
     if st.session_state.realtime_analysis:
         with st.expander("📊 AI 실시간 시황 종합 브리핑", expanded=True):
@@ -431,10 +448,8 @@ with tab2:
             c.execute("INSERT INTO market_score_history (check_date, score) VALUES (?, ?)", (datetime.now().strftime("%Y-%m-%d %H:%M"), score)); conn.commit()
             st.session_state.overall_analysis = {"text": re.sub(r'SCORE:\s*\d+', '', res).strip(), "score": score}; st.rerun()
     with col_e2:
-        # 💡 무한 페이징 스크롤 엔진 연동 버튼
         if st.button("🔄 다음 기사 보기", key="next_eco_btn", use_container_width=True):
-            fetch_unique_eco_news(eco_query)
-            st.rerun()
+            fetch_unique_eco_news(eco_query); st.rerun()
 
     if st.session_state.overall_analysis:
         st.markdown(f"**AI 시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
@@ -464,10 +479,8 @@ with tab3:
             st.session_state[f'sec_sum_{selected_sector}'] = call_gemini_with_fallback(build_prompt_sector(selected_sector, get_naver_news(sectors[selected_sector], display=20, sort_type="date"), market_data_str))
     with col_s3:
         st.markdown("<br>", unsafe_allow_html=True)
-        # 💡 섹터 무한 페이징 연동 버튼
         if st.button("🔄 다음 섹터 뉴스 보기", key="next_sec_btn", use_container_width=True):
-            fetch_unique_sector_news(selected_sector, sectors[selected_sector])
-            st.rerun()
+            fetch_unique_sector_news(selected_sector, sectors[selected_sector]); st.rerun()
 
     if f'sec_sum_{selected_sector}' in st.session_state:
         with st.info(st.session_state[f'sec_sum_{selected_sector}']): pass
