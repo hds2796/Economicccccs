@@ -256,17 +256,17 @@ def raw_calculate_technical_indicators(ticker):
             rsi = 100 - (100 / (1 + rs)) if loss > 0 else 100
             
             return (f"- 20일선/60일선: {ma20:,.0f}원 / {ma60:,.0f}원\n"
-                    f"- 52주 최고가: {high52:,.0f}원 | 최저가: {low52:,.0f}원\n"
-                    f"- 볼린저밴드 상단(저항): {bb_upper:,.0f}원 | 하단(지지): {bb_lower:,.0f}원\n"
-                    f"- MACD 오실레이터: {macd_osc:+.2f} ({'상승추세🔴' if macd_osc>0 else '하락추세🔵'})\n"
+                    f"- 52주 최고/최저가: {high52:,.0f}원 / {low52:,.0f}원\n"
+                    f"- 볼린저밴드 상단/하단: {bb_upper:,.0f}원 / {bb_lower:,.0f}원\n"
+                    f"- MACD 오실레이터: {macd_osc:+.2f} ({'상승🔴' if macd_osc>0 else '하락🔵'})\n"
                     f"- RSI(14): {rsi:.1f} ({'과열🔴' if rsi>=70 else '침체🔵' if rsi<=30 else '중립⚖️'})")
     except: pass
-    return "- 기술적 지표 계산 불가 (데이터 누락)"
+    return "- 기술적 지표 누락"
 
 def raw_fetch_naver_disclosures(ticker):
     try:
         code_match = re.search(r'\d{6}', ticker)
-        if not code_match: return "- 국내 종목이 아닙니다."
+        if not code_match: return "- 국내 종목 아님"
         code = code_match.group()
         res = requests.get(f"https://finance.naver.com/item/news_notice.naver?code={code}&page=1", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
         if res.status_code == 200:
@@ -287,9 +287,9 @@ def raw_fetch_naver_disclosures(ticker):
                         lines.append(f"[{date_str}] [{info_str}] {title}")
                         if len(lines) >= 5: break
             if lines: return "\n".join(lines)
-            return "최근 주요 공시가 없습니다."
+            return "최근 주요 공시 없음"
     except: pass
-    return "공시 동향 조회 불가 (장시간 지연 또는 구조 변경)"
+    return "공시 조회 불가"
 
 def raw_fetch_supply_demand_trend(ticker):
     try:
@@ -312,71 +312,69 @@ def raw_fetch_supply_demand_trend(ticker):
                             lines.append(f"[{d_str}] 기관: {inst:+,}주 / 외인: {frgn:+,}주")
                     if lines: return "\n".join(lines)
     except: pass
-    return "수급 동향 조회 불가 (네이버 구조 변경 또는 통신 지연)"
+    return "수급 동향 조회 불가"
 
 # =======================================================
-# 💡 [핵심] AI 코어 백엔드 통신 유닛 (에러 추적기 및 우회 사유 출력 패치)
+# 💡 [핵심] 4단계 폭포수 우회 및 에러 추적 (3.5 -> 3.0 -> 2.5 -> 3.1 Lite)
 # =======================================================
+def get_fallback_models(use_lite):
+    if use_lite:
+        return [('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite')]
+    return [
+        ('gemini-3.5-flash', 'Gemini 3.5 Flash'),
+        ('gemini-3.0-flash', 'Gemini 3.0 Flash (Fallback)'),
+        ('gemini-2.5-flash', 'Gemini 2.5 Flash (Fallback)'),
+        ('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite (Fallback)')
+    ]
+
+def get_clean_error(e):
+    error_str = str(e)
+    if "429" in error_str or "quota" in error_str.lower(): return "일일 호출 한도 초과 (429 Quota)"
+    if "503" in error_str: return "구글 서버 과부하 (503 Service Unavailable)"
+    return (error_str[:50] + '...') if len(error_str) > 50 else error_str
+
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
-    
-    if use_lite:
-        models = ['gemini-3.1-flash-lite']
-    else:
-        models = ['gemini-3.5-flash', 'gemini-3.1-flash-lite']
-
+    models = get_fallback_models(use_lite)
     last_error = ""
-    for idx, m in enumerate(models):
+    
+    for idx, (m, base_badge) in enumerate(models):
         try:
             res = client.models.generate_content(model=m, contents=prompt).text
             if not is_json:
-                badge_name = "Gemini 3.1 Flash Lite" if "lite" in m else "Gemini 3.5 Flash"
-                # 만약 우회(두 번째 모델)를 통해 성공했다면, 이전 실패 사유를 추가합니다.
-                if idx > 0:
-                    badge_name += f" (Fallback) - ⚠️ 우회 사유: {last_error}"
+                badge_name = base_badge
+                if idx > 0: badge_name += f" - ⚠️ 우회 사유: {last_error}"
                 res = f"*(🤖 **엔진 식별 프로토콜:** `[💡 {badge_name}]`)*\n\n" + res
             return res
         except Exception as e:
-            # 실패 원인 기록 및 정제 (너무 길면 자름)
-            error_str = str(e)
-            if "429" in error_str or "quota" in error_str.lower():
-                last_error = "일일 API 호출 한도 초과 (429 Quota)"
-            else:
-                last_error = (error_str[:50] + '...') if len(error_str) > 50 else error_str
+            last_error = get_clean_error(e)
             continue
             
     raise Exception(f"모든 AI 모델 호출 실패. 마지막 오류: {last_error}")
 
 def call_gemini_stream_with_fallback(prompt):
     client = genai.Client(api_key=GEMINI_API_KEY)
-    models = ['gemini-3.5-flash', 'gemini-3.1-flash-lite']
+    models = get_fallback_models(False)
     last_error = ""
     
-    for idx, m in enumerate(models):
+    for idx, (m, base_badge) in enumerate(models):
         try:
             response = client.models.generate_content_stream(model=m, contents=prompt)
-            
-            badge_name = "Gemini 3.1 Flash Lite" if "lite" in m else "Gemini 3.5 Flash"
-            if idx > 0:
-                badge_name += f" (Fallback) - ⚠️ 우회 사유: {last_error}"
-                
+            badge_name = base_badge
+            if idx > 0: badge_name += f" - ⚠️ 우회 사유: {last_error}"
             yield f"*(🤖 **엔진 식별 프로토콜:** `[💡 {badge_name}]`)*\n\n"
             
             for chunk in response:
                 if chunk.text: yield chunk.text
             return
         except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "quota" in error_str.lower():
-                last_error = "일일 API 호출 한도 초과 (429 Quota)"
-            else:
-                last_error = (error_str[:50] + '...') if len(error_str) > 50 else error_str
+            last_error = get_clean_error(e)
             continue
             
     yield f"\n\n🚨 **서버 과부하:** 모든 AI 모델 호출 실패. 마지막 오류: {last_error}"
 
 # =======================================================
-# 기존 앱 전용 캐시 래퍼 및 뉴스 필터
+# 기존 캐시 및 데이터 연산 유닛
 # =======================================================
 @st.cache_data(ttl=60)
 def get_stock_current_price(ticker): return raw_get_stock_current_price(ticker)
@@ -388,13 +386,8 @@ def get_naver_news(query, display=100, start=1, sort_type="date"):
 def filter_news_with_gemini_lite(raw_news_list):
     if not raw_news_list: return []
     context_block = "\n".join([f"[{idx}] {n['title']}" for idx, n in enumerate(raw_news_list)])
-    prompt = (
-        f"너는 베테랑 헤지펀드 매니저야. 아래의 최신 뉴스 제목 50개 목록을 읽고, "
-        f"단순 시황 요약이나 영양가 없는 자극성 찌라시는 모두 탈락시키고, "
-        f"기업의 실적/수주/공급계약/M&A/제도변경 등 주가 및 펀더멘털에 실제로 지대한 영향을 줄 진짜 '알짜 기사'의 인덱스 번호만 골라내라.\n\n"
-        f"[뉴스 목록]\n{context_block}\n\n"
-        f"반드시 다른 부연설명 없이 파이썬 배열 형식만 출력해라. 예: [0, 3, 15, 22]"
-    )
+    prompt = (f"너는 베테랑 헤지펀드 매니저야. 아래 최신 뉴스 제목 50개 목록을 읽고, "
+              f"단순 시황 요약이나 자극성 찌라시는 탈락시키고 실적/수주 등 주가에 지대한 영향을 줄 진짜 '알짜 기사'의 인덱스 번호만 파이썬 배열로 출력해라. 예: [0, 3, 15]\n\n{context_block}")
     try:
         res = call_gemini_with_fallback(prompt, is_json=True, use_lite=True)
         matched_indices = json.loads(re.search(r'\[.*\]', res).group())
@@ -453,7 +446,7 @@ def get_financial_data(ticker):
     except: return "재무 정보 데이터 누락"
 
 # =======================================================
-# AI 프롬프트 마스터 빌더 구역 (생각의 사슬 수학 공식 강제)
+# AI 프롬프트 빌더 
 # =======================================================
 def build_prompt_single_news(title, summary, market_data_str):
     return f"아래 뉴스가 증시에 미칠 영향을 분석하세요.\n[지표]: {market_data_str}\n[제목]: {title}\n[요약]: {summary}\n1. 💡 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"
@@ -478,21 +471,21 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
             f"[최신 관련 뉴스 팩트]:\n{combined}\n\n"
             f"위 데이터를 분석하여, '{investment_horizon}' 투자에 부적합한 종목 2개를 먼저 제외하고, 최종 3개만 엄선하여 보고서를 작성하십시오.\n\n"
             f"⚠️ 절대 주의사항 (Chain-of-Thought 수학적 논리 전개) ⚠️\n"
-            f"1. 목표가 산출 시, 뇌피셜을 금지합니다. 반드시 본문에 `[현재가 × (동종업계 적정 PER 추정치 ÷ 현재 PER)]` 또는 이익 모멘텀을 반영한 수식을 텍스트로 적고 직접 계산하여 목표가를 산출하십시오.\n"
-            f"2. 매수추천가 산출 시, 반드시 제공된 보조지표 중 `볼린저 밴드 하단` 또는 `장기 이평선`, `52주 최저가` 수치 중 하나를 언급하며 방어적인 진입가를 수식처럼 작성하십시오.\n"
-            f"3. 탈락시킨 2개 종목은 아래 '최종 추천 종목' 목록에 절대 중복해서 나타나면 안 됩니다.\n\n"
+            f"1. 목표가 산출 시, 반드시 본문에 `[현재가 × (동종업계 적정 PER 추정치 ÷ 현재 PER)]` 수식을 텍스트로 적고 직접 계산하여 목표가를 산출하십시오.\n"
+            f"2. 매수추천가 산출 시, 반드시 제공된 보조지표 중 `볼린저 밴드 하단` 또는 `장기 이평선`, `52주 최저가` 중 하나를 언급하며 방어적인 진입가를 수식처럼 작성하십시오.\n"
+            f"3. 탈락시킨 2개 종목은 아래 '최종 추천 종목' 목록에 절대 중복되면 안 됩니다.\n\n"
             f"[보고서 필수 양식]\n"
             f"### 🗑️ [탈락 종목 2개]\n"
             f"- [탈락 종목명 1, 2]: (고평가, 악재 등 제외한 구체적 이유)\n\n"
             f"### 🏆 [최종 추천 종목 3개]\n"
             f"1. 🥇 추천종목: [종목명] (티커)\n"
             f"- 선정 근거: (뉴스 모멘텀 및 수급 서술)\n"
-            f"- 🧮 적정 목표가 산출식: (위에서 지시한 상대가치평가 공식 및 계산 과정 명시)\n"
-            f"- 🎯 퀀트 목표가: [수식으로 도출된 현실적인 가격]\n"
-            f"- 🛡️ 진입 타점 연산: (위에서 지시한 볼린저 밴드 하단/이평선 수치를 대입하여 설명)\n"
+            f"- 🧮 적정 목표가 산출식: (수식 및 계산 과정 명시)\n"
+            f"- 🎯 퀀트 목표가: [수식으로 도출된 가격]\n"
+            f"- 🛡️ 진입 타점 연산: (볼린저 밴드 하단 등 수치를 대입하여 설명)\n"
             f"- 💰 정밀 매수 추천가: [연산된 현실적 진입가]\n\n"
             f"(2번, 3번 종목 동일하게 작성)\n\n"
-            f"※ 가장 중요: 보고서 맨 마지막 줄에 시스템 추적용 3개의 데이터를 지정된 형식으로 100% 동일하게 기재하십시오.\n"
+            f"※ 가장 중요: 보고서 맨 마지막 줄에 시스템 추적용 3개의 데이터를 기재하십시오.\n"
             f"[TRACKING_DATA]\n"
             f"종목명1|티커1|목표가숫자만|매수추천가숫자만\n"
             f"종목명2|티커2|목표가숫자만|매수추천가숫자만\n"
@@ -514,10 +507,10 @@ def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, q
             f"[재무]\n{fin_data}\n\n"
             f"위 데이터를 바탕으로 아래 항목을 반드시 포함하여 리포트를 작성하십시오.\n"
             f"1. 🏢 재무 및 기업 펀더멘털 분석\n"
-            f"2. 🌐 뉴스 및 수급 파급력 종합 분석 (외인/기관 연속성 및 MACD, RSI 과열구간 언급 필수)\n"
-            f"3. 📊 포트폴리오 맞춤 진단 및 투자의견 (매수/보유/매도)\n"
-            f"4. 🧮 적정 목표가 산출식: (현재가 * (업종 평균 추정 PER / 현재 PER) 등의 논리적 수식을 본문에 기재하여 도출할 것)\n"
-            f"5. 💰 적정 목표가 및 손절가 (※ 반드시 산출식을 거쳐 도출된 구체적 수치, 손절가는 볼린저 밴드 하단 또는 이평선 이탈 가격을 명시할 것)\n\n"
+            f"2. 🌐 뉴스 및 수급 파급력 종합 분석 (MACD, RSI 과열구간 언급 필수)\n"
+            f"3. 📊 포트폴리오 맞춤 진단 및 투자의견\n"
+            f"4. 🧮 적정 목표가 산출식: (현재가 * (업종 평균 추정 PER / 현재 PER) 등의 수식 기재)\n"
+            f"5. 💰 적정 목표가 및 손절가 (※ 반드시 산출식을 거친 구체적 수치, 손절가는 볼린저 밴드 하단 이탈 가격 명시)\n\n"
             f"마지막줄에 파싱을 위해 'TARGET_PRICE: 목표가숫자만' 을 필수로 적어주세요.")
 
 # =======================================================
@@ -541,7 +534,6 @@ with tab1:
     realtime_query = "증시|금융|환율|물가|부동산|정책"
     if not st.session_state.current_realtime_news: fetch_unique_realtime_news(realtime_query)
     if st.button("🤖 실시간 뉴스 TOP 20 기반 종합 분석", type="primary", use_container_width=True):
-        st.toast("🧠 AI 분석 엔진 가동", icon="💡")
         st.session_state.realtime_analysis = st.write_stream(call_gemini_stream_with_fallback(build_prompt_realtime(st.session_state.current_realtime_news[:20], market_data_str)))
         st.rerun()
     if st.session_state.realtime_analysis:
@@ -587,7 +579,7 @@ with tab2:
             fetch_unique_eco_news(eco_query); st.rerun()
 
     if st.session_state.overall_analysis:
-        st.markdown(f"**방금 측정한 실시간 AI 시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
+        st.markdown(f"**실시간 AI 시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
         with st.expander("📝 거시 브리핑 리포트", expanded=True): st.write(st.session_state.overall_analysis['text'])
     
     for i, news in enumerate(st.session_state.current_eco_news):
@@ -625,29 +617,38 @@ with tab3:
             st.markdown(f"[원문 읽기]({news['link']}) | {news['published']}\n\n{news['summary']}")
 
 with tab4:
-    st.subheader("🎯 AI 맞춤 추천종목 발굴 (2-Step 퀀트 필터 및 정밀 진입가 산정)")
+    st.subheader("🎯 AI 맞춤 추천종목 발굴 (병렬 고속 엔진 + 스트리밍)")
     investment_horizon = st.radio("투자 기간 설정", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
     if st.button("🚀 유망 종목 정밀 발굴 가동", type="primary", use_container_width=True):
         raw_rec = get_naver_news("특징주|수주|실적|목표가", display=100, sort_type="date")
-        st.toast("⚡ Step 1: AI 퀀트 필터망 가동 중", icon="⚙️")
         rec_news = filter_news_with_gemini_lite(raw_rec)
         
-        st.toast("⚡ Step 2: 후보 종목 추출 중...", icon="⚙️")
         res1 = call_gemini_with_fallback(f"다음 뉴스에서 유망 종목 5개를 골라 JSON 배열로 출력하세요. [{{\"name\":\"종목명\",\"ticker\":\"6자리코드\"}}]\n" + "\n".join([n['title'] for n in rec_news]), is_json=True)
         success_rec = False
         try:
-            candidates = json.loads(re.search(r'\[.*\]', res1, re.S).group())
-            ctx_str = ""
-            for c_info in candidates[:5]:
-                t = c_info.get('ticker', '')
-                p_info = get_stock_current_price(t)
-                cp, dpct = p_info["current"], p_info["diff_pct"]
-                ctx_str += f"- 종목: {c_info.get('name')}({t})\n  현재가: {cp:,.0f}원 (전일대비 {dpct:+.2f}%)\n  보조지표: \n{raw_calculate_technical_indicators(t)}\n  재무: \n{get_financial_data(t)}\n"
+            candidates = json.loads(re.search(r'\[.*\]', res1, re.S).group())[:5]
             
-            st.toast("🧠 Step 3: 메인 AI 밸류에이션 및 정밀 목표가 연산 중...", icon="💡")
-            st.session_state.today_recommendation = call_gemini_with_fallback(build_prompt_recommend_step3(ctx_str, rec_news, market_data_str, investment_horizon))
+            # 💡 [핵심 패치] 5차선 고속도로 병렬 처리로 1분 대기시간 싹쓸이!
+            def fetch_candidate_data(c_info):
+                t = c_info.get('ticker', '')
+                name = c_info.get('name', '')
+                p_info = raw_get_stock_current_price(t)
+                cp, dpct = p_info["current"], p_info["diff_pct"]
+                tech = raw_calculate_technical_indicators(t)
+                fin = get_financial_data(t)
+                return f"- 종목: {name}({t})\n  현재가: {cp:,.0f}원 (전일대비 {dpct:+.2f}%)\n  보조지표: \n{tech}\n  재무: \n{fin}\n"
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                results = list(executor.map(fetch_candidate_data, candidates))
+            
+            ctx_str = "".join(results)
+            
+            # 💡 [핵심 패치] 답답하게 기다릴 필요 없이 실시간 타자(스트리밍) 효과로 전면 교체
+            prompt_step3 = build_prompt_recommend_step3(ctx_str, rec_news, market_data_str, investment_horizon)
+            st.session_state.today_recommendation = st.write_stream(call_gemini_stream_with_fallback(prompt_step3))
             success_rec = True
-        except Exception as e: st.error(f"추천 오류 발생. 다시 시도해 주세요: {e}")
+            
+        except Exception as e: st.error(f"추천 오류 발생: {e}")
         if success_rec: st.rerun()
 
     if st.session_state.get('today_recommendation'):
