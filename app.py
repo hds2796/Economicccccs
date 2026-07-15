@@ -363,9 +363,11 @@ with tab6:
 
 with tab7:
     st.subheader("⚙️ 데이터 관리")
-    c.execute("SELECT COUNT(*) FROM oauth_creds")
-    if not f_auth := c.fetchone()[0] > 0:
-        url, state = Flow.from_client_config(json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"]), scopes=SCOPES, redirect_uri=st.secrets["REDIRECT_URI"]).authorization_url(prompt='consent')
+   c.execute("SELECT COUNT(*) FROM oauth_creds")
+    is_authenticated = c.fetchone()[0] > 0
+    
+    if not is_authenticated:
+        url, state = Flow.from_client_config(json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"])...
         c.execute("DELETE FROM oauth_store"); c.execute("INSERT INTO oauth_store VALUES (?,?)", (state, Flow.from_client_config(json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"]), scopes=SCOPES, redirect_uri=st.secrets["REDIRECT_URI"]).code_verifier)); conn.commit()
         st.link_button("👉 구글 드라이브 연동", url)
     else:
