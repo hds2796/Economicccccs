@@ -132,6 +132,8 @@ if 'realtime_start' not in st.session_state: st.session_state.realtime_start = 1
 if 'seen_realtime' not in st.session_state: st.session_state.seen_realtime = set()
 if 'eco_start' not in st.session_state: st.session_state.eco_start = 1
 if 'seen_eco' not in st.session_state: st.session_state.seen_eco = set()
+# 💡 초고속 화면 렌더링용 내부 메모리 캐시 창고
+if 'port_data_cache' not in st.session_state: st.session_state.port_data_cache = {}
 
 @st.cache_data(ttl=60)
 def get_market_data():
@@ -202,14 +204,12 @@ def raw_fetch_naver_news(query, display=100, start=1, sort_type="date", cid="", 
     return unique[:display]
 
 def raw_calculate_technical_indicators(ticker):
-    """코스피(.KS)와 코스닥(.KQ)을 모두 지원하는 지표 계산기"""
     try:
         df = None
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
             code = code_match.group()
             df = yf.Ticker(f"{code}.KS").history(period="60d")
-            # 코스피에서 안 나오면 코스닥으로 2차 시도
             if df.empty: df = yf.Ticker(f"{code}.KQ").history(period="60d")
         else:
             df = yf.Ticker(ticker).history(period="60d")
@@ -240,30 +240,26 @@ def raw_fetch_dart_disclosures(ticker, dart_key):
     except: return "- DART 서버 통신 오류"
 
 def raw_fetch_supply_demand_trend(ticker):
-    """CSS 정밀 타겟팅으로 네이버 구조 변경 방어 완벽 패치"""
     try:
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
             res = requests.get(f"https://finance.naver.com/item/frgn.naver?code={code_match.group()}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, 'html.parser')
-                # 표 전체를 찾지 않고, 마우스 오버(일별 데이터 행) 효과가 있는 tr만 정밀 저격
                 rows = soup.select("table.type2 tr[onmouseover]")
                 if rows:
                     cols = rows[0].find_all('td')
                     if len(cols) >= 7:
                         inst_txt = cols[5].text.strip().replace(',', '')
                         frgn_txt = cols[6].text.strip().replace(',', '')
-                        
                         inst = int(inst_txt) if inst_txt.lstrip('+-').isdigit() else 0
                         frgn = int(frgn_txt) if frgn_txt.lstrip('+-').isdigit() else 0
-                        
                         return f"- 기관 당일 순매매: {inst:+,}주\n- 외국인 당일 순매매: {frgn:+,}주"
     except: pass
     return "- 수급 동향 조회 불가 (네이버 구조 변경 또는 통신 지연)"
 
 # =======================================================
-# 기존 앱 전용 캐시 래퍼 (메인 쓰레드 구동용)
+# 기존 앱 전용 캐시 래퍼
 # =======================================================
 @st.cache_data(ttl=60)
 def get_stock_current_price(ticker): return raw_get_stock_current_price(ticker)
@@ -272,25 +268,15 @@ def get_stock_current_price(ticker): return raw_get_stock_current_price(ticker)
 def get_naver_news(query, display=100, start=1, sort_type="date"): 
     return raw_fetch_naver_news(query, display, start, sort_type, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)
 
-# 💡 하이브리드 필터링 적용 (최신순 + 핵심 비즈니스 키워드 분류)
 CORE_BUSINESS_KWS = ["실적", "목표가", "수주", "합병", "M&A", "공급", "계약", "개발", "배당", "전망", "투자", "매출", "영업이익", "흑자", "독점"]
 
 def filter_core_news(raw_news_list):
-    """일반 뉴스 중 비즈니스 팩트가 담긴 핵심 뉴스만 1차로 걸러내는 내부 필터망"""
-    filtered = []
-    for n in raw_news_list:
-        if any(kw in n['title'] or kw in n['summary'] for kw in CORE_BUSINESS_KWS):
-            filtered.append(n)
+    filtered = [n for n in raw_news_list if any(kw in n['title'] or kw in n['summary'] for kw in CORE_BUSINESS_KWS)]
     return filtered if len(filtered) >= 5 else raw_news_list[:20]
 
-# 💡 Gemini Lite 모델을 이용한 스마트 AI 판사 엔진
 def filter_news_with_gemini_lite(raw_news_list):
     if not raw_news_list: return []
-    context_lines = []
-    for idx, n in enumerate(raw_news_list):
-        context_lines.append(f"[{idx}] {n['title']}")
-    context_block = "\n".join(context_lines)
-    
+    context_block = "\n".join([f"[{idx}] {n['title']}" for idx, n in enumerate(raw_news_list)])
     prompt = (
         f"너는 베테랑 헤지펀드 매니저야. 아래의 최신 뉴스 제목 50개 목록을 읽고, "
         f"단순 시황 요약이나 영양가 없는 자극성 찌라시는 모두 탈락시키고, "
@@ -298,7 +284,6 @@ def filter_news_with_gemini_lite(raw_news_list):
         f"[뉴스 목록]\n{context_block}\n\n"
         f"반드시 다른 부연설명 없이 파이썬 배열 형식만 출력해라. 예: [0, 3, 15, 22]"
     )
-    
     try:
         res = call_gemini_with_fallback(prompt, is_json=True, use_lite=True)
         matched_indices = json.loads(re.search(r'\[.*\]', res).group())
@@ -326,7 +311,6 @@ def fetch_unique_eco_news(query):
         batch = get_naver_news(query, display=50, start=st.session_state.eco_start, sort_type="date")
         st.session_state.eco_start += 50; attempts += 1
         if not batch: break
-        
         core_batch = filter_news_with_gemini_lite(batch)
         for n in core_batch:
             if n['link'] not in st.session_state.seen_eco: unique_news.append(n); st.session_state.seen_eco.add(n['link'])
@@ -341,7 +325,6 @@ def fetch_unique_sector_news(sector_name, query):
         batch = get_naver_news(query, display=50, start=st.session_state.sector_starts[sector_name], sort_type="date")
         st.session_state.sector_starts[sector_name] += 50; attempts += 1
         if not batch: break
-        
         core_batch = filter_news_with_gemini_lite(batch)
         for n in core_batch:
             if n['link'] not in st.session_state.seen_sectors[sector_name]: unique_news.append(n); st.session_state.seen_sectors[sector_name].add(n['link'])
@@ -524,48 +507,76 @@ with tab4:
                             c.execute("INSERT INTO portfolio (stock_name, ticker) VALUES (?,?)", (name, tick)); conn.commit(); st.success("찜하기 완료")
 
 # =======================================================
-# 💡 [탭 5: 관심종목] 백그라운드 쓰레드 & 스트림릿 완벽 독립 구현
+# 💡 [탭 5: 관심종목] 유령 등록 및 거북이 삭제 완벽 해결 구역
 # =======================================================
 with tab5:
     st.subheader("⭐️ 내 관심종목 & AI 앙상블 진단")
     with st.form("add_stock"):
-        new_s = st.text_input("종목명 입력")
+        new_s = st.text_input("종목명 입력 (예: 카카오, 삼성전자)")
         st_owned = st.radio("보유상태", ["미보유", "보유중"], horizontal=True)
         c1, c2 = st.columns(2)
         avg_p = c1.text_input("평단가", value="0")
         qty = c2.number_input("수량", min_value=0, value=0)
+        
+        # 💡 유령 등록 원천 차단 로직 (try~except에서 st.rerun 분리)
         if st.form_submit_button("➕ 종목 등록") and new_s:
-            res = call_gemini_with_fallback(f"'{new_s}'의 야후티커 JSON 반환. {{'ticker':'', 'query':''}}", is_json=True, use_lite=True)
-            try:
-                data = json.loads(re.search(r'\{.*\}', res, re.S).group())
-                c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?,?,?,?,?,?)", (new_s.strip(), data.get('query', new_s), data.get('ticker', ''), 1 if st_owned=="보유중" else 0, float(avg_p.replace(',','')), qty)); conn.commit(); st.rerun()
-            except: st.error("등록 실패")
+            with st.spinner("정보 분석 중..."):
+                res = call_gemini_with_fallback(f"한국주식 '{new_s}'의 야후티커와 검색어 JSON으로 줘. {{'ticker':'', 'query':''}}", is_json=True, use_lite=True)
+                success = False
+                try:
+                    data = json.loads(re.search(r'\{.*\}', res, re.S).group())
+                    try: final_avg_p = float(avg_p.replace(',', ''))
+                    except: final_avg_p = 0.0
+                    
+                    c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?,?,?,?,?,?)", 
+                              (new_s.strip(), data.get('query', new_s), data.get('ticker', ''), 1 if st_owned=="보유중" else 0, final_avg_p, qty))
+                    conn.commit()
+                    success = True
+                except Exception as e:
+                    st.error(f"등록 실패: {e}")
+                
+                if success:
+                    st.rerun() # 정상적으로 저장 완료 시에만 새로고침
 
     c.execute("SELECT id, stock_name, search_query, ticker, is_owned, avg_price, quantity FROM portfolio")
     portfolio = c.fetchall()
     
     if portfolio:
         port_cache = {}
-        with st.spinner("⚡ 퀀트 레이더 가동: 100% 독립 병렬 스크래핑 엔진 가동 중..."):
-            def fetch_stock_raw_worker(p_tuple):
-                p, start_idx, cid, sec, dart_k = p_tuple
-                p_id, name, query, ticker, owned, avg, qnt = p
-                
-                cur_p = raw_get_stock_current_price(ticker or name)
-                tech = raw_calculate_technical_indicators(ticker or name)
-                supply = raw_fetch_supply_demand_trend(ticker or name)
-                dart = raw_fetch_dart_disclosures(ticker or name, dart_k)
-                
-                broad = "|".join([k.strip() for k in (query or name).split(" OR ")])
-                raw_news = raw_fetch_naver_news(broad, display=50, start=start_idx, sort_type="date", cid=cid, secret=sec)
-                
-                # 관심종목 내부 필터망 가동
-                fact_news = filter_news_with_gemini_lite(raw_news)
-                return p_id, cur_p, fact_news[:10], raw_news, tech, supply, dart
+        tasks_to_run = []
+        now_ts = time.time()
+        
+        # 💡 거북이 삭제 원천 차단 (60초 자체 메모리 캐시 로직 도입)
+        for p in portfolio:
+            p_id = p[0]
+            # 최근 60초 안에 긁어온 데이터가 메모리에 있으면 그대로 재사용!
+            if p_id in st.session_state.port_data_cache and (now_ts - st.session_state.port_data_cache[p_id]['time'] < 60):
+                port_cache[p_id] = st.session_state.port_data_cache[p_id]['data']
+            else:
+                # 메모리에 없거나 60초가 지났으면 새로 가져오기 리스트에 추가
+                tasks_to_run.append((p, st.session_state.port_starts.get(p_id, 1), NAVER_CLIENT_ID, NAVER_CLIENT_SECRET, DART_API_KEY))
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-                tasks = [(p, st.session_state.port_starts.get(p[0], 1), NAVER_CLIENT_ID, NAVER_CLIENT_SECRET, DART_API_KEY) for p in portfolio]
-                for r in executor.map(fetch_stock_raw_worker, tasks): port_cache[r[0]] = r
+        if tasks_to_run:
+            with st.spinner("⚡ 퀀트 레이더 가동: 실시간 주가 및 뉴스 스크래핑 중..."):
+                def fetch_stock_raw_worker(p_tuple):
+                    p, start_idx, cid, sec, dart_k = p_tuple
+                    p_id, name, query, ticker, owned, avg, qnt = p
+                    
+                    cur_p = raw_get_stock_current_price(ticker or name)
+                    tech = raw_calculate_technical_indicators(ticker or name)
+                    supply = raw_fetch_supply_demand_trend(ticker or name)
+                    dart = raw_fetch_dart_disclosures(ticker or name, dart_k)
+                    
+                    broad = "|".join([k.strip() for k in (query or name).split(" OR ")])
+                    raw_news = raw_fetch_naver_news(broad, display=50, start=start_idx, sort_type="date", cid=cid, secret=sec)
+                    fact_news = filter_news_with_gemini_lite(raw_news)
+                    return p_id, cur_p, fact_news[:10], raw_news, tech, supply, dart
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                    for r in executor.map(fetch_stock_raw_worker, tasks_to_run): 
+                        port_cache[r[0]] = r
+                        # 긁어온 데이터를 자체 메모리 캐시 창고에 저장!
+                        st.session_state.port_data_cache[r[0]] = {'data': r, 'time': now_ts}
 
         @st.fragment
         def render_stock_box(p, p_data):
@@ -629,7 +640,13 @@ with tab5:
                             c.execute("UPDATE portfolio SET is_owned=?, avg_price=?, quantity=? WHERE id=?", (1 if new_own=="보유중" else 0, fp, int(nq) if new_own=="보유중" else 0, p_id)); conn.commit(); st.rerun()
             with col_edit2:
                 st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("🗑️ 관심종목 삭제", key=f"del_{p_id}", use_container_width=True): c.execute("DELETE FROM portfolio WHERE id=?", (p_id,)); conn.commit(); st.rerun()
+                if st.button("🗑️ 관심종목 삭제", key=f"del_{p_id}", use_container_width=True): 
+                    c.execute("DELETE FROM portfolio WHERE id=?", (p_id,))
+                    conn.commit()
+                    # 💡 메모리 캐시에서도 해당 종목 삭제
+                    if p_id in st.session_state.port_data_cache:
+                        del st.session_state.port_data_cache[p_id]
+                    st.rerun()
             st.divider()
 
         for p in portfolio:
