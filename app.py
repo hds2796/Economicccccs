@@ -168,10 +168,9 @@ def clean_html(raw_html):
     return BeautifulSoup(raw_html, "html.parser").get_text() if raw_html else ""
 
 # =======================================================
-# 💡 순수 파이썬 코어 로직 (전일대비 등락률 수집 패치)
+# 💡 순수 파이썬 코어 로직 (볼린저 밴드, 등락률 탑재)
 # =======================================================
 def raw_get_stock_current_price(ticker):
-    """현재가뿐만 아니라 전일 대비 등락폭, 등락률까지 사전(Dict) 형태로 반환합니다."""
     res_data = {"current": 0.0, "diff": 0.0, "diff_pct": 0.0}
     if not ticker: return res_data
     try:
@@ -227,21 +226,40 @@ def raw_calculate_technical_indicators(ticker):
         code_match = re.search(r'\d{6}', ticker)
         if code_match:
             code = code_match.group()
-            df = yf.Ticker(f"{code}.KS").history(period="60d")
-            if df.empty: df = yf.Ticker(f"{code}.KQ").history(period="60d")
+            df = yf.Ticker(f"{code}.KS").history(period="1y")
+            if df.empty: df = yf.Ticker(f"{code}.KQ").history(period="1y")
         else:
-            df = yf.Ticker(ticker).history(period="60d")
+            df = yf.Ticker(ticker).history(period="1y")
             
-        if df is not None and len(df) >= 20:
+        if df is not None and len(df) >= 60:
             cur = float(df['Close'].iloc[-1])
             ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
             ma60 = float(df['Close'].rolling(60).mean().iloc[-1])
+            
+            high52 = float(df['High'].rolling(252, min_periods=100).max().iloc[-1])
+            low52 = float(df['Low'].rolling(252, min_periods=100).min().iloc[-1])
+            
+            std20 = float(df['Close'].rolling(20).std().iloc[-1])
+            bb_upper = ma20 + (std20 * 2)
+            bb_lower = ma20 - (std20 * 2)
+            
+            exp12 = df['Close'].ewm(span=12, adjust=False).mean()
+            exp26 = df['Close'].ewm(span=26, adjust=False).mean()
+            macd = exp12 - exp26
+            signal = macd.ewm(span=9, adjust=False).mean()
+            macd_osc = float((macd - signal).iloc[-1])
+            
             delta = df['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(14).mean().iloc[-1]
             loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
             rs = gain / loss if loss > 0 else 0
             rsi = 100 - (100 / (1 + rs)) if loss > 0 else 100
-            return f"- 20일선: {ma20:,.0f}원 (현재가대비 {((cur-ma20)/ma20)*100:+.1f}%)\n- 60일선: {ma60:,.0f}원\n- RSI(14): {rsi:.1f} ({'과열🔴' if rsi>=70 else '침체🔵' if rsi<=30 else '중립⚖️'})"
+            
+            return (f"- 20일선/60일선: {ma20:,.0f}원 / {ma60:,.0f}원\n"
+                    f"- 52주 최고가: {high52:,.0f}원 | 최저가: {low52:,.0f}원\n"
+                    f"- 볼린저밴드 상단(저항): {bb_upper:,.0f}원 | 하단(지지): {bb_lower:,.0f}원\n"
+                    f"- MACD 오실레이터: {macd_osc:+.2f} ({'상승추세🔴' if macd_osc>0 else '하락추세🔵'})\n"
+                    f"- RSI(14): {rsi:.1f} ({'과열🔴' if rsi>=70 else '침체🔵' if rsi<=30 else '중립⚖️'})")
     except: pass
     return "- 기술적 지표 계산 불가 (데이터 누락)"
 
@@ -297,49 +315,65 @@ def raw_fetch_supply_demand_trend(ticker):
     return "수급 동향 조회 불가 (네이버 구조 변경 또는 통신 지연)"
 
 # =======================================================
-# 💡 AI 코어 백엔드 통신 유닛 (정규 3.5 모델명 및 다이내믹 뱃지 완벽 적용)
+# 💡 [핵심] AI 코어 백엔드 통신 유닛 (에러 추적기 및 우회 사유 출력 패치)
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     if use_lite:
-        models = [('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite')]
+        models = ['gemini-3.1-flash-lite']
     else:
-        models = [
-            ('gemini-3.5-flash', 'Gemini 3.5 Flash'),
-            ('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite (Fallback)')
-        ]
+        models = ['gemini-3.5-flash', 'gemini-3.1-flash-lite']
 
-    for m, badge_name in models:
+    last_error = ""
+    for idx, m in enumerate(models):
         try:
             res = client.models.generate_content(model=m, contents=prompt).text
             if not is_json:
+                badge_name = "Gemini 3.1 Flash Lite" if "lite" in m else "Gemini 3.5 Flash"
+                # 만약 우회(두 번째 모델)를 통해 성공했다면, 이전 실패 사유를 추가합니다.
+                if idx > 0:
+                    badge_name += f" (Fallback) - ⚠️ 우회 사유: {last_error}"
                 res = f"*(🤖 **엔진 식별 프로토콜:** `[💡 {badge_name}]`)*\n\n" + res
             return res
         except Exception as e:
-            if "429" in str(e) or "quota" in str(e).lower():
-                continue
+            # 실패 원인 기록 및 정제 (너무 길면 자름)
+            error_str = str(e)
+            if "429" in error_str or "quota" in error_str.lower():
+                last_error = "일일 API 호출 한도 초과 (429 Quota)"
+            else:
+                last_error = (error_str[:50] + '...') if len(error_str) > 50 else error_str
             continue
-    raise Exception("모든 AI 모델의 일일 호출 한도가 초과되었거나 서버가 응답하지 않습니다.")
+            
+    raise Exception(f"모든 AI 모델 호출 실패. 마지막 오류: {last_error}")
 
 def call_gemini_stream_with_fallback(prompt):
     client = genai.Client(api_key=GEMINI_API_KEY)
-    models = [
-        ('gemini-3.5-flash', 'Gemini 3.5 Flash'),
-        ('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite (Fallback)')
-    ]
-    for m, badge_name in models:
+    models = ['gemini-3.5-flash', 'gemini-3.1-flash-lite']
+    last_error = ""
+    
+    for idx, m in enumerate(models):
         try:
             response = client.models.generate_content_stream(model=m, contents=prompt)
+            
+            badge_name = "Gemini 3.1 Flash Lite" if "lite" in m else "Gemini 3.5 Flash"
+            if idx > 0:
+                badge_name += f" (Fallback) - ⚠️ 우회 사유: {last_error}"
+                
             yield f"*(🤖 **엔진 식별 프로토콜:** `[💡 {badge_name}]`)*\n\n"
+            
             for chunk in response:
                 if chunk.text: yield chunk.text
             return
         except Exception as e:
-            if "429" in str(e) or "quota" in str(e).lower():
-                continue
+            error_str = str(e)
+            if "429" in error_str or "quota" in error_str.lower():
+                last_error = "일일 API 호출 한도 초과 (429 Quota)"
+            else:
+                last_error = (error_str[:50] + '...') if len(error_str) > 50 else error_str
             continue
-    yield "\n\n🚨 **서버 과부하:** 모든 AI 모델의 일일 호출 한도가 초과되었습니다."
+            
+    yield f"\n\n🚨 **서버 과부하:** 모든 AI 모델 호출 실패. 마지막 오류: {last_error}"
 
 # =======================================================
 # 기존 앱 전용 캐시 래퍼 및 뉴스 필터
@@ -419,7 +453,7 @@ def get_financial_data(ticker):
     except: return "재무 정보 데이터 누락"
 
 # =======================================================
-# AI 프롬프트 마스터 빌더 구역
+# AI 프롬프트 마스터 빌더 구역 (생각의 사슬 수학 공식 강제)
 # =======================================================
 def build_prompt_single_news(title, summary, market_data_str):
     return f"아래 뉴스가 증시에 미칠 영향을 분석하세요.\n[지표]: {market_data_str}\n[제목]: {title}\n[요약]: {summary}\n1. 💡 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"
@@ -443,26 +477,26 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
             f"[예비 후보 5종목 팩트체크 데이터 (현재가 및 등락률 포함)]:\n{candidate_context}\n"
             f"[최신 관련 뉴스 팩트]:\n{combined}\n\n"
             f"위 데이터를 분석하여, '{investment_horizon}' 투자에 부적합한 종목 2개를 먼저 제외하고, 최종 3개만 엄선하여 보고서를 작성하십시오.\n\n"
-            f"⚠️ 절대 주의사항 ⚠️\n"
-            f"1. 목표가와 매수추천가는 반드시 제공된 각 종목의 '현재가'를 기준으로, 현실적인 상승 여력(예: 현재가 대비 +10% ~ +30% 내외)을 연산하여 작성하십시오. 터무니없는 숫자를 적지 마십시오.\n"
-            f"2. 탈락시킨 2개 종목은 아래 '최종 추천 종목' 목록에 절대 중복해서 나타나면 안 됩니다.\n\n"
+            f"⚠️ 절대 주의사항 (Chain-of-Thought 수학적 논리 전개) ⚠️\n"
+            f"1. 목표가 산출 시, 뇌피셜을 금지합니다. 반드시 본문에 `[현재가 × (동종업계 적정 PER 추정치 ÷ 현재 PER)]` 또는 이익 모멘텀을 반영한 수식을 텍스트로 적고 직접 계산하여 목표가를 산출하십시오.\n"
+            f"2. 매수추천가 산출 시, 반드시 제공된 보조지표 중 `볼린저 밴드 하단` 또는 `장기 이평선`, `52주 최저가` 수치 중 하나를 언급하며 방어적인 진입가를 수식처럼 작성하십시오.\n"
+            f"3. 탈락시킨 2개 종목은 아래 '최종 추천 종목' 목록에 절대 중복해서 나타나면 안 됩니다.\n\n"
             f"[보고서 필수 양식]\n"
             f"### 🗑️ [탈락 종목 2개]\n"
             f"- [탈락 종목명 1, 2]: (고평가, 악재 등 제외한 구체적 이유)\n\n"
             f"### 🏆 [최종 추천 종목 3개]\n"
             f"1. 🥇 추천종목: [종목명] (티커)\n"
-            f"- 통합 선정 근거: (재무/기술적 지표 및 뉴스 모멘텀을 엮어 서술)\n"
-            f"- 🎯 퀀트 목표가: [현재가 기반 현실적인 목표 가격]\n"
-            f"- 💰 정밀 매수 추천가: [현재가 및 지지선 기반 현실적인 진입가]\n\n"
+            f"- 선정 근거: (뉴스 모멘텀 및 수급 서술)\n"
+            f"- 🧮 적정 목표가 산출식: (위에서 지시한 상대가치평가 공식 및 계산 과정 명시)\n"
+            f"- 🎯 퀀트 목표가: [수식으로 도출된 현실적인 가격]\n"
+            f"- 🛡️ 진입 타점 연산: (위에서 지시한 볼린저 밴드 하단/이평선 수치를 대입하여 설명)\n"
+            f"- 💰 정밀 매수 추천가: [연산된 현실적 진입가]\n\n"
             f"(2번, 3번 종목 동일하게 작성)\n\n"
             f"※ 가장 중요: 보고서 맨 마지막 줄에 시스템 추적용 3개의 데이터를 지정된 형식으로 100% 동일하게 기재하십시오.\n"
             f"[TRACKING_DATA]\n"
             f"종목명1|티커1|목표가숫자만|매수추천가숫자만\n"
             f"종목명2|티커2|목표가숫자만|매수추천가숫자만\n"
-            f"종목명3|티커3|목표가숫자만|매수추천가숫자만\n\n"
-            f"예시:\n"
-            f"[TRACKING_DATA]\n"
-            f"삼성전자|005930|90000|82000")
+            f"종목명3|티커3|목표가숫자만|매수추천가숫자만")
 
 def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str, tech_str, supply_str):
     fin_data = get_financial_data(ticker)
@@ -480,9 +514,10 @@ def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, q
             f"[재무]\n{fin_data}\n\n"
             f"위 데이터를 바탕으로 아래 항목을 반드시 포함하여 리포트를 작성하십시오.\n"
             f"1. 🏢 재무 및 기업 펀더멘털 분석\n"
-            f"2. 🌐 뉴스 및 수급 파급력 종합 분석 (외인/기관 연속성 및 RSI 과열구간 언급 필수)\n"
+            f"2. 🌐 뉴스 및 수급 파급력 종합 분석 (외인/기관 연속성 및 MACD, RSI 과열구간 언급 필수)\n"
             f"3. 📊 포트폴리오 맞춤 진단 및 투자의견 (매수/보유/매도)\n"
-            f"4. 💰 적정 목표가 및 손절가 (※ 반드시 현재가 {current_price:,.0f}원을 기준으로 위아래 상승/하락 여력을 계산하여 구체적인 가격을 명시할 것)\n\n"
+            f"4. 🧮 적정 목표가 산출식: (현재가 * (업종 평균 추정 PER / 현재 PER) 등의 논리적 수식을 본문에 기재하여 도출할 것)\n"
+            f"5. 💰 적정 목표가 및 손절가 (※ 반드시 산출식을 거쳐 도출된 구체적 수치, 손절가는 볼린저 밴드 하단 또는 이평선 이탈 가격을 명시할 것)\n\n"
             f"마지막줄에 파싱을 위해 'TARGET_PRICE: 목표가숫자만' 을 필수로 적어주세요.")
 
 # =======================================================
@@ -607,9 +642,9 @@ with tab4:
                 t = c_info.get('ticker', '')
                 p_info = get_stock_current_price(t)
                 cp, dpct = p_info["current"], p_info["diff_pct"]
-                ctx_str += f"- 종목: {c_info.get('name')}({t})\n  현재가: {cp:,.0f}원 (전일대비 {dpct:+.2f}%)\n  보조지표: {raw_calculate_technical_indicators(t)}\n  재무: {get_financial_data(t)}\n"
+                ctx_str += f"- 종목: {c_info.get('name')}({t})\n  현재가: {cp:,.0f}원 (전일대비 {dpct:+.2f}%)\n  보조지표: \n{raw_calculate_technical_indicators(t)}\n  재무: \n{get_financial_data(t)}\n"
             
-            st.toast("🧠 Step 3: 메인 AI 밸류에이션 및 정밀 목표가 산정 중...", icon="💡")
+            st.toast("🧠 Step 3: 메인 AI 밸류에이션 및 정밀 목표가 연산 중...", icon="💡")
             st.session_state.today_recommendation = call_gemini_with_fallback(build_prompt_recommend_step3(ctx_str, rec_news, market_data_str, investment_horizon))
             success_rec = True
         except Exception as e: st.error(f"추천 오류 발생. 다시 시도해 주세요: {e}")
@@ -723,7 +758,7 @@ with tab5:
             st.markdown(f"### 📌 [{name}]")
             c_m1, c_m2 = st.columns(2)
             with c_m1:
-                st.caption("📈 **기술적 수치 지표 (RSI/이평선)**")
+                st.caption("📈 **기술적 수치 지표 (RSI/MACD/이평선/볼린저)**")
                 st.code(tech_str, language="text")
             with c_m2:
                 st.caption("👥 **최근 5일 외국인/기관 매매 동향**")
