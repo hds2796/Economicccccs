@@ -213,7 +213,6 @@ def get_market_data():
     results["원/달러 환율"] = fetch_yahoo_direct("KRW=X")
     return results
 
-# 💡 실시간 반영을 위해 캐시 수명을 60초로 단축!
 @st.cache_data(ttl=60)
 def get_stock_current_price(ticker):
     if not ticker: return 0.0
@@ -467,10 +466,35 @@ def build_prompt_sector(sector_name, news_list, market_data_str):
     combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
     return f"'{sector_name}' 섹터 분석:\n[지표]: {market_data_str}\n{combined}\n\n1. 🏭 섹터 흐름 요약\n2. 📈 주요 호/악재\n3. 🎯 투자 심리 전망"
 
-# 💡 [AI의 주가 소설 쓰기 원천 차단 패치]
-def build_prompt_recommend(news_list, market_data_str, investment_horizon):
+# 💡 [투스텝 정밀 추천 3단계 프롬프트]
+def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, investment_horizon):
     combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list[:30]])
-    return f"핵심 뉴스 30건 바탕 '{investment_horizon}' 유망 종목 3개 추천:\n[지표]: {market_data_str}\n{combined}\n\n1. 🥇 추천종목 1: [종목명]\n- 선정근거:\n- 💰 목표가/손절가:\n(2, 3번 반복)\n\n※ 주의사항: 리포트 본문 내에 '현재가'는 절대 기재하지 마십시오. (실시간 변동되므로 제외)\n\n마지막에 시스템 추적용 기재:\n[TRACKING_DATA]\n종목명1|종목코드(한국은 6자리숫자)|목표가(숫자만)\n종목명2|종목코드|목표가\n종목명3|종목코드|목표가"
+    return (f"당신은 엄격한 퀀트 애널리스트입니다. 앞서 발굴된 예비 후보 5개의 '실시간 주가'와 '재무 데이터'를 확인했습니다.\n\n"
+            f"[현재 실시간 시장 지표]: {market_data_str}\n\n"
+            f"[예비 후보 5종목 팩트체크 데이터]\n{candidate_context}\n"
+            f"[관련 뉴스]\n{combined}\n\n"
+            f"위 데이터를 분석하여, 주가가 이미 너무 고평가되었거나(PER 과도 등) 상승 여력이 없는 2개를 쳐내고, "
+            f"'{investment_horizon}' 투자에 가장 적합한 최종 3개만 엄선하여 리포트를 작성하십시오.\n\n"
+            f"[양식]\n"
+            f"1. 🥇 추천종목 1: [종목명]\n"
+            f"- 선정 근거: (뉴스와 재무데이터 기반으로 고평가가 아님을 증명)\n"
+            f"- 투자 전략: (진입 시점 및 비중 등)\n"
+            f"- 💰 적정 목표가: [구체적 가격] / 손절가: [구체적 가격]\n\n"
+            f"2. 🥈 추천종목 2: [종목명]\n"
+            f"- 선정 근거: ...\n"
+            f"- 투자 전략: ...\n"
+            f"- 💰 적정 목표가: ... / 손절가: ...\n\n"
+            f"3. 🥉 추천종목 3: [종목명]\n"
+            f"- 선정 근거: ...\n"
+            f"- 투자 전략: ...\n"
+            f"- 💰 적정 목표가: ... / 손절가: ...\n\n"
+            f"※ 중요1: 본문에 '실시간 현재가'는 절대 기재하지 마십시오. (시스템이 UI로 띄웁니다)\n"
+            f"※ 중요2: 목표가는 반드시 제시된 '실시간 현재가'보다 현실적으로 높은 가격이어야 합니다.\n"
+            f"※ 중요3: 리포트 맨 마지막 줄에 시스템 추적을 위해 추천종목 3개의 데이터를 아래와 같이 기재하십시오. (다른 설명 없이 형식만 유지)\n"
+            f"[TRACKING_DATA]\n"
+            f"종목명1|티커1|목표가1(숫자만)\n"
+            f"종목명2|티커2|목표가2(숫자만)\n"
+            f"종목명3|티커3|목표가3(숫자만)")
 
 def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str):
     fin_data = get_financial_data(ticker)
@@ -649,25 +673,51 @@ with tab3:
                             c.execute("INSERT INTO scrapbook (title, link, summary, analysis, scrap_date) VALUES (?, ?, ?, ?, ?)", (news['title'], news['link'], news['summary'], cached_data['text'], datetime.now().strftime("%Y-%m-%d %H:%M")))
                             conn.commit(); st.success("저장 완료")
 
-# ----------------- [탭 4: 추천 종목 (실시간 주가 반영 패치 완료)] -----------------
+# ----------------- [탭 4: 추천 종목 (2단계 퀀트 모델 장착)] -----------------
 with tab4:
-    st.subheader("🎯 AI 맞춤 추천종목 발굴")
+    st.subheader("🎯 AI 맞춤 추천종목 발굴 (2-Step 퀀트 필터링)")
+    st.write("단순히 뉴스만 보지 않고, 시스템이 실시간 주가를 팩트체크하여 **과대평가된 종목을 스스로 걸러냅니다.**")
     investment_horizon = st.radio("희망 투자 기간 설정", ["단기 (1~3개월 - 테마/모멘텀/수주)", "중기 (3~6개월 - 실적/사이클/정책)", "중장기 (6개월~1년 - 구조적 성장/시장 지배력)", "장기 (1년 이상 - 배당/안정성/메가트렌드)"], horizontal=True)
     
     if st.button(f"🚀 {investment_horizon.split(' ')[0]} 맞춤 추천종목 발굴", type="primary", use_container_width=True):
-        my_bar = st.progress(30, text="최신 유망 뉴스 스크래핑 중...")
+        my_bar = st.progress(10, text="1단계: 최신 유망 뉴스 스크래핑 중...")
         rec_news = get_naver_news("특징주|목표가|수주|흑자|실적", display=50, sort_type="sim")
         recent_rec_news = [n for n in rec_news if is_within_7_days(n['published'])]
         if not recent_rec_news: recent_rec_news = [n for n in get_naver_news("주식 추천|특징주", display=50, sort_type="sim") if is_within_7_days(n['published'])]
         
         if recent_rec_news:
-            my_bar.progress(80, text="AI 추천 알고리즘 가동 중...")
-            st.markdown(f"### 🤖 {investment_horizon.split(' ')[0]} 추천 발굴 중...")
-            prompt = build_prompt_recommend(recent_rec_news, market_data_str, investment_horizon)
-            full_response = st.write_stream(call_gemini_stream_with_fallback(prompt))
-            my_bar.empty()
-            st.session_state.today_recommendation = full_response
-            st.rerun()
+            # Step 1: 예비 후보 5개 발굴 (JSON 추출)
+            my_bar.progress(30, text="1단계: AI가 기사를 읽고 예비 후보 5종목을 1차 발굴 중...")
+            step1_prompt = f"다음 뉴스를 분석하여 '{investment_horizon}' 투자에 적합한 유망 종목 5개를 찾아 JSON 배열로만 출력하세요.\n형식: [{{\"name\":\"종목명\",\"ticker\":\"6자리종목코드\"}}]\n\n" + "\n".join([n['title'] for n in recent_rec_news[:30]])
+            
+            candidates = []
+            try:
+                res1 = call_gemini_with_fallback(step1_prompt, is_json=True)
+                candidates = json.loads(re.search(r'\[.*\]', res1, re.S).group())
+            except: pass
+            
+            if candidates:
+                # Step 2: 실시간 주가 및 재무 데이터 팩트체크 수집
+                my_bar.progress(60, text="2단계: 시스템이 5개 후보의 '실시간 주가'와 '재무 상태'를 팩트체크 중...")
+                candidate_context = ""
+                for c_info in candidates[:5]:
+                    t_code = c_info.get('ticker', '')
+                    n_name = c_info.get('name', '')
+                    cp = get_stock_current_price(t_code)
+                    fin = get_financial_data(t_code)
+                    candidate_context += f"- 종목명: {n_name} (코드: {t_code})\n  [실시간 현재가]: {cp:,.0f}원\n  [재무/밸류에이션]:\n  {fin}\n\n"
+                
+                # Step 3: 최종 3개 선정 리포트 작성
+                my_bar.progress(80, text="3단계: AI가 고평가 종목을 쳐내고 최종 3개 리포트를 작성 중...")
+                st.markdown(f"### 🤖 퀀트 모델 가동: {investment_horizon.split(' ')[0]} 최적화 발굴 중...")
+                step3_prompt = build_prompt_recommend_step3(candidate_context, recent_rec_news, market_data_str, investment_horizon)
+                full_response = st.write_stream(call_gemini_stream_with_fallback(step3_prompt))
+                my_bar.empty()
+                st.session_state.today_recommendation = full_response
+                st.rerun()
+            else:
+                my_bar.empty()
+                st.error("예비 후보 추출에 실패했습니다. 다시 시도해 주세요.")
         else: my_bar.empty(); st.warning("유망 뉴스가 부족합니다.")
     
     if st.session_state.get('today_recommendation'):
@@ -680,7 +730,7 @@ with tab4:
         if "[TRACKING_DATA]" in raw_report:
             st.markdown("### 📌 AI 추천 종목 요약 (실시간 주가 자동 반영)")
             cols = st.columns(3)
-            # 💡 AI가 뱉은 3단 데이터 (종목명|티커|목표가) 파싱 후 실시간 네이버 주가 매핑
+            # 💡 바뀐 파서: 종목명|티커|목표가 (3단)
             for idx, line in enumerate(raw_report.split("[TRACKING_DATA]")[1].strip().split('\n')):
                 data = line.split('|')
                 if len(data) >= 3:
@@ -691,18 +741,17 @@ with tab4:
                     
                     if s_name and t_price > 0:
                         with cols[idx % 3]:
-                            # 방금 네이버에서 긁어온 100% 진짜 실시간 현재가
                             s_price = get_stock_current_price(s_ticker or s_name)
                             
                             st.info(f"**{s_name}** ({s_ticker})")
                             st.metric("실시간 현재가", f"{s_price:,.0f}원")
                             if s_price > 0:
-                                st.metric("AI 목표가", f"{t_price:,.0f}원", f"{((t_price - s_price)/s_price)*100:+.1f}%")
+                                st.metric("AI 적정 목표가", f"{t_price:,.0f}원", f"{((t_price - s_price)/s_price)*100:+.1f}%")
                             else:
-                                st.metric("AI 목표가", f"{t_price:,.0f}원")
+                                st.metric("AI 적정 목표가", f"{t_price:,.0f}원")
                                 
                             if st.button(f"💾 [{s_name}] 찜하기", key=f"sr_{s_name}_{idx}"):
-                                c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?,?,?,?,?,?,?,?)", (f"🎯 AI 추천종목: {s_name}", "AI 추천 발굴", display_report, datetime.now().strftime("%Y-%m-%d %H:%M"), s_name, s_ticker, s_price, t_price))
+                                c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?,?,?,?,?,?,?,?)", (f"🎯 AI 추천종목: {s_name}", "AI 2단계 정밀 추천 발굴", display_report, datetime.now().strftime("%Y-%m-%d %H:%M"), s_name, s_ticker, s_price, t_price))
                                 c.execute("SELECT id FROM portfolio WHERE stock_name=?", (s_name,))
                                 if not c.fetchone(): c.execute("INSERT INTO portfolio (stock_name, search_query, ticker, is_owned, avg_price, quantity) VALUES (?,?,?,?,?,?)", (s_name, s_name, s_ticker, 0, 0.0, 0))
                                 conn.commit(); st.success(f"'{s_name}' 찜하기 완료!")
@@ -826,7 +875,6 @@ with tab5:
                     if f"n_{n['link']}" in st.session_state.analysis_results:
                         st.info(st.session_state.analysis_results[f"n_{n['link']}"]['text'])
             
-            # 💡 상태 변경 및 삭제 버튼을 종목 박스의 맨 아래로 이동
             col_edit1, col_edit2 = st.columns([1, 1])
             with col_edit1:
                 with st.expander("⚙️ 상태 변경"):
