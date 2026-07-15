@@ -226,11 +226,13 @@ def raw_calculate_technical_indicators(ticker):
     except: pass
     return "- 기술적 지표 계산 불가 (데이터 누락)"
 
+# 💡 [공시 보기 패치] 가독성을 높이기 위한 정렬 방식 및 문자 가공 리팩토링
 def raw_fetch_naver_disclosures(ticker):
     try:
         code_match = re.search(r'\d{6}', ticker)
         if not code_match: return "- 국내 종목이 아닙니다."
         code = code_match.group()
+        
         res = requests.get(f"https://finance.naver.com/item/news_notice.naver?code={code}&page=1", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
@@ -247,12 +249,14 @@ def raw_fetch_naver_disclosures(ticker):
                         title = a_tag.text.strip()
                         date_str = date_td.text.strip()
                         info_str = info_td.text.strip() if info_td else "공시"
-                        lines.append(f"• [{info_str}] ({date_str}) {title}")
+                        # 💡 보기 좋게 대괄호 및 날짜 정렬 가공
+                        lines.append(f"[{date_str}] [{info_str}] {title}")
                         if len(lines) >= 5: break
-            if lines: return "\n".join(lines)
-            return "- 최근 주요 공시가 없습니다."
+            if lines: 
+                return "\n".join(lines)
+            return "최근 30일 이내에 등록된 주요 공시가 없습니다."
     except: pass
-    return "- 공시 동향 조회 불가 (장시간 지연 또는 구조 변경)"
+    return "공시 동향 조회 불가 (장시간 지연 또는 구조 변경)"
 
 def raw_fetch_supply_demand_trend(ticker):
     try:
@@ -283,6 +287,7 @@ def get_stock_current_price(ticker): return raw_get_stock_current_price(ticker)
 def get_naver_news(query, display=100, start=1, sort_type="date"): 
     return raw_fetch_naver_news(query, display, start, sort_type, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)
 
+# 💡 명칭 변경: AI 퀀트 필터 시스템 엔진
 def filter_news_with_gemini_lite(raw_news_list):
     if not raw_news_list: return []
     context_block = "\n".join([f"[{idx}] {n['title']}" for idx, n in enumerate(raw_news_list)])
@@ -341,7 +346,7 @@ def fetch_unique_sector_news(sector_name, query):
     st.session_state.current_sector_news[sector_name] = unique_news
 
 # =======================================================
-# 💡 [복구 완료!] AI 코어 프롬프트 빌더 
+# AI 코어 백엔드 통신 유닛
 # =======================================================
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -373,7 +378,9 @@ def get_financial_data(ticker):
         return f"- 시총: {info.get('marketCap',0)/1e12:.2f}조 원\n- PER: {info.get('trailingPE','N/A')}배"
     except: return "재무 정보 데이터 누락"
 
-# 💡 [여기가 복구된 핵심 프롬프트 함수들입니다!] 💡
+# =======================================================
+# AI 프롬프트 마스터 빌더 구역
+# =======================================================
 def build_prompt_single_news(title, summary, market_data_str):
     return f"아래 뉴스가 증시에 미칠 영향을 분석하세요.\n[지표]: {market_data_str}\n[제목]: {title}\n[요약]: {summary}\n1. 💡 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"
 
@@ -423,9 +430,11 @@ with tab1:
     realtime_query = "증시|금융|환율|물가|부동산|정책"
     if not st.session_state.current_realtime_news: fetch_unique_realtime_news(realtime_query)
     if st.button("🤖 실시간 뉴스 TOP 20 기반 종합 분석", type="primary", use_container_width=True):
+        st.toast("🧠 Gemini 3.5 Flash 분석 엔진 가동", icon="💡")
         st.session_state.realtime_analysis = st.write_stream(call_gemini_stream_with_fallback(build_prompt_realtime(st.session_state.current_realtime_news[:20], market_data_str)))
         st.rerun()
     if st.session_state.realtime_analysis:
+        st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]` 모델이 분석을 완료했습니다.")
         with st.expander("📊 AI 실시간 시황 종합 브리핑", expanded=True):
             st.write(st.session_state.realtime_analysis)
             if st.button("💾 이 리포트 스크랩", key="sc_rt_all"):
@@ -435,17 +444,21 @@ with tab1:
         with st.expander(f"🕒 {news['title']}"):
             st.markdown(f"[원문 읽기]({news['link']}) | {news['published']}\n\n{news['summary']}")
             if st.button("이 기사 심층 분석", key=f"tr_btn_{news['link']}"):
-                st.session_state.analysis_results[f"news_{news['link']}"] = {"text": call_gemini_with_fallback(build_prompt_single_news(news['title'], news['summary'], market_data_str)), "time": time.time()}
+                st.session_state.analysis_results[f"news_{news['link']}"] = {"text": call_gemini_with_fallback(f"아래 뉴스가 증시에 미칠 영향을 분석하세요.\n[지표]: {market_data_str}\n[제목]: {news['title']}\n[요약]: {news['summary']}\n1. 💡 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"), "time": time.time()}
             if f"news_{news['link']}" in st.session_state.analysis_results:
+                st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]`")
                 st.info(st.session_state.analysis_results[f"news_{news['link']}"]['text'])
 
 with tab2:
-    st.subheader("今日 오늘의 핵심 경제 뉴스 (AI 판사 검수 완료)")
+    st.subheader("今日 오늘의 핵심 경제 뉴스 (AI 퀀트 필터 검수 완료)")
     c.execute("SELECT check_date, score FROM market_score_history ORDER BY id DESC LIMIT 15")
     if hist := c.fetchall():
         with st.expander("📈 AI 시장 심리 지수 추이 그래프", expanded=False): st.line_chart(dict(zip([r[0][5:] for r in reversed(hist)], [r[1] for r in reversed(hist)])))
     
     eco_query = "경제|증시|주식|금리|실적"
+    
+    # 💡 뉴스 로딩 바운더리에 식별기 노출
+    st.caption("🔍 **AI 퀀트 필터 시스템:** `[💡 Gemini 3.1 Flash-Lite]` 모델이 실시간으로 쓰레기 뉴스를 검려내고 있습니다.")
     if not st.session_state.current_eco_news: fetch_unique_eco_news(eco_query)
     
     col_e1, col_e2 = st.columns([4, 1])
@@ -460,6 +473,7 @@ with tab2:
             fetch_unique_eco_news(eco_query); st.rerun()
 
     if st.session_state.overall_analysis:
+        st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]`")
         st.markdown(f"**AI 시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
         with st.expander("📝 거시 브리핑 리포트", expanded=True): st.write(st.session_state.overall_analysis['text'])
     
@@ -471,6 +485,7 @@ with tab2:
                 with st.spinner("분석 중..."):
                     st.session_state.analysis_results[f"eco_{news['link']}"] = {"text": call_gemini_with_fallback(build_prompt_single_news(news['title'], news['summary'], market_data_str)), "time": time.time()}
             if f"eco_{news['link']}" in st.session_state.analysis_results:
+                st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]`")
                 st.write(st.session_state.analysis_results[f"eco_{news['link']}"]['text'])
 
 with tab3:
@@ -479,6 +494,7 @@ with tab3:
     
     col_s1, col_s2, col_s3 = st.columns([2, 1, 1])
     with col_s1: selected_sector = st.selectbox("관심 섹터 선택", list(sectors.keys()))
+    st.caption("🔍 **AI 퀀트 필터 시스템:** `[💡 Gemini 3.1 Flash-Lite]` 모델이 해당 섹터의 잡음을 필터링 중입니다.")
     if selected_sector not in st.session_state.current_sector_news: fetch_unique_sector_news(selected_sector, sectors[selected_sector])
         
     with col_s2:
@@ -491,6 +507,7 @@ with tab3:
             fetch_unique_sector_news(selected_sector, sectors[selected_sector]); st.rerun()
 
     if f'sec_sum_{selected_sector}' in st.session_state:
+        st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]`")
         with st.info(st.session_state[f'sec_sum_{selected_sector}']): pass
 
     for i, news in enumerate(st.session_state.current_sector_news.get(selected_sector, [])):
@@ -502,6 +519,7 @@ with tab4:
     investment_horizon = st.radio("투자 기간 설정", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
     if st.button("🚀 유망 종목 정밀 발굴 가동", type="primary", use_container_width=True):
         raw_rec = get_naver_news("특징주|수주|실적|목표가", display=100, sort_type="date")
+        st.toast("⚡ Step 1: AI 퀀트 필터망 가동 중", icon="⚙️")
         rec_news = filter_news_with_gemini_lite(raw_rec)
         
         res1 = call_gemini_with_fallback(f"다음 뉴스에서 유망 종목 5개를 골라 JSON 배열로 출력하세요. [{{\"name\":\"종목명\",\"ticker\":\"6자리코드\"}}]\n" + "\n".join([n['title'] for n in rec_news]), is_json=True)
@@ -515,6 +533,7 @@ with tab4:
             st.rerun()
         except: st.error("추천 오류 발생. 다시 시도해 주세요.")
     if st.session_state.get('today_recommendation'):
+        st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]` 모델이 가치 평가를 종결했습니다.")
         raw = st.session_state.today_recommendation
         st.write(raw.split("[TRACKING_DATA]")[0].strip())
         if "[TRACKING_DATA]" in raw:
@@ -627,6 +646,7 @@ with tab5:
 
             if st.session_state.get(f"show_{p_id}"):
                 with st.expander("📝 AI 종합 진단 리포트", expanded=True):
+                    st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]` 모델 분석 본문")
                     rep = st.session_state.analysis_results[cache_key]['text']
                     st.write(re.sub(r'TARGET_PRICE:\s*[\d,]+', '', rep).strip())
                     tp = float(m.group(1).replace(',','')) if (m := re.search(r'TARGET_PRICE:\s*([\d,]+)', rep)) else 0.0
@@ -635,11 +655,15 @@ with tab5:
                         c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?,?,?,?,?,?,?,?)", (f"[{name}] 리포트", "심층 퀀트 진단", rep, datetime.now().strftime("%Y-%m-%d %H:%M"), name, ticker, cur_price, tp)); conn.commit(); st.success("저장 완료")
                     if c2.button("🔄 재분석", key=f"force_{p_id}"): del st.session_state.analysis_results[cache_key]; st.rerun()
 
-            with st.expander("🏢 네이버 전자공시 최근 주요 목록", expanded=False):
-                st.markdown(dart_str)
-                if "•" in dart_str and st.button("🤖 공시 AI 원포인트 요약", key=f"dart_ai_{p_id}"):
-                    st.session_state.analysis_results[f"dart_res_{p_id}"] = call_gemini_with_fallback(f"[{name}] 공시 요약 요청:\n{dart_str}")
-                if f"dart_res_{p_id}" in st.session_state.analysis_results: st.info(st.session_state.analysis_results[f"dart_res_{p_id}"])
+            # 💡 [가독성 패치] 일렬 뭉텅이 대신 깔끔한 코드 블록 카드로 래핑
+            with st.expander("🏢 네이버 전자공시 최근 5회 현황", expanded=False):
+                st.text_area(label="최신 전자공시 스트리밍", value=dart_str, height=140, disabled=True, label_visibility="collapsed")
+                if "•" in dart_str or "[" in dart_str:
+                    if st.button("🤖 공시 AI 원포인트 요약", key=f"dart_ai_{p_id}"):
+                        st.session_state.analysis_results[f"dart_res_{p_id}"] = call_gemini_with_fallback(f"[{name}] 공시 요약 요청:\n{dart_str}")
+                if f"dart_res_{p_id}" in st.session_state.analysis_results: 
+                    st.caption("🤖 **엔진 식별 프로토콜:** `[💡 Gemini 3.5 Flash]`")
+                    st.info(st.session_state.analysis_results[f"dart_res_{p_id}"])
 
             with st.expander(f"📰 관련 최신 뉴스 ({len(fact_news)}건)", expanded=False):
                 for n in fact_news: st.markdown(f"**[{n['title']}]({n['link']})** ({n['published']})")
