@@ -1038,7 +1038,13 @@ with tab5:
                     st.write(re.sub(r'TARGET_PRICE:\s*[\d,]+', '', rep).strip())
                     tp = float(m.group(1).replace(',','')) if (m := re.search(r'TARGET_PRICE:\s*([\d,]+)', rep)) else 0.0
 
-                   valid_info = st.session_state.get(f"tp_valid_{p_id}")
+                   if st.session_state.get(f"show_{p_id}"):
+                with st.expander("📝 AI 종합 진단 리포트", expanded=True):
+                    rep = st.session_state.analysis_results[cache_key]['text']
+                    st.write(re.sub(r'TARGET_PRICE:\s*[\d,]+', '', rep).strip())
+                    tp = float(m.group(1).replace(',','')) if (m := re.search(r'TARGET_PRICE:\s*([\d,]+)', rep)) else 0.0
+
+                    valid_info = st.session_state.get(f"tp_valid_{p_id}") # ✅ 윗줄과 세로 열 일치
                     if valid_info:
                         note = valid_info.get("note", "")
                         if valid_info.get("valid") is True:
@@ -1048,11 +1054,9 @@ with tab5:
                             new_tp = valid_info.get("new_target_price")
                             calc_logic = valid_info.get("calculation_logic", "산출식 오류")
                             if new_tp:
-                                # 기존 리포트의 수치를 보존한 채, 검증 영역 하단에 AI가 재연산한 적정가를 비교해서 보여줍니다.
                                 st.error(f"🔄 **AI 자체 수정 목표가**: {new_tp:,.0f}원\n\n🧮 **수정 근거 및 연산식**:\n{calc_logic}")
                         else:
                             st.caption(f"ℹ️ 목표가 검증: {note}")
-
                     c1, c2 = st.columns(2)
                     if c1.button("💾 스크랩 저장", key=f"save_{p_id}"):
                         c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?,?,?,?,?,?,?,?)", (f"[{name}] 리포트", "심층 퀀트 진단", rep, datetime.now().strftime("%Y-%m-%d %H:%M"), name, ticker, cur_price, tp)); conn.commit(); st.success("저장 완료")
