@@ -112,47 +112,24 @@ with st.sidebar:
     if 'google_auth_token' not in st.session_state:
         try:
             client_config = json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"])
-            flow = Flow.from_client_config(
-                client_config, 
-                scopes=['https://www.googleapis.com/auth/drive.file'], 
-                redirect_uri=st.secrets["REDIRECT_URI"]
-            )
+            flow = Flow.from_client_config(client_config, scopes=['https://www.googleapis.com/auth/drive.file'], redirect_uri=st.secrets["REDIRECT_URI"])
             auth_url, _ = flow.authorization_url(prompt='consent')
             
-            # 텍스트 링크 방식을 사용하여 Streamlit UI 차단 우회
-            st.markdown(f'[👉 구글 계정으로 로그인하기]({auth_url})')
+            st.markdown(f'<a href="{auth_url}" target="_self"><button style="width:100%;">구글 계정으로 로그인</button></a>', unsafe_allow_html=True)
             
-            # OAuth 세션 증발 현상 방어를 위한 수동 토큰 교환 로직
             if "code" in st.query_params:
-                code = st.query_params["code"]
-                try:
-                    import urllib.request
-                    import urllib.parse
-                    cfg = client_config["web"]
-                    data = urllib.parse.urlencode({
-                        "code": code,
-                        "client_id": cfg["client_id"],
-                        "client_secret": cfg["client_secret"],
-                        "redirect_uri": st.secrets["REDIRECT_URI"],
-                        "grant_type": "authorization_code"
-                    }).encode("utf-8")
-                    req = urllib.request.Request(
-                        "https://oauth2.googleapis.com/token", 
-                        data=data, 
-                        headers={"Content-Type": "application/x-www-form-urlencoded"}
-                    )
-                    with urllib.request.urlopen(req, timeout=5) as res:
-                        tok = json.loads(res.read().decode("utf-8"))
-                        st.session_state['google_auth_token'] = {
-                            'token': tok.get('access_token'),
-                            'refresh_token': tok.get('refresh_token'),
-                            'token_uri': 'https://oauth2.googleapis.com/token',
-                            'client_id': cfg["client_id"],
-                            'client_secret': cfg["client_secret"],
-                            'scopes': ['https://www.googleapis.com/auth/drive.file']
-                        }
-                        st.query_params.clear()
-                        st.rerun()
+                flow.fetch_token(code=st.query_params["code"])
+                creds = flow.credentials
+                st.session_state['google_auth_token'] = {'token': creds.token, 'refresh_token': creds.refresh_token, 'token_uri': creds.token_uri, 'client_id': creds.client_id, 'client_secret': creds.client_secret, 'scopes': creds.scopes}
+                st.query_params.clear()
+                st.rerun()
+        except Exception:
+            st.warning("Client Config 세팅이 필요합니다.")
+    else:
+        st.success("✅ 드라이브 연동 완료")
+        if st.button("연동 해제", use_container_width=True):
+            del st.session_state['google_auth_token']
+            st.rerun()
                 except Exception as e:
                     st.error(f"❌ 연동 실패 (토큰 교환 에러): {e}")
         except Exception:
