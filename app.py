@@ -6,6 +6,7 @@ import json
 import os
 import io
 import time
+import threading
 import urllib.parse
 import yfinance as yf
 import concurrent.futures
@@ -341,6 +342,12 @@ def get_fallback_models(use_lite):
         ('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite (Fallback)')
     ]
 
+# 포트폴리오 종목이 늘어나면 ThreadPoolExecutor(max_workers=10)가 Gemini를 동시에 여러 번 호출해
+# 프리뷰 모델 용량을 순간적으로 초과시켜 503을 유발함. 뉴스/주가 스크래핑 병렬성은 그대로 두고
+# Gemini 호출만 별도로 "동시에 최대 N개"로 제한한다.
+GEMINI_CONCURRENCY_LIMIT = 3
+_gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
+
 def get_clean_error(e, model_name):
     error_str = str(e)
     if "429" in error_str or "quota" in error_str.lower(): return "일일 호출 한도 초과 (429 Quota)"
@@ -349,58 +356,60 @@ def get_clean_error(e, model_name):
     return (error_str[:50] + '...') if len(error_str) > 50 else error_str
 
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    models = get_fallback_models(use_lite)
-    last_error = ""
-    
-    for idx, (m, base_badge) in enumerate(models):
-        try:
-            res = client.models.generate_content(model=m, contents=prompt).text
-            if not is_json:
-                badge_name = base_badge
-                if idx > 0: badge_name += f" - ⚠️ 우회 사유: {last_error}"
-                res = f"*(🤖 **엔진 식별 프로토콜:** `[💡 {badge_name}]`)*\n\n" + res
-            return res
-        except Exception as e:
-            last_error = get_clean_error(e, m)
-            continue
-            
-    raise Exception(f"모든 AI 모델 호출 실패. 마지막 오류: {last_error}")
+    with _gemini_semaphore:  # 동시에 GEMINI_CONCURRENCY_LIMIT개 스레드만 통과, 나머지는 여기서 대기
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        models = get_fallback_models(use_lite)
+        last_error = ""
+
+        for idx, (m, base_badge) in enumerate(models):
+            try:
+                res = client.models.generate_content(model=m, contents=prompt).text
+                if not is_json:
+                    badge_name = base_badge
+                    if idx > 0: badge_name += f" - ⚠️ 우회 사유: {last_error}"
+                    res = f"*(🤖 **엔진 식별 프로토콜:** `[💡 {badge_name}]`)*\n\n" + res
+                return res
+            except Exception as e:
+                last_error = get_clean_error(e, m)
+                continue
+
+        raise Exception(f"모든 AI 모델 호출 실패. 마지막 오류: {last_error}")
 
 def call_gemini_stream_with_fallback(prompt):
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    models = get_fallback_models(False)
-    last_error = ""
-    
-    for idx, (m, base_badge) in enumerate(models):
-        try:
-            # 1. 일단 서버에 요청을 보냅니다.
-            response = client.models.generate_content_stream(model=m, contents=prompt)
-            iterator = iter(response)
-            
-            # 2. 명찰을 달기 전에 첫 번째 데이터 덩어리를 끄집어내 봅니다. (여기서 503, 404 에러가 터집니다)
-            first_chunk = next(iterator)
-            
-            # 3. 에러 없이 무사히 통과했다면? 드디어 화면에 명찰을 1번만 당당하게 박습니다!
-            badge_name = base_badge
-            if idx > 0: badge_name += f" - ⚠️ 우회 사유: {last_error}"
-            yield f"*(🤖 **엔진 식별 프로토콜:** `[💡 {badge_name}]`)*\n\n"
-            
-            # 4. 아까 꺼내둔 첫 번째 글자를 화면에 찍어주고, 나머지도 이어서 출력합니다.
-            if first_chunk.text: yield first_chunk.text
-            for chunk in iterator:
-                if chunk.text: yield chunk.text
-            return # 성공적으로 다 썼으니 여기서 함수 종료!
-            
-        except StopIteration:
-            return
-        except Exception as e:
-            # 에러가 터지면 명찰을 찍지 않고, 다음 모델(예비 타이어)로 넘어갑니다.
-            last_error = get_clean_error(e, m)
-            continue
-            
-    # 모든 모델(3.5 -> 3 -> 2.5 -> 3.1)이 다 터졌을 때만 띄우는 최후의 에러 메시지
-    yield f"\n\n🚨 **분석 실패:** 서버 과부하 또는 한도 초과로 분석을 완료하지 못했습니다. (사유: {last_error})"
+    with _gemini_semaphore:  # 동시 호출 제한 (call_gemini_with_fallback과 동일한 자물쇠 공유)
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        models = get_fallback_models(False)
+        last_error = ""
+
+        for idx, (m, base_badge) in enumerate(models):
+            try:
+                # 1. 일단 서버에 요청을 보냅니다.
+                response = client.models.generate_content_stream(model=m, contents=prompt)
+                iterator = iter(response)
+
+                # 2. 명찰을 달기 전에 첫 번째 데이터 덩어리를 끄집어내 봅니다. (여기서 503, 404 에러가 터집니다)
+                first_chunk = next(iterator)
+
+                # 3. 에러 없이 무사히 통과했다면? 드디어 화면에 명찰을 1번만 당당하게 박습니다!
+                badge_name = base_badge
+                if idx > 0: badge_name += f" - ⚠️ 우회 사유: {last_error}"
+                yield f"*(🤖 **엔진 식별 프로토콜:** `[💡 {badge_name}]`)*\n\n"
+
+                # 4. 아까 꺼내둔 첫 번째 글자를 화면에 찍어주고, 나머지도 이어서 출력합니다.
+                if first_chunk.text: yield first_chunk.text
+                for chunk in iterator:
+                    if chunk.text: yield chunk.text
+                return # 성공적으로 다 썼으니 여기서 함수 종료!
+
+            except StopIteration:
+                return
+            except Exception as e:
+                # 에러가 터지면 명찰을 찍지 않고, 다음 모델(예비 타이어)로 넘어갑니다.
+                last_error = get_clean_error(e, m)
+                continue
+
+        # 모든 모델(3.5 -> 3 -> 2.5 -> 3.1)이 다 터졌을 때만 띄우는 최후의 에러 메시지
+        yield f"\n\n🚨 **분석 실패:** 서버 과부하 또는 한도 초과로 분석을 완료하지 못했습니다. (사유: {last_error})"
 # =======================================================
 # 기존 캐시 및 데이터 연산 유닛
 # =======================================================
