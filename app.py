@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from bs4 import BeautifulSoup
 from google import genai
+from google.genai import types as genai_types
 
 # 로컬 및 클라우드 환경 테스트 시 HTTPS 오류 우회
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
@@ -347,6 +348,19 @@ def get_fallback_models(use_lite):
 # Gemini 호출만 별도로 "동시에 최대 N개"로 제한한다.
 GEMINI_CONCURRENCY_LIMIT = 3
 _gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
+GEMINI_ACQUIRE_TIMEOUT = 25  # 슬롯이 이 시간 안에 안 비면 무한 대기 대신 에러로 전환
+
+# 3.5-flash처럼 트래픽이 몰리는 모델이 일시적으로 503을 내도, 우리 폴백(다음 모델로 이동)으로
+# 넘어가기 전에 SDK 레벨에서 짧게 몇 번 더 재시도해본다. attempts=3, 1초~4초 지수 백오프.
+# (초당 여러 번 재시도하는 게 아니라 짧은 지연 후 재시도이므로 세마포어 대기시간에 큰 영향 없음)
+GEMINI_HTTP_OPTIONS = genai_types.HttpOptions(
+    retry_options=genai_types.HttpRetryOptions(
+        attempts=3,
+        initial_delay=1.0,
+        max_delay=4.0,
+        http_status_codes=[429, 500, 502, 503, 504],
+    )
+)
 
 def get_clean_error(e, model_name):
     error_str = str(e)
@@ -356,8 +370,11 @@ def get_clean_error(e, model_name):
     return (error_str[:50] + '...') if len(error_str) > 50 else error_str
 
 def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
-    with _gemini_semaphore:  # 동시에 GEMINI_CONCURRENCY_LIMIT개 스레드만 통과, 나머지는 여기서 대기
-        client = genai.Client(api_key=GEMINI_API_KEY)
+    acquired = _gemini_semaphore.acquire(timeout=GEMINI_ACQUIRE_TIMEOUT)
+    if not acquired:
+        raise Exception(f"Gemini 호출 대기열 초과 ({GEMINI_ACQUIRE_TIMEOUT}초 내 슬롯 확보 실패). 잠시 후 다시 시도해주세요.")
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY, http_options=GEMINI_HTTP_OPTIONS)
         models = get_fallback_models(use_lite)
         last_error = ""
 
@@ -374,10 +391,16 @@ def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
                 continue
 
         raise Exception(f"모든 AI 모델 호출 실패. 마지막 오류: {last_error}")
+    finally:
+        _gemini_semaphore.release()
 
 def call_gemini_stream_with_fallback(prompt):
-    with _gemini_semaphore:  # 동시 호출 제한 (call_gemini_with_fallback과 동일한 자물쇠 공유)
-        client = genai.Client(api_key=GEMINI_API_KEY)
+    acquired = _gemini_semaphore.acquire(timeout=GEMINI_ACQUIRE_TIMEOUT)
+    if not acquired:
+        yield f"\n\n🚨 **분석 실패:** Gemini 호출 대기열 초과 ({GEMINI_ACQUIRE_TIMEOUT}초 내 슬롯 확보 실패). 잠시 후 다시 시도해주세요."
+        return
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY, http_options=GEMINI_HTTP_OPTIONS)
         models = get_fallback_models(False)
         last_error = ""
 
@@ -410,6 +433,9 @@ def call_gemini_stream_with_fallback(prompt):
 
         # 모든 모델(3.5 -> 3 -> 2.5 -> 3.1)이 다 터졌을 때만 띄우는 최후의 에러 메시지
         yield f"\n\n🚨 **분석 실패:** 서버 과부하 또는 한도 초과로 분석을 완료하지 못했습니다. (사유: {last_error})"
+    finally:
+        # 정상 종료/예외/제너레이터 강제 중단(GeneratorExit) 어떤 경우든 반드시 슬롯 반납
+        _gemini_semaphore.release()
 # =======================================================
 # 기존 캐시 및 데이터 연산 유닛
 # =======================================================
@@ -432,6 +458,45 @@ def filter_news_with_gemini_lite(raw_news_list):
         if filtered_result: return filtered_result
     except: pass
     return raw_news_list[:12]
+
+def filter_news_with_gemini_lite_batch(stocks_news_map):
+    """여러 종목의 뉴스를 한 번의 Gemini 호출로 일괄 필터링.
+    종목별로 따로 호출하던 것을 하나로 묶어서, 포트폴리오 새로고침 시 발생하던
+    동시다발적 Gemini 호출(503 유발 원인)을 근본적으로 줄인다.
+    stocks_news_map: {p_id(str 또는 int): raw_news_list}
+    반환: {str(p_id): filtered_news_list}
+    """
+    stocks_news_map = {str(k): v for k, v in stocks_news_map.items() if v}
+    if not stocks_news_map:
+        return {}
+
+    blocks = []
+    for p_id, news_list in stocks_news_map.items():
+        lines = "\n".join([f"  [{idx}] {n['title']}" for idx, n in enumerate(news_list)])
+        blocks.append(f"### 종목ID {p_id}\n{lines}")
+    context_block = "\n\n".join(blocks)
+
+    prompt = (
+        "너는 베테랑 헤지펀드 매니저야. 아래는 여러 종목별 최신 뉴스 제목 목록이야. "
+        "각 종목마다 단순 시황 요약이나 자극성 찌라시는 탈락시키고, 실적/수주 등 주가에 지대한 영향을 줄 "
+        "진짜 '알짜 기사'의 인덱스 번호만 골라줘.\n"
+        "반드시 아래 형식의 JSON 객체 하나로만 답해. 코드블록이나 다른 설명은 절대 붙이지 마.\n"
+        '예: {"12": [0, 3, 15], "13": [2, 7]}\n\n'
+        f"{context_block}"
+    )
+
+    try:
+        res = call_gemini_with_fallback(prompt, is_json=True, use_lite=True)
+        matched_map = json.loads(re.search(r'\{.*\}', res, re.DOTALL).group())
+        result = {}
+        for p_id, news_list in stocks_news_map.items():
+            indices = matched_map.get(p_id, [])
+            filtered = [news_list[i] for i in indices if isinstance(i, int) and i < len(news_list)]
+            result[p_id] = filtered if filtered else news_list[:12]
+        return result
+    except Exception:
+        # 실패 시 종목별로 상위 12개만 보수적으로 반환 (기존 단건 함수의 폴백과 동일한 안전망)
+        return {p_id: news_list[:12] for p_id, news_list in stocks_news_map.items()}
 
 def fetch_unique_realtime_news(query):
     unique_news = []
@@ -778,13 +843,23 @@ with tab5:
                     
                     broad = "|".join([k.strip() for k in (query or name).split(" OR ")])
                     raw_news = raw_fetch_naver_news(broad, display=50, start=start_idx, sort_type="date", cid=cid, secret=sec)
-                    fact_news = filter_news_with_gemini_lite(raw_news)
-                    return p_id, p_info, fact_news[:10], raw_news, tech, supply, dart
+                    # Gemini 필터링은 여기서 하지 않고, 아래에서 전 종목을 한 번에 묶어서 처리한다
+                    # (종목마다 따로 부르면 병렬 실행 시 Gemini에 순간적으로 요청이 몰려 503을 유발함)
+                    return p_id, p_info, raw_news, tech, supply, dart
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-                    for r in executor.map(fetch_stock_raw_worker, tasks_to_run): 
-                        port_cache[r[0]] = r
-                        st.session_state.port_data_cache[r[0]] = {'data': r, 'time': now_ts}
+                    raw_results = list(executor.map(fetch_stock_raw_worker, tasks_to_run))
+
+                # 전 종목 뉴스를 한데 모아 Gemini 호출 1번으로 일괄 필터링
+                news_map = {r[0]: r[2] for r in raw_results}
+                filtered_map = filter_news_with_gemini_lite_batch(news_map)
+
+                for r in raw_results:
+                    p_id, p_info, raw_news, tech, supply, dart = r
+                    fact_news = filtered_map.get(str(p_id), raw_news[:12])
+                    result = (p_id, p_info, fact_news[:10], raw_news, tech, supply, dart)
+                    port_cache[p_id] = result
+                    st.session_state.port_data_cache[p_id] = {'data': result, 'time': now_ts}
 
         @st.fragment
         def render_stock_box(p, p_data):
