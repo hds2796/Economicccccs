@@ -79,18 +79,38 @@ def fetch_global_data():
         st.error(f"❌ 데이터 로드 에러: {e}")
         return None
 
+# app.py 의 [구글 드라이브 연동 (수동 백업)] 사이드바 내부 수정 코드
 with st.sidebar:
     st.subheader("☁️ 구글 드라이브 연동 (수동 백업)")
     if 'google_auth_token' not in st.session_state:
         try:
             client_config = json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"])
-            flow = Flow.from_client_config(client_config, scopes=['https://www.googleapis.com/auth/drive.file'], redirect_uri=st.secrets["REDIRECT_URI"])
+            flow = Flow.from_client_config(
+                client_config, 
+                scopes=['https://www.googleapis.com/auth/drive.file'], 
+                redirect_uri=st.secrets["REDIRECT_URI"]
+            )
             auth_url, _ = flow.authorization_url(prompt='consent')
-            st.markdown(f'<a href="{auth_url}" target="_self"><button style="width:100%;">구글 계정으로 로그인</button></a>', unsafe_allow_html=True)
+            
+            # [수정 핵심] target="_top" 설정을 넣어 프레임 탈출 및 403 에러 원천 차단
+            st.markdown(
+                f'<a href="{auth_url}" target="_top">'
+                f'<button style="width:100%; background-color:#4285F4; color:white; border:none; padding:10px; border-radius:5px; cursor:pointer; font-weight:bold;">'
+                f'구글 계정으로 로그인</button></a>', 
+                unsafe_allow_html=True
+            )
+            
             if "code" in st.query_params:
                 flow.fetch_token(code=st.query_params["code"])
                 creds = flow.credentials
-                st.session_state['google_auth_token'] = {'token': creds.token, 'refresh_token': creds.refresh_token, 'token_uri': creds.token_uri, 'client_id': creds.client_id, 'client_secret': creds.client_secret, 'scopes': creds.scopes}
+                st.session_state['google_auth_token'] = {
+                    'token': creds.token, 
+                    'refresh_token': creds.refresh_token, 
+                    'token_uri': creds.token_uri, 
+                    'client_id': creds.client_id, 
+                    'client_secret': creds.client_secret, 
+                    'scopes': creds.scopes
+                }
                 st.query_params.clear()
                 st.rerun()
         except Exception:
