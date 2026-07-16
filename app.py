@@ -70,18 +70,18 @@ for table, col, dtype in [
 conn.commit()
 
 # =======================================================
-# 5. 구글 드라이브 통합 데이터 다운로더 (속도 최적화 핵심)
+# 5. 구글 드라이브 통합 데이터 다운로더 (에러 출력 수정본)
 # =======================================================
-@st.cache_data(ttl=60)  # 1분간 메모리 캐싱을 유지하여 불필요한 반복 다운로드 방지
+@st.cache_data(ttl=60)
 def fetch_global_data():
     try:
         info = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
         creds = Credentials.from_service_account_info(info, scopes=['https://www.googleapis.com/auth/drive'])
         drive_service = build('drive', 'v3', credentials=creds)
         
-        # 신규 실시간 폴더 ID가 지정되지 않은 경우 기존 폴더 ID를 대안으로 사용하도록 호환 처리
         folder_id = st.secrets.get("GOOGLE_REALTIME_FOLDER_ID", st.secrets.get("GOOGLE_FOLDER_ID", ""))
         if not folder_id:
+            st.error("❌ 구글 드라이브 폴더 ID 설정이 누락되었습니다.")
             return None
             
         results = drive_service.files().list(
@@ -91,6 +91,7 @@ def fetch_global_data():
         files = results.get('files', [])
         
         if not files: 
+            st.error("❌ 지정된 폴더 내에서 'market_data_latest.json' 파일을 찾을 수 없습니다.")
             return None
             
         file_id = files[0]['id']
@@ -104,6 +105,7 @@ def fetch_global_data():
         fh.seek(0)
         return json.loads(fh.read().decode('utf-8'))
     except Exception as e:
+        st.error(f"❌ 구글 드라이브 로드 실패 상세 에러: {e}")
         return None
 
 # =======================================================
