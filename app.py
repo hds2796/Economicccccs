@@ -55,8 +55,6 @@ for table, col, dtype in [
     ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("scrapbook", "stock_name", "TEXT"),
     ("scrapbook", "ticker", "TEXT"), ("scrapbook", "saved_price", "REAL DEFAULT 0.0"),
     ("scrapbook", "target_price", "REAL DEFAULT 0.0"),
-    ("scrapbook", "target_price_mid", "REAL DEFAULT 0.0"),
-    ("scrapbook", "target_price_long", "REAL DEFAULT 0.0"),
     ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0")
 ]:
     try: c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}")
@@ -561,7 +559,7 @@ def build_prompt_sector(sector_name, news_list, market_data_str):
 
 def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, horizon):
     combined = "\n".join([f"- {n['title']}" for n in news_list[:20]])
-    return (f"당신은 객관적이고 엄격한 애널리스트입니다.\n\n"
+    return (f"당신은 객관적이고 엄격한 수석 애널리스트입니다.\n\n"
             f"[시장 거시 상황]: {market_data_str}\n"
             f"[선택된 투자 기간]: {horizon}\n"
             f"[후보 종목 정량 데이터]:\n{candidate_context}\n"
@@ -897,7 +895,7 @@ with tab5:
                         st.session_state.analysis_results[cache_key] = {"text": report, "tp_s": tp_s, "tp_m": tp_m, "tp_l": tp_l, "time": time.time()}
                         st.session_state[f"show_{p_id}"] = True; st.rerun()
 
-           if st.session_state.get(f"show_{p_id}") and cache_key in st.session_state.analysis_results:
+            if st.session_state.get(f"show_{p_id}") and cache_key in st.session_state.analysis_results:
                 with st.expander("📝 AI 진단 리포트", expanded=True):
                     rep = st.session_state.analysis_results[cache_key]['text']
                     
