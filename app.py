@@ -793,7 +793,7 @@ with tab3:
             st.markdown(f"[원문 읽기]({news['link']}) | {news['published']}\n\n{news['summary']}")
 
 with tab4:
-    st.subheader("🎯 AI 맞춤 추천종목 발굴 (병렬 고속 엔진 + 스트리밍)")
+    st.subheader("🎯 AI 맞춤 추천종목 발굴")
     investment_horizon = st.radio("투자 기간 설정", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
     if st.button("🚀 유망 종목 정밀 발굴 가동", type="primary", use_container_width=True):
         raw_rec = get_naver_news("특징주|수주|실적|목표가", display=100, sort_type="date")
