@@ -80,25 +80,22 @@ def fetch_global_data():
         return None
 
 # app.py 의 [구글 드라이브 연동 (수동 백업)] 사이드바 내부 수정 코드
+# app.py 사이드바 구글 로그인 부분 수정
 with st.sidebar:
     st.subheader("☁️ 구글 드라이브 연동 (수동 백업)")
     if 'google_auth_token' not in st.session_state:
         try:
             client_config = json.loads(st.secrets["GOOGLE_CLIENT_CONFIG"])
-            flow = Flow.from_client_config(
-                client_config, 
-                scopes=['https://www.googleapis.com/auth/drive.file'], 
-                redirect_uri=st.secrets["REDIRECT_URI"]
-            )
+            flow = Flow.from_client_config(client_config, scopes=['https://www.googleapis.com/auth/drive.file'], redirect_uri=st.secrets["REDIRECT_URI"])
             auth_url, _ = flow.authorization_url(prompt='consent')
             
-            # [수정 핵심] target="_top" 설정을 넣어 프레임 탈출 및 403 에러 원천 차단
-           # 기존 st.markdown(...) 코드를 지우고 아래 코드를 넣으세요.
-st.link_button("☁️ 구글 계정으로 로그인", auth_url, use_container_width=True)
-            )
+            # [복구된 원래 방식] 군더더기 없이 깔끔한 텍스트 하이퍼링크로 복구
+            st.markdown(f'[👉 구글 계정으로 로그인하기]({auth_url})')
             
             if "code" in st.query_params:
                 flow.fetch_token(code=st.query_params["code"])
+                creds = flow.credentials
+                # ... 이하 기존 코드 동일 ...
                 creds = flow.credentials
                 st.session_state['google_auth_token'] = {
                     'token': creds.token, 
