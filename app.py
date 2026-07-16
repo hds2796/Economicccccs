@@ -897,7 +897,7 @@ with tab4:
                         st.metric("🎯 퀀트 목표가", f"{tp:,.0f}원", f"{((tp - cp)/cp)*100:+.1f}% 여력" if cp > 0 else "")
                         st.metric("💰 정밀 매수 추천가", f"{bp:,.0f}원", f"현재가 대비 {((bp - cp)/cp)*100:+.1f}%" if cp > 0 and bp > 0 else "데이터 없음")
 
-                       valid_info = st.session_state.get('today_recommendation_validation', {}).get(name)
+                        valid_info = st.session_state.get('today_recommendation_validation', {}).get(name)
                         if valid_info:
                             note = valid_info.get("note", "")
                             if valid_info.get("valid") is True:
