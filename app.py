@@ -49,12 +49,16 @@ c.execute('''CREATE TABLE IF NOT EXISTS market_score_history
              (id INTEGER PRIMARY KEY AUTOINCREMENT, check_date TEXT, score INTEGER)''')
 conn.commit()
 
+# 데이터베이스 컬럼 추가 (단기/중기/장기 목표가 지원)
 for table, col, dtype in [
     ("portfolio", "search_query", "TEXT"), ("portfolio", "ticker", "TEXT"),
     ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
     ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("scrapbook", "stock_name", "TEXT"),
     ("scrapbook", "ticker", "TEXT"), ("scrapbook", "saved_price", "REAL DEFAULT 0.0"),
-    ("scrapbook", "target_price", "REAL DEFAULT 0.0"), ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0")
+    ("scrapbook", "target_price", "REAL DEFAULT 0.0"), # 단기 목표가로 사용
+    ("scrapbook", "target_price_mid", "REAL DEFAULT 0.0"), # 중기 목표가
+    ("scrapbook", "target_price_long", "REAL DEFAULT 0.0"), # 장기 목표가
+    ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0")
 ]:
     try: c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}")
     except: pass
@@ -171,7 +175,7 @@ def clean_html(raw_html):
     return BeautifulSoup(raw_html, "html.parser").get_text() if raw_html else ""
 
 # =======================================================
-# 💡 순수 파이썬 코어 로직 (볼린저 밴드, 등락률 탑재)
+# 💡 순수 파이썬 코어 로직
 # =======================================================
 def raw_get_stock_current_price(ticker):
     res_data = {"current": 0.0, "diff": 0.0, "diff_pct": 0.0}
@@ -343,9 +347,8 @@ def raw_fetch_supply_demand_trend(ticker):
     except: pass
     return "수급 동향 조회 불가"
 
-
 # =======================================================
-# 💡 [핵심] 4단계 폭포수 우회 및 에러 추적
+# 💡 [핵심] API 호출 우회 로직
 # =======================================================
 def get_fallback_models(use_lite):
     if use_lite:
@@ -437,7 +440,7 @@ def call_gemini_stream_with_fallback(prompt):
         _gemini_semaphore.release()
 
 # =======================================================
-# 기존 캐시 및 데이터 연산 유닛
+# 캐시 및 데이터 연산 유닛
 # =======================================================
 @st.cache_data(ttl=60)
 def get_stock_current_price(ticker): return raw_get_stock_current_price(ticker)
@@ -541,7 +544,7 @@ def get_financial_data(ticker):
     except: return "재무 정보 데이터 누락"
 
 # =======================================================
-# AI 프롬프트 빌더 
+# AI 프롬프트 빌더 (단기/중기/장기 목표가 탑재)
 # =======================================================
 def build_prompt_single_news(title, summary, market_data_str):
     return f"아래 뉴스가 증시에 미칠 영향을 분석하세요.\n[지표]: {market_data_str}\n[제목]: {title}\n[요약]: {summary}\n1. 💡 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"
@@ -558,16 +561,15 @@ def build_prompt_sector(sector_name, news_list, market_data_str):
     combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
     return f"'{sector_name}' 섹터 분석:\n[지표]: {market_data_str}\n{combined}\n\n1. 🏭 섹터 흐름 요약\n2. 📈 주요 호/악재\n3. 🎯 투자 심리 전망"
 
-def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, investment_horizon):
+def build_prompt_recommend_step3(candidate_context, news_list, market_data_str):
     combined = "\n".join([f"- {n['title']}" for n in news_list[:20]])
     return (f"당신은 엄격한 헤지펀드 수석 퀀트 애널리스트입니다. 아래 데이터를 바탕으로 정밀 밸류에이션을 집행하십시오.\n\n"
             f"[시장 거시 상황]: {market_data_str}\n"
             f"[예비 후보 5종목 팩트체크 데이터 (현재가 및 등락률 포함)]:\n{candidate_context}\n"
             f"[최신 관련 뉴스 팩트]:\n{combined}\n\n"
-            f"위 데이터를 분석하여, '{investment_horizon}' 투자에 부적합한 종목 2개를 먼저 제외하고, 최종 3개만 엄선하여 보고서를 작성하십시오.\n\n"
+            f"위 데이터를 분석하여 부적합한 종목 2개를 먼저 제외하고, 최종 3개만 엄선하여 보고서를 작성하십시오.\n\n"
             f"⚠️ 절대 주의사항 ⚠️\n"
-            f"1. 목표가 산출 시, 반드시 위 [예비 후보 5종목 팩트체크 데이터]에 제공된 '실시간 현재가' 숫자를 그대로 사용해 "
-            f"`[실시간 현재가 × (동종업계 적정 PER 추정치 ÷ 현재 PER)]` 수식을 텍스트로 적고 직접 계산하여 목표가를 산출하십시오.\n"
+            f"1. 목표가 산출 시, 반드시 위 [예비 후보 5종목 팩트체크 데이터]에 제공된 '실시간 현재가' 숫자를 기준으로 단기/중기/장기 목표가를 각각 계산하십시오.\n"
             f"2. 매수추천가 산출 시, 반드시 제공된 보조지표 중 `볼린저 밴드 하단` 또는 `장기 이평선`, `52주 최저가` 중 하나를 언급하며 방어적인 진입가를 수식처럼 작성하십시오.\n"
             f"3. 탈락시킨 2개 종목은 아래 '최종 추천 종목' 목록에 절대 중복되면 안 됩니다.\n\n"
             f"[보고서 필수 양식]\n"
@@ -576,21 +578,22 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
             f"### 🏆 [최종 추천 종목 3개]\n"
             f"1. 🥇 추천종목: [종목명] (티커)\n"
             f"- 선정 근거: (뉴스 모멘텀 및 수급 서술)\n"
-            f"- 🧮 적정 목표가 산출식: (수식 및 계산 과정 명시)\n"
-            f"- 🎯 퀀트 목표가: [수식으로 도출된 가격]\n"
+            f"- 🎯 단기 목표가 (1~3개월): [수식으로 도출된 가격]\n"
+            f"- 🎯 중기 목표가 (3~6개월): [수식으로 도출된 가격]\n"
+            f"- 🎯 장기 목표가 (1년 이상): [수식으로 도출된 가격]\n"
             f"- 🛡️ 진입 타점 연산: (볼린저 밴드 하단 등 수치를 대입하여 설명)\n"
             f"- 💰 정밀 매수 추천가: [연산된 현실적 진입가]\n\n"
             f"(2번, 3번 종목 동일하게 작성)\n\n"
             f"※ 가장 중요: 보고서 맨 마지막 줄에 시스템 추적용 3개의 데이터를 기재하십시오.\n"
             f"[TRACKING_DATA]\n"
-            f"종목명1|티커1|목표가숫자만|매수추천가숫자만\n"
-            f"종목명2|티커2|목표가숫자만|매수추천가숫자만\n"
-            f"종목명3|티커3|목표가숫자만|매수추천가숫자만")
+            f"종목명1|티커1|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|매수추천가숫자만\n"
+            f"종목명2|티커2|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|매수추천가숫자만\n"
+            f"종목명3|티커3|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|매수추천가숫자만")
 
 def validate_target_price(items):
-    """산출된 목표가가 실시간 현재가·보조지표와 비교했을 때 타당한지 AI가 한 번 더 검토하고,
-    부적합 시 반드시 자체 목표가를 재계산하여 구체적인 수식과 함께 제시함."""
-    items = [it for it in items if it.get("target_price", 0) > 0 and it.get("realtime_price", 0) > 0]
+    """산출된 3기간 목표가가 실시간 현재가·보조지표와 비교했을 때 타당한지 검토하고,
+    부적합 시 자체적으로 단기/중기/장기 목표가를 각각 재계산하여 구체적인 수식과 함께 제시함."""
+    items = [it for it in items if (it.get("target_price_short", 0) > 0 or it.get("target_price_mid", 0) > 0) and it.get("realtime_price", 0) > 0]
     if not items:
         return {}
 
@@ -599,28 +602,29 @@ def validate_target_price(items):
         blocks.append(
             f"### {it['name']}\n"
             f"- 실시간 현재가: {it['realtime_price']:,.0f}원\n"
-            f"- 애널리스트 1차 목표가: {it['target_price']:,.0f}원\n"
-            f"- 애널리스트 1차 매수추천가: {it.get('buy_price', 0):,.0f}원\n"
+            f"- 1차 단기/중기/장기 목표가: {it.get('target_price_short',0):,.0f} / {it.get('target_price_mid',0):,.0f} / {it.get('target_price_long',0):,.0f}원\n"
             f"- 실시간 보조지표:\n{it.get('tech_str', '데이터 없음')}\n"
         )
     context_block = "\n\n".join(blocks)
 
     prompt = (
         "너는 리스크 관리팀 소속 시니어 퀀트 심사역이야. 아래 제공된 종목별 1차 목표가와 실시간 보조지표를 정밀 검토해라.\n"
-        "현재가 대비 1차 목표가가 지나치게 동떨어져 있거나(괴리율 과다), RSI 과열인데도 지나치게 낙관적인 목표가인 경우 등 "
-        "논리적 모순이 발견되면 반드시 'valid'를 false로 판단해라.\n\n"
+        "현재가 대비 1차 목표가가 지나치게 동떨어져 있거나(괴리율 과다), 논리적 모순이 발견되면 반드시 'valid'를 false로 판단해라.\n\n"
         "⚠️ [중요 - 필수 의무 사항] ⚠️\n"
-        "만약 'valid'를 false로 판단했다면, 단순히 말로만 지적하지 말고 **반드시 구체적인 대체 목표가 숫자를 계산하여 'new_target_price'에 기재**하고, "
-        "그 숫자가 나온 정량적 공식(예: '현재가 * (업종 평균 PER 12 / 현재 PER 15) 적용' 또는 '볼린저 밴드 상단 가격을 보수적 저항선으로 설정' 등)을 "
-        "**'calculation_logic'에 상세히 기재**해야 한다. 절대 빈칸이나 null로 넘어가서는 안 된다.\n\n"
-        "반드시 아래 형식의 JSON 객체 하나로만 답해라. 코드 블록(```json)이나 다른 텍스트는 절대 포함하지 마라.\n"
+        "만약 'valid'를 false로 판단했다면, 단순히 말로만 지적하지 말고 **반드시 구체적인 대체 목표가 숫자를 계산하여 "
+        "'new_target_price_short', 'new_target_price_mid', 'new_target_price_long'에 기재**하고, "
+        "그 숫자가 나온 정량적 공식(예: '보수적 PER 반영하여 단기 10%, 중기 15%, 장기 20% 상승률 적용')을 "
+        "**'calculation_logic'에 상세히 기재**해야 한다.\n\n"
+        "반드시 아래 형식의 JSON 객체 하나로만 답해라. 코드 블록이나 다른 텍스트는 절대 포함하지 마라.\n"
         '예시 (valid가 false인 경우의 필수 구조):\n'
         '{\n'
         '  "종목명": {\n'
         '    "valid": false,\n'
-        '    "note": "RSI 85 수준의 단기 과열 구간이므로 1차 목표가는 도달 불가능합니다.",\n'
-        '    "new_target_price": 185000,\n'
-        '    "calculation_logic": "실시간 현재가 172,000원 대비 볼린저 밴드 상단 돌파 한계치(약 +7.5%)를 반영하여 185,000원으로 하향 조정 산출함"\n'
+        '    "note": "단기 과열 구간이므로 1차 목표가는 도달 불가능합니다.",\n'
+        '    "new_target_price_short": 185000,\n'
+        '    "new_target_price_mid": 195000,\n'
+        '    "new_target_price_long": 220000,\n'
+        '    "calculation_logic": "실시간 현재가 대비 단기 저항선, 중장기 PER 추정치를 반영하여 하향 조정 산출함"\n'
         '  }\n'
         '}\n\n'
         f"{context_block}"
@@ -633,16 +637,23 @@ def validate_target_price(items):
         for it in items:
             v = parsed.get(it['name'], {})
             
-            new_tp = v.get("new_target_price")
+            new_tp_s = v.get("new_target_price_short")
+            new_tp_m = v.get("new_target_price_mid")
+            new_tp_l = v.get("new_target_price_long")
             calc_logic = v.get("calculation_logic")
-            if v.get("valid") is False and not new_tp:
-                new_tp = int(it['realtime_price'] * 1.1)
-                calc_logic = "보수적 관점의 현재가 +10% 기술적 반등 목표가 자체 연산적용"
+            
+            if v.get("valid") is False and not new_tp_s:
+                new_tp_s = int(it['realtime_price'] * 1.05)
+                new_tp_m = int(it['realtime_price'] * 1.1)
+                new_tp_l = int(it['realtime_price'] * 1.2)
+                calc_logic = "보수적 관점의 자체 연산적용 (단기 5%, 중기 10%, 장기 20%)"
                 
             result[it['name']] = {
                 "valid": v.get("valid"), 
                 "note": v.get("note", "검증 완료"),
-                "new_target_price": new_tp,
+                "new_target_price_short": new_tp_s,
+                "new_target_price_mid": new_tp_m,
+                "new_target_price_long": new_tp_l,
                 "calculation_logic": calc_logic
             }
         return result
@@ -669,10 +680,9 @@ def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, q
             f"1. 🏢 재무 및 기업 펀더멘털 분석\n"
             f"2. 🌐 뉴스 및 수급 파급력 종합 분석 (MACD, RSI 과열구간 언급 필수)\n"
             f"3. 📊 포트폴리오 맞춤 진단 및 투자의견\n"
-            f"4. 🧮 적정 목표가 산출식: 위에 제공된 '실시간 현재가({current_price:,.0f}원)'를 그대로 사용해 "
-            f"`실시간 현재가 × (업종 평균 추정 PER ÷ 현재 PER)` 등의 수식을 명시하고 직접 계산하십시오. 다른 현재가를 임의로 가정하지 마십시오.\n"
-            f"5. 💰 적정 목표가 및 손절가 (※ 반드시 산출식을 거친 구체적 수치, 손절가는 볼린저 밴드 하단 이탈 가격 명시)\n\n"
-            f"마지막줄에 파싱을 위해 'TARGET_PRICE: 목표가숫자만' 을 필수로 적어주세요.")
+            f"4. 🧮 적정 목표가 산출식: 위에 제공된 '실시간 현재가({current_price:,.0f}원)'를 그대로 사용해 수식을 명시하십시오.\n"
+            f"5. 💰 단기(1~3개월), 중기(3~6개월), 장기(1년 이상) 적정 목표가 및 손절가 제시\n\n"
+            f"마지막줄에 파싱을 위해 'TARGET_PRICE: 단기숫자만|중기숫자만|장기숫자만' 을 필수로 적어주세요.")
 
 # =======================================================
 # 4. 메인 대시보드 UI
@@ -779,7 +789,6 @@ with tab3:
 
 with tab4:
     st.subheader("🎯 AI 추천종목 발굴")
-    investment_horizon = st.radio("투자 기간 설정", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
     if st.button("🚀 추천 종목 발굴", type="primary", use_container_width=True):
         raw_rec = get_naver_news("특징주|수주|실적|목표가", display=100, sort_type="date")
         rec_news = filter_news_with_gemini_lite(raw_rec)
@@ -806,7 +815,7 @@ with tab4:
             
             ctx_str = "".join(results)
             
-            prompt_step3 = build_prompt_recommend_step3(ctx_str, rec_news, market_data_str, investment_horizon)
+            prompt_step3 = build_prompt_recommend_step3(ctx_str, rec_news, market_data_str)
             st.session_state.today_recommendation = st.write_stream(call_gemini_stream_with_fallback(prompt_step3))
             success_rec = True
 
@@ -815,19 +824,23 @@ with tab4:
             if "[TRACKING_DATA]" in raw_result:
                 for line in raw_result.split("[TRACKING_DATA]")[1].strip().split('\n'):
                     d = line.split('|')
-                    if len(d) >= 3:
+                    if len(d) >= 6:
                         v_name = d[0].strip()
-                        try: v_tp = float(re.sub(r'[^\d.]', '', d[2])) if re.sub(r'[^\d.]', '', d[2]) else 0.0
-                        except: v_tp = 0.0
-                        v_bp = 0.0
-                        if len(d) >= 4:
-                            try: v_bp = float(re.sub(r'[^\d.]', '', d[3])) if re.sub(r'[^\d.]', '', d[3]) else 0.0
-                            except: pass
+                        try: v_tp_s = float(re.sub(r'[^\d.]', '', d[2])) if d[2] else 0.0
+                        except: v_tp_s = 0.0
+                        try: v_tp_m = float(re.sub(r'[^\d.]', '', d[3])) if d[3] else 0.0
+                        except: v_tp_m = 0.0
+                        try: v_tp_l = float(re.sub(r'[^\d.]', '', d[4])) if d[4] else 0.0
+                        except: v_tp_l = 0.0
+                        try: v_bp = float(re.sub(r'[^\d.]', '', d[5])) if d[5] else 0.0
+                        except: v_bp = 0.0
+                        
                         cand = cand_lookup.get(v_name)
                         if cand:
                             valid_items.append({
                                 "name": v_name, "realtime_price": cand["cp"],
-                                "target_price": v_tp, "buy_price": v_bp, "tech_str": cand["tech"]
+                                "target_price_short": v_tp_s, "target_price_mid": v_tp_m, "target_price_long": v_tp_l,
+                                "buy_price": v_bp, "tech_str": cand["tech"]
                             })
             st.session_state.today_recommendation_validation = validate_target_price(valid_items)
 
@@ -844,21 +857,23 @@ with tab4:
             cols = st.columns(3)
             for idx, line in enumerate(raw.split("[TRACKING_DATA]")[1].strip().split('\n')):
                 data = line.split('|')
-                if len(data) >= 3:
+                if len(data) >= 6:
                     name, tick = data[0].strip(), data[1].strip()
-                    try: tp = float(re.sub(r'[^\d.]', '', data[2])) if re.sub(r'[^\d.]', '', data[2]) else 0.0
-                    except: tp = 0.0
-                    bp = 0.0
-                    if len(data) >= 4:
-                        try: bp = float(re.sub(r'[^\d.]', '', data[3])) if re.sub(r'[^\d.]', '', data[3]) else 0.0
-                        except: pass
+                    try: tp_s = float(re.sub(r'[^\d.]', '', data[2])) if data[2] else 0.0
+                    except: tp_s = 0.0
+                    try: tp_m = float(re.sub(r'[^\d.]', '', data[3])) if data[3] else 0.0
+                    except: tp_m = 0.0
+                    try: tp_l = float(re.sub(r'[^\d.]', '', data[4])) if data[4] else 0.0
+                    except: tp_l = 0.0
+                    try: bp = float(re.sub(r'[^\d.]', '', data[5])) if data[5] else 0.0
+                    except: bp = 0.0
 
                     with cols[idx % 3]:
                         p_info = get_stock_current_price(tick)
                         cp, dpct = p_info["current"], p_info["diff_pct"]
                         st.info(f"**{name}** ({tick})")
                         st.metric("실시간 현재가", f"{cp:,.0f}원", f"전일대비 {dpct:+.2f}%")
-                        st.metric("🎯 1차 퀀트 목표가", f"{tp:,.0f}원", f"{((tp - cp)/cp)*100:+.1f}% 여력" if cp > 0 else "")
+                        st.metric("🎯 1차 목표가 (단기/중기/장기)", f"{tp_s:,.0f} / {tp_m:,.0f} / {tp_l:,.0f}")
                         st.metric("💰 정밀 매수 추천가", f"{bp:,.0f}원", f"현재가 대비 {((bp - cp)/cp)*100:+.1f}%" if cp > 0 and bp > 0 else "데이터 없음")
 
                         valid_info = st.session_state.get('today_recommendation_validation', {}).get(name)
@@ -868,16 +883,18 @@ with tab4:
                                 st.success(f"✅ **재검토 완료**: 1차 수치 타당함\n\n*{note}*")
                             elif valid_info.get("valid") is False:
                                 st.warning(f"⚠️ **목표가 조정 필요**\n\n*{note}*")
-                                new_tp = valid_info.get("new_target_price")
+                                new_tp_s = valid_info.get("new_target_price_short")
+                                new_tp_m = valid_info.get("new_target_price_mid")
+                                new_tp_l = valid_info.get("new_target_price_long")
                                 calc_logic = valid_info.get("calculation_logic", "산출식 오류")
-                                if new_tp:
-                                    st.error(f"🔄 **AI 자체 수정 목표가**: {new_tp:,.0f}원\n\n🧮 **수정 산출식 및 근거**:\n{calc_logic}")
+                                if new_tp_s:
+                                    st.error(f"🔄 **AI 자체 수정 목표가**:\n- 단기: {new_tp_s:,.0f}원\n- 중기: {new_tp_m:,.0f}원\n- 장기: {new_tp_l:,.0f}원\n\n🧮 **수정 산출식 및 근거**:\n{calc_logic}")
                             else:
                                 st.caption(f"ℹ️ {note}")
 
                         if st.button(f"💾 {name} 찜하기", key=f"rec_s_{tick}"):
-                            c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, buy_recommend_price, scrap_date) VALUES (?,?,?,?,?,?,?,?)", 
-                                      (f"🎯 추천: {name}", display_report, name, tick, cp, tp, bp, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                            c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, scrap_date) VALUES (?,?,?,?,?,?,?,?,?,?)", 
+                                      (f"🎯 추천: {name}", display_report, name, tick, cp, tp_s, tp_m, tp_l, bp, datetime.now().strftime("%Y-%m-%d %H:%M")))
                             c.execute("SELECT id FROM portfolio WHERE ticker=?", (tick,))
                             if not c.fetchone():
                                 c.execute("INSERT INTO portfolio (stock_name, ticker, search_query) VALUES (?,?,?)", (name, tick, name))
@@ -984,20 +1001,27 @@ with tab5:
                     if st.button("🚀 AI 진단", key=f"run_{p_id}", type="primary"):
                         combined = {n['link']: n for n in (fact_news + st.session_state.get(f"ai_news_{p_id}", []))}.values()
                         report = call_gemini_with_fallback(build_prompt_deep_dive(name, ticker, list(combined), is_owned, avg_price, quantity, cur_price, market_data_str, tech_str, supply_str))
-                        tp_match = re.search(r'TARGET_PRICE:\s*([\d,]+)', report)
-                        tp_val = float(tp_match.group(1).replace(',', '')) if tp_match else 0.0
+                        
+                        tp_match = re.search(r'TARGET_PRICE:\s*([\d,]+)\s*\|\s*([\d,]+)\s*\|\s*([\d,]+)', report)
+                        tp_s = float(tp_match.group(1).replace(',', '')) if tp_match else 0.0
+                        tp_m = float(tp_match.group(2).replace(',', '')) if tp_match else 0.0
+                        tp_l = float(tp_match.group(3).replace(',', '')) if tp_match else 0.0
+
                         validation = validate_target_price([{
-                            "name": name, "realtime_price": cur_price, "target_price": tp_val, "tech_str": tech_str
+                            "name": name, "realtime_price": cur_price, "target_price_short": tp_s, "target_price_mid": tp_m, "target_price_long": tp_l, "tech_str": tech_str
                         }])
-                        st.session_state.analysis_results[cache_key] = {"text": report, "time": time.time()}
+                        st.session_state.analysis_results[cache_key] = {"text": report, "tp_s": tp_s, "tp_m": tp_m, "tp_l": tp_l, "time": time.time()}
                         st.session_state[f"tp_valid_{p_id}"] = validation.get(name, {})
                         st.session_state[f"show_{p_id}"] = True; st.rerun()
 
             if st.session_state.get(f"show_{p_id}"):
                 with st.expander("📝 AI 종합 진단 리포트", expanded=True):
                     rep = st.session_state.analysis_results[cache_key]['text']
-                    st.write(re.sub(r'TARGET_PRICE:\s*[\d,]+', '', rep).strip())
-                    tp = float(m.group(1).replace(',','')) if (m := re.search(r'TARGET_PRICE:\s*([\d,]+)', rep)) else 0.0
+                    st.write(re.sub(r'TARGET_PRICE:\s*[\d,]+\s*\|\s*[\d,]+\s*\|\s*[\d,]+', '', rep).strip())
+                    
+                    tp_s = st.session_state.analysis_results[cache_key].get('tp_s', 0.0)
+                    tp_m = st.session_state.analysis_results[cache_key].get('tp_m', 0.0)
+                    tp_l = st.session_state.analysis_results[cache_key].get('tp_l', 0.0)
 
                     valid_info = st.session_state.get(f"tp_valid_{p_id}")
                     if valid_info:
@@ -1006,16 +1030,20 @@ with tab5:
                             st.success(f"✅ **목표가 재검토 결과**: 1차 수치 타당함\n\n*{note}*")
                         elif valid_info.get("valid") is False:
                             st.warning(f"⚠️ **목표가 재검토 결과**: 리스크 관리를 위한 조정 필요\n\n*{note}*")
-                            new_tp = valid_info.get("new_target_price")
+                            new_tp_s = valid_info.get("new_target_price_short")
+                            new_tp_m = valid_info.get("new_target_price_mid")
+                            new_tp_l = valid_info.get("new_target_price_long")
                             calc_logic = valid_info.get("calculation_logic", "산출식 오류")
-                            if new_tp:
-                                st.error(f"🔄 **AI 자체 수정 목표가**: {new_tp:,.0f}원\n\n🧮 **수정 근거 및 연산식**:\n{calc_logic}")
+                            if new_tp_s:
+                                st.error(f"🔄 **AI 자체 수정 목표가**:\n- 단기: {new_tp_s:,.0f}원\n- 중기: {new_tp_m:,.0f}원\n- 장기: {new_tp_l:,.0f}원\n\n🧮 **수정 근거 및 연산식**:\n{calc_logic}")
                         else:
                             st.caption(f"ℹ️ 목표가 검증: {note}")
 
                     c1, c2 = st.columns(2)
                     if c1.button("💾 스크랩 저장", key=f"save_{p_id}"):
-                        c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?,?,?,?,?,?,?,?)", (f"[{name}] 리포트", "심층 퀀트 진단", rep, datetime.now().strftime("%Y-%m-%d %H:%M"), name, ticker, cur_price, tp)); conn.commit(); st.success("저장 완료")
+                        c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long) VALUES (?,?,?,?,?,?,?,?,?,?)", 
+                                  (f"[{name}] 리포트", "심층 진단", rep, datetime.now().strftime("%Y-%m-%d %H:%M"), name, ticker, cur_price, tp_s, tp_m, tp_l))
+                        conn.commit(); st.success("저장 완료")
                     if c2.button("🔄 재분석", key=f"force_{p_id}"): 
                         del st.session_state.analysis_results[cache_key]
                         st.session_state.pop(f"tp_valid_{p_id}", None)
@@ -1058,7 +1086,8 @@ with tab5:
 # ----------------- [탭 6: 스크랩북 및 탭 7: 백업] -----------------
 with tab6:
     st.subheader("📁 내 스크랩북")
-    c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, buy_recommend_price FROM scrapbook ORDER BY id DESC")
+    # target_price_mid, target_price_long까지 불러오도록 SELECT 쿼리 수정
+    c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, buy_recommend_price, target_price_mid, target_price_long FROM scrapbook ORDER BY id DESC")
     scraps = c.fetchall()
     if scraps:
         for s in scraps:
@@ -1072,13 +1101,19 @@ with tab6:
                     cols_sc[0].metric("저장가(당시주가)", f"{s[8]:,.0f}원")
                     return_pct = ((cur - s[8]) / s[8]) * 100 if s[8] > 0 else 0.0
                     cols_sc[1].metric("실시간 주가", f"{cur:,.0f}원", f"일일 {cur_diff_pct:+.2f}% / 누적 {return_pct:+.2f}%")
-                    cols_sc[2].metric("🎯 1차 퀀트 목표가", f"{s[9]:,.0f}원", f"{(cur / s[9]) * 100 if s[9] > 0 else 0.0:.1f}% 달성")
+                    
+                    tp_s = s[9]
+                    tp_m = s[11] if len(s) > 11 and s[11] else 0.0
+                    tp_l = s[12] if len(s) > 12 and s[12] else 0.0
+                    
+                    # 3기간 목표가를 텍스트로 표시
+                    cols_sc[2].markdown(f"**🎯 1차 목표가**<br>단기: {tp_s:,.0f}원<br>중기: {tp_m:,.0f}원<br>장기: {tp_l:,.0f}원", unsafe_allow_html=True)
                     
                     b_rec = s[10] if len(s) > 10 and s[10] else 0.0
                     if b_rec > 0:
-                        cols_sc[3].metric("💰 정밀 매수 추천가", f"{b_rec:,.0f}원", f"진입대비 {((cur - b_rec)/b_rec)*100:+.1f}%" if cur > 0 else "")
+                        cols_sc[3].metric("💰 매수 추천가", f"{b_rec:,.0f}원", f"진입대비 {((cur - b_rec)/b_rec)*100:+.1f}%" if cur > 0 else "")
                     else:
-                        cols_sc[3].metric("💰 정밀 매수 추천가", "기록 없음")
+                        cols_sc[3].metric("💰 매수 추천가", "기록 없음")
                     st.divider()
                 st.write(s[4])
                 if st.button("🗑️ 삭제", key=f"sd_{s[0]}"): c.execute("DELETE FROM scrapbook WHERE id=?", (s[0],)); conn.commit(); st.rerun()
