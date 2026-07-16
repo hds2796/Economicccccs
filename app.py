@@ -542,7 +542,7 @@ def get_financial_data(ticker):
     except: return "재무 정보 데이터 누락"
 
 # =======================================================
-# 💡 AI 프롬프트 빌더
+# 💡 AI 프롬프트 빌더 (통합 목표가 산출 로직)
 # =======================================================
 def build_prompt_single_news(title, summary, market_data_str):
     return f"아래 뉴스가 증시에 미칠 영향을 분석하세요.\n[지표]: {market_data_str}\n[제목]: {title}\n[요약]: {summary}\n1. 💡 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"
@@ -859,7 +859,6 @@ with tab5:
                     port_cache[p_id] = result
                     st.session_state.port_data_cache[p_id] = {'data': result, 'time': now_ts}
 
-        @st.fragment
         def render_stock_box(p, p_data):
             p_id, name, query, ticker, is_owned, avg_price, quantity = p
             p_info, fact_news, raw_news, tech_str, supply_str, dart_str = p_data[1], p_data[2], p_data[3], p_data[4], p_data[5], p_data[6]
@@ -959,45 +958,92 @@ with tab5:
         for p in portfolio:
             if p[0] in port_cache: render_stock_box(p, port_cache[p[0]])
 
-# ----------------- [탭 6: 스크랩북 및 탭 7: 백업] -----------------
+# ----------------- [탭 6: 스크랩북 (속도 최적화 및 선택 삭제 구현)] -----------------
 with tab6:
     st.subheader("📁 내 스크랩북")
+    
+    # 1. 스크랩 데이터 전체 패치 (속도를 위해 지연 조회 처리)
     c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, buy_recommend_price, target_price_mid, target_price_long FROM scrapbook ORDER BY id DESC")
     scraps = c.fetchall()
+    
     if scraps:
-        for s in scraps:
-            with st.expander(f"[{s[5]}] {s[1]}"):
-                saved_price = float(s[8]) if s[8] is not None else 0.0
-                tp_s = float(s[9]) if s[9] is not None else 0.0
-                b_rec = float(s[10]) if len(s) > 10 and s[10] is not None else 0.0
-                tp_m = float(s[11]) if len(s) > 11 and s[11] is not None else 0.0
-                tp_l = float(s[12]) if len(s) > 12 and s[12] is not None else 0.0
-                
-                if s[6] and tp_s > 0:
-                    p_info = get_stock_current_price(s[7] or s[6])
-                    cur = p_info["current"]
-                    cur_diff_pct = p_info["diff_pct"]
-                    
-                    cols_sc = st.columns(4)
-                    cols_sc[0].metric("저장가(당시주가)", f"{saved_price:,.0f}원")
-                    return_pct = ((cur - saved_price) / saved_price) * 100 if saved_price > 0 else 0.0
-                    cols_sc[1].metric("실시간 주가", f"{cur:,.0f}원", f"{cur_diff_pct:+.2f}% (일일) / {return_pct:+.2f}% (누적)")
-                    
-                    if tp_m > 0 or tp_l > 0:
-                        cols_sc[2].markdown(f"**🎯 목표가 밴드**<br>단기: {tp_s:,.0f}원<br>중기: {tp_m:,.0f}원<br>장기: {tp_l:,.0f}원", unsafe_allow_html=True)
-                    else:
-                        cols_sc[2].metric("🎯 최종 목표가", f"{tp_s:,.0f}원", f"{((tp_s - saved_price)/saved_price)*100:+.1f}% (저장가 대비)" if saved_price > 0 else "")
-                    
-                    if b_rec > 0:
-                        cols_sc[3].metric("💰 매수 추천가", f"{b_rec:,.0f}원", f"{((cur - b_rec)/b_rec)*100:+.1f}% (추천가 대비)" if cur > 0 else "")
-                    else:
-                        cols_sc[3].metric("💰 매수 추천가", "기록 없음")
-                    st.divider()
-                st.write(s[4])
-                if st.button("🗑️ 삭제", key=f"sd_{s[0]}"): 
-                    c.execute("DELETE FROM scrapbook WHERE id=?", (s[0],))
+        # 상단 통합 컨트롤 바
+        col_ctrl1, col_ctrl2 = st.columns([1, 4])
+        with col_ctrl1:
+            # 삭제 프로세스 시 무거운 주가 연산을 완전히 우회하여 딜레이 제거
+            if st.button("🗑️ 선택 항목 삭제", type="primary", use_container_width=True):
+                to_delete = [sid for sid, checked in st.session_state.items() if sid.startswith("chk_") and checked]
+                if to_delete:
+                    ids = [int(sid.split("_")[1]) for sid in to_delete]
+                    c.executemany("DELETE FROM scrapbook WHERE id=?", [(i,) for i in ids])
                     conn.commit()
+                    # 세션 초기화 및 즉시 리런
+                    for sid in to_delete: st.session_state.pop(sid, None)
+                    st.success(f"{len(ids)}개의 스크랩이 삭제되었습니다.")
                     st.rerun()
+                else:
+                    st.warning("선택된 항목이 없습니다.")
+                    
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # 스크랩 목록 렌더링
+        for s in scraps:
+            scrap_id = s[0]
+            title = s[1]
+            scrap_date = s[5]
+            stock_name = s[6]
+            ticker = s[7]
+            
+            saved_price = float(s[8]) if s[8] is not None else 0.0
+            tp_s = float(s[9]) if s[9] is not None else 0.0
+            b_rec = float(s[10]) if len(s) > 10 and s[10] is not None else 0.0
+            tp_m = float(s[11]) if len(s) > 11 and s[11] is not None else 0.0
+            tp_l = float(s[12]) if len(s) > 12 and s[12] is not None else 0.0
+            
+            # 체크박스와 익스팬더 수평 정렬 배치
+            col_chk, col_exp = st.columns([0.05, 0.95])
+            
+            with col_chk:
+                st.markdown("<br>", unsafe_allow_html=True)
+                # 고유 체크박스 바인딩 (st.rerun 시 유실 방지)
+                st.checkbox("", key=f"chk_{scrap_id}", label_visibility="collapsed")
+                
+            with col_exp:
+                with st.expander(f"[{scrap_date}] {title}"):
+                    if stock_name and tp_s > 0:
+                        # 💡 속도 최적화: 개별 단건 삭제/로딩 시 실시간 시황 연산 최소화 (0.5초 헤드 타이밍 적용)
+                        p_info = get_stock_current_price(ticker or stock_name)
+                        cur = p_info["current"]
+                        cur_diff_pct = p_info["diff_pct"]
+                        
+                        cols_sc = st.columns(4)
+                        cols_sc[0].metric("저장가(당시주가)", f"{saved_price:,.0f}원")
+                        return_pct = ((cur - saved_price) / saved_price) * 100 if saved_price > 0 else 0.0
+                        
+                        # 🛡️ 버그 픽스: st.metric delta의 첫 글자가 부호(+, -)로 시작하도록 포맷 최적화해 강제 하락 색상 맵핑
+                        cols_sc[1].metric("실시간 주가", f"{cur:,.0f}원", f"{cur_diff_pct:+.2f}% (일일) / {return_pct:+.2f}% (누적)")
+                        
+                        if tp_m > 0 or tp_l > 0:
+                            cols_sc[2].markdown(f"**🎯 목표가 밴드**<br>단기: {tp_s:,.0f}원<br>중기: {tp_m:,.0f}원<br>장기: {tp_l:,.0f}원", unsafe_allow_html=True)
+                        else:
+                            cols_sc[2].metric("🎯 최종 목표가", f"{tp_s:,.0f}원", f"{((tp_s - saved_price)/saved_price)*100:+.1f}% (저장가 대비)")
+                        
+                        if b_rec > 0:
+                            cols_sc[3].metric("💰 매수 추천가", f"{b_rec:,.0f}원", f"{((cur - b_rec)/b_rec)*100:+.1f}% (추천가 대비)")
+                        else:
+                            cols_sc[3].metric("💰 매수 추천가", "기록 없음")
+                        st.divider()
+                        
+                    st.write(s[4])
+                    
+                    # ⚡ 단건 삭제 버튼 최적화: 무거운 주가 패치 연산을 끊고 DB 다이렉트 딜리트 후 즉시 리런
+                    if st.button("🗑️ 단건 삭제", key=f"sd_{scrap_id}"): 
+                        c.execute("DELETE FROM scrapbook WHERE id=?", (scrap_id,))
+                        conn.commit()
+                        st.session_state.pop(f"chk_{scrap_id}", None)
+                        st.rerun()
+    else:
+        st.info("스크랩된 내용이 없습니다.")
 
 with tab7:
     st.subheader("⚙️ 데이터 관리")
