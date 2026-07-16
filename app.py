@@ -55,6 +55,8 @@ for table, col, dtype in [
     ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("scrapbook", "stock_name", "TEXT"),
     ("scrapbook", "ticker", "TEXT"), ("scrapbook", "saved_price", "REAL DEFAULT 0.0"),
     ("scrapbook", "target_price", "REAL DEFAULT 0.0"),
+    ("scrapbook", "target_price_mid", "REAL DEFAULT 0.0"),
+    ("scrapbook", "target_price_long", "REAL DEFAULT 0.0"),
     ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0")
 ]:
     try: c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}")
@@ -782,7 +784,10 @@ with tab4:
                             c.execute("SELECT id FROM portfolio WHERE ticker=?", (tick,))
                             if not c.fetchone():
                                 c.execute("INSERT INTO portfolio (stock_name, ticker, search_query) VALUES (?,?,?)", (name, tick, name))
-                            conn.commit(); st.success(f"'{name}' 스크랩 완료!")
+                            conn.commit()
+                            st.success(f"'{name}' 스크랩 완료!")
+                            time.sleep(0.5)
+                            st.rerun()
 
 # =======================================================
 # 💡 [탭 5: 관심종목]
@@ -854,7 +859,6 @@ with tab5:
                     port_cache[p_id] = result
                     st.session_state.port_data_cache[p_id] = {'data': result, 'time': now_ts}
 
-        @st.fragment
         def render_stock_box(p, p_data):
             p_id, name, query, ticker, is_owned, avg_price, quantity = p
             p_info, fact_news, raw_news, tech_str, supply_str, dart_str = p_data[1], p_data[2], p_data[3], p_data[4], p_data[5], p_data[6]
@@ -911,7 +915,10 @@ with tab5:
                     if c1.button("💾 저장", key=f"save_{p_id}"):
                         c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long) VALUES (?,?,?,?,?,?,?,?,?,?)", 
                                   (f"[{name}] 리포트", "진단", rep, datetime.now().strftime("%Y-%m-%d %H:%M"), name, ticker, cur_price, tp_s, tp_m, tp_l))
-                        conn.commit(); st.success("저장 완료")
+                        conn.commit()
+                        st.success("저장 완료")
+                        time.sleep(0.5)
+                        st.rerun()
                     if c2.button("🔄 재분석", key=f"force_{p_id}"): 
                         del st.session_state.analysis_results[cache_key]
                         st.rerun()
@@ -958,30 +965,37 @@ with tab6:
     if scraps:
         for s in scraps:
             with st.expander(f"[{s[5]}] {s[1]}"):
-                if s[6] and s[9] > 0:
+                saved_price = float(s[8]) if s[8] is not None else 0.0
+                tp_s = float(s[9]) if s[9] is not None else 0.0
+                b_rec = float(s[10]) if len(s) > 10 and s[10] is not None else 0.0
+                tp_m = float(s[11]) if len(s) > 11 and s[11] is not None else 0.0
+                tp_l = float(s[12]) if len(s) > 12 and s[12] is not None else 0.0
+                
+                if s[6] and tp_s > 0:
                     p_info = get_stock_current_price(s[7] or s[6])
                     cur = p_info["current"]
                     cur_diff_pct = p_info["diff_pct"]
                     
                     cols_sc = st.columns(4)
-                    cols_sc[0].metric("저장가(당시주가)", f"{s[8]:,.0f}원")
-                    return_pct = ((cur - s[8]) / s[8]) * 100 if s[8] > 0 else 0.0
+                    cols_sc[0].metric("저장가(당시주가)", f"{saved_price:,.0f}원")
+                    return_pct = ((cur - saved_price) / saved_price) * 100 if saved_price > 0 else 0.0
                     cols_sc[1].metric("실시간 주가", f"{cur:,.0f}원", f"일일 {cur_diff_pct:+.2f}% / 누적 {return_pct:+.2f}%")
                     
-                    tp_s = s[9]
-                    tp_m = s[11] if len(s) > 11 and s[11] else 0.0
-                    tp_l = s[12] if len(s) > 12 and s[12] else 0.0
+                    if tp_m > 0 or tp_l > 0:
+                        cols_sc[2].markdown(f"**🎯 목표가 밴드**<br>단기: {tp_s:,.0f}원<br>중기: {tp_m:,.0f}원<br>장기: {tp_l:,.0f}원", unsafe_allow_html=True)
+                    else:
+                        cols_sc[2].metric("🎯 최종 목표가", f"{tp_s:,.0f}원", f"저장가 대비 {((tp_s - saved_price)/saved_price)*100:+.1f}%" if saved_price > 0 else "")
                     
-                    cols_sc[2].markdown(f"**🎯 1차 목표가**<br>단기: {tp_s:,.0f}원<br>중기: {tp_m:,.0f}원<br>장기: {tp_l:,.0f}원", unsafe_allow_html=True)
-                    
-                    b_rec = s[10] if len(s) > 10 and s[10] else 0.0
                     if b_rec > 0:
                         cols_sc[3].metric("💰 매수 추천가", f"{b_rec:,.0f}원", f"진입대비 {((cur - b_rec)/b_rec)*100:+.1f}%" if cur > 0 else "")
                     else:
                         cols_sc[3].metric("💰 매수 추천가", "기록 없음")
                     st.divider()
                 st.write(s[4])
-                if st.button("🗑️ 삭제", key=f"sd_{s[0]}"): c.execute("DELETE FROM scrapbook WHERE id=?", (s[0],)); conn.commit(); st.rerun()
+                if st.button("🗑️ 삭제", key=f"sd_{s[0]}"): 
+                    c.execute("DELETE FROM scrapbook WHERE id=?", (s[0],))
+                    conn.commit()
+                    st.rerun()
 
 with tab7:
     st.subheader("⚙️ 데이터 관리")
