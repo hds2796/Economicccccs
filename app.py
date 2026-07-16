@@ -93,11 +93,8 @@ with st.sidebar:
             auth_url, _ = flow.authorization_url(prompt='consent')
             
             # [수정 핵심] target="_top" 설정을 넣어 프레임 탈출 및 403 에러 원천 차단
-            st.markdown(
-                f'<a href="{auth_url}" target="_top">'
-                f'<button style="width:100%; background-color:#4285F4; color:white; border:none; padding:10px; border-radius:5px; cursor:pointer; font-weight:bold;">'
-                f'구글 계정으로 로그인</button></a>', 
-                unsafe_allow_html=True
+           # 기존 st.markdown(...) 코드를 지우고 아래 코드를 넣으세요.
+st.link_button("☁️ 구글 계정으로 로그인", auth_url, use_container_width=True)
             )
             
             if "code" in st.query_params:
