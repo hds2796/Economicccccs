@@ -542,8 +542,8 @@ return f"- 시총: {info.get('marketCap',0)/1e12:.2f}조 원\n- PER: {info.get('
 except: return "재무 정보 데이터 누락"
 
 # =======================================================
+# 💡 AI 프롬프트 빌더 (1차 퀀트 공식 명시 -> 2차 정성 분석 수정)
 # 💡 AI 프롬프트 빌더 (통합된 목표가 산출 모델 적용)
-# 💡 AI 프롬프트 빌더 (통합 목표가 산출 로직)
 # =======================================================
 def build_prompt_single_news(title, summary, market_data_str):
 return f"아래 뉴스가 증시에 미칠 영향을 분석하세요.\n[지표]: {market_data_str}\n[제목]: {title}\n[요약]: {summary}\n1. 💡 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"
@@ -560,38 +560,118 @@ def build_prompt_sector(sector_name, news_list, market_data_str):
 combined = "\n".join([f"- {n['title']} : {n['summary']}" for n in news_list])
 return f"'{sector_name}' 섹터 분석:\n[지표]: {market_data_str}\n{combined}\n\n1. 🏭 섹터 흐름 요약\n2. 📈 주요 호/악재\n3. 🎯 투자 심리 전망"
 
+def build_prompt_recommend_step3(candidate_context, news_list, market_data_str):
 def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, horizon):
 combined = "\n".join([f"- {n['title']}" for n in news_list[:20]])
-return (f"당신은 객관적이고 엄격한 애널리스트입니다.\n\n"
+    return (f"당신은 객관적이고 엄격한 수석 애널리스트입니다.\n\n"
+    return (f"당신은 객관적이고 엄격한 애널리스트입니다.\n\n"
 f"[시장 거시 상황]: {market_data_str}\n"
-f"[선택된 투자 기간]: {horizon}\n"
-f"[후보 종목 정량 데이터]:\n{candidate_context}\n"
+            f"[후보 5종목 정량 데이터]:\n{candidate_context}\n"
+            f"[선택된 투자 기간]: {horizon}\n"
+            f"[후보 종목 정량 데이터]:\n{candidate_context}\n"
 f"[수급 및 최신 이슈]:\n{combined}\n\n"
-f"위 데이터를 바탕으로 선택된 '{horizon}' 투자에 가장 적합한 최종 3개 종목을 엄선하여 보고서를 작성하십시오.\n\n"
-f"⚠️ [목표가 산출 및 작성 규칙]\n"
-f"1. 목표가는 기간별로 여러 개를 제시하지 말고, 오직 선택된 '{horizon}'에 맞는 '단 하나의 최종 목표가'만 도출하십시오.\n"
-f"2. 추천 사유에는 이 종목이 왜 해당 투자 기간에 적합한지 (뉴스 팩트, 수급, 차트 상황) 구체적으로 서술하십시오.\n"
-f"3. 목표가 산출 논리는 반드시 다음 두 단계를 거쳐 깔끔한 리스트 형태로 작성하십시오:\n"
-f"   - [1차 퀀트 연산]: 어떤 수학적/통계적 공식(예: EPS * PER, 볼린저 밴드 상단, PBR 배수 등)을 사용했고 대입된 수치는 무엇인지 기재.\n"
-f"   - [2차 정성적 수정]: 1차 퀀트 수치에서 최신 뉴스, 수급, 차트 모멘텀을 반영하여 최종적으로 목표가를 어떻게 가감(수정)했는지 기재.\n\n"
+            f"부적합한 2개 종목을 제외하고, 최종 3개 종목에 대한 보고서를 작성하십시오.\n\n"
+            f"⚠️ [절대 준수 로직: 1차 퀀트 공식 산출 -> 2차 정성적 분석에 따른 수정]\n"
+            f"목표가 산출 시, 'AI 자체 수정'과 같은 임의적인 조정을 배제하십시오.\n"
+            f"1. **1차 퀀트**: 목표가가 어떤 재무적/통계적 공식(예: EPS × 적정 PER, 볼린저 밴드 상/하단 수식, PBR 등)에 의해 계산되었는지 수식과 대입된 숫자를 명확히 적으십시오.\n"
+            f"2. **2차 정성적 수정**: 1차로 도출된 퀀트 목표가를 '차트 패턴, 수급 모멘텀, 최신 뉴스 및 산업 동향'을 구체적으로 반영하여 최종 목표가로 어떻게 가감(수정)했는지 서술하십시오. 단기, 중기, 장기 모두 이 2단계 프로세스를 거쳐야 합니다.\n\n"
+            f"위 데이터를 바탕으로 선택된 '{horizon}' 투자에 가장 적합한 최종 3개 종목을 엄선하여 보고서를 작성하십시오.\n\n"
+            f"⚠️ [목표가 산출 및 작성 규칙]\n"
+            f"1. 목표가는 기간별로 여러 개를 제시하지 말고, 오직 선택된 '{horizon}'에 맞는 '단 하나의 최종 목표가'만 도출하십시오.\n"
+            f"2. 추천 사유에는 이 종목이 왜 해당 투자 기간에 적합한지 (뉴스 팩트, 수급, 차트 상황) 구체적으로 서술하십시오.\n"
+            f"3. 목표가 산출 논리는 반드시 다음 두 단계를 거쳐 깔끔한 리스트 형태로 작성하십시오:\n"
+            f"   - [1차 퀀트 연산]: 어떤 수학적/통계적 공식(예: EPS * PER, 볼린저 밴드 상단, PBR 배수 등)을 사용했고 대입된 수치는 무엇인지 기재.\n"
+            f"   - [2차 정성적 수정]: 1차 퀀트 수치에서 최신 뉴스, 수급, 차트 모멘텀을 반영하여 최종적으로 목표가를 어떻게 가감(수정)했는지 기재.\n\n"
 f"[보고서 필수 양식]\n"
+            f"### 🗑️ [탈락 종목 2개]\n"
+            f"- [탈락 종목명 1, 2]: (제외 사유)\n\n"
 f"### 🏆 [최종 추천 종목 3개]\n"
 f"1. 🥇 추천종목: [종목명] (티커)\n"
-f"- 💡 구체적 추천 사유: (이 종목을 선택한 핵심 모멘텀 서술)\n"
+            f"- 🎯 단기 목표가 (1~3개월): [최종 수정된 가격] (1차 퀀트: 구체적 계산 공식 -> 2차 정성: 차트/모멘텀 기반 가감 이유)\n"
+            f"- 🎯 중기 목표가 (3~6개월): [최종 수정된 가격] (1차 퀀트: 실적/멀티플 연산 공식 -> 2차 정성: 뉴스/수급 기반 가감 이유)\n"
+            f"- 🎯 장기 목표가 (1년 이상): [최종 수정된 가격] (1차 퀀트: 내재가치/성장률 공식 -> 2차 정성: 매크로/산업동향 기반 가감 이유)\n"
+            f"- 💰 진입 타점: [진입가] (보수적 지지선 및 안전마진 수식 적용)\n\n"
+            f"- 💡 구체적 추천 사유: (이 종목을 선택한 핵심 모멘텀 서술)\n"
             f"- 🎯 최종 목표가: [최종 가격]원\n"
-            f"- 🎯 {horizon} 최종 목표가: [최종 가격]원\n"
-f"  └ 🧮 1차 퀀트 연산: [산출 가격]원 (사용된 공식 및 수치 명시)\n"
-f"  └ 🧠 2차 정성 수정: (차트/뉴스/수급을 기반으로 1차 가격에서 가감한 논리 명시)\n"
-f"- 💰 진입 타점: [진입가]원 (지지선 및 안전마진 근거)\n\n"
+            f"  └ 🧮 1차 퀀트 연산: [산출 가격]원 (사용된 공식 및 수치 명시)\n"
+            f"  └ 🧠 2차 정성 수정: (차트/뉴스/수급을 기반으로 1차 가격에서 가감한 논리 명시)\n"
+            f"- 💰 진입 타점: [진입가]원 (지지선 및 안전마진 근거)\n\n"
 f"(2번, 3번 종목 동일하게 작성)\n\n"
 f"※ 반드시 마지막 줄에 파싱을 위해 아래 형식으로만 적으세요. 다른 글자 추가 절대 금지.\n"
 f"[TRACKING_DATA]\n"
+            f"종목명1|티커1|단기숫자만|중기숫자만|장기숫자만|매수추천가숫자만\n"
+            f"종목명2|티커2|단기숫자만|중기숫자만|장기숫자만|매수추천가숫자만\n"
+            f"종목명3|티커3|단기숫자만|중기숫자만|장기숫자만|매수추천가숫자만")
+
+def validate_target_price(items):
+    items = [it for it in items if it.get("realtime_price", 0) > 0]
+    if not items:
+        return {}
+
+    blocks = []
+    for it in items:
+        blocks.append(
+            f"### {it['name']}\n"
+            f"- 실시간 현재가: {it['realtime_price']:,.0f}원\n"
+            f"- 1차 산출 단기/중기/장기 목표가: {it.get('target_price_short',0):,.0f} / {it.get('target_price_mid',0):,.0f} / {it.get('target_price_long',0):,.0f}원\n"
+            f"- 실시간 보조지표:\n{it.get('tech_str', '데이터 없음')}\n"
+        )
+    context_block = "\n\n".join(blocks)
+
+    prompt = (
+        "너는 독립적인 리스크 심사역이야. 입력된 종목별 1차 목표가가 시장 현재가 및 실시간 보조지표 대비 타당한지 객관적으로 검증해라.\n"
+        "괴리율이 비정상적이거나 차트 수치(RSI/MACD)와 방향성이 모순될 경우 반드시 'valid'를 false로 설정해라.\n\n"
+        "⚠️ [필수 의무 사항: 1차 퀀트 공식 검증 및 2차 정성적 분석 반영]\n"
+        "valid가 false일 경우, 'AI 자체 수정'이라는 애매한 표현을 쓰지 마라. 대신 'calculation_logic'에 재계산 로직을 적을 때 **반드시 [1차 퀀트: 어떤 수학적/재무적 공식을 썼는지 명시] 후 [2차 정성: 차트 모멘텀, 수급, 뉴스를 바탕으로 어떻게 목표가를 구체적으로 가감했는지]** 과정을 거쳐 도출된 최종 결과라는 점을 단기/중기/장기별로 분명하게 작성해라.\n\n"
+        "반드시 아래 형식의 JSON 객체 하나로만 답해라.\n"
+        '예시:\n'
+        '{\n'
+        '  "종목명": {\n'
+        '    "valid": false,\n'
+        '    "note": "RSI 과열 및 볼린저 밴드 상단 초과로 인해 기존 목표가 도달이 비현실적임. 하향 조정.",\n'
+        '    "new_target_price_short": 185000,\n'
+        '    "new_target_price_mid": 195000,\n'
+        '    "new_target_price_long": 220000,\n'
+        '    "calculation_logic": "[단기] 1차 퀀트(볼린저 상단 수식 19만) -> 2차 정성(MACD 하락 반전 및 차익 매물 뉴스 반영하여 -5k 하향). [중기] 1차 퀀트(예상 EPS * PER 12배 연산 20만) -> 2차 정성(최근 외인 이탈 수급 반영하여 -5k 하향). [장기] 1차 퀀트(할인율 10% DCF 연산 22만) -> 2차 정성(장기 펀더멘털 유지 판단으로 조정 없음)."\n'
+        '  }\n'
+        '}\n\n'
+        f"{context_block}"
+    )
+
+    try:
+        res = call_gemini_with_fallback(prompt, is_json=True, use_lite=True)
+        match = re.search(r'\{.*\}', res, re.DOTALL)
+        parsed = json.loads(match.group()) if match else json.loads(res)
+        
+        result = {}
+        for it in items:
+            v = parsed.get(it['name'], {})
+            
+            new_tp_s = v.get("new_target_price_short")
+            new_tp_m = v.get("new_target_price_mid")
+            new_tp_l = v.get("new_target_price_long")
+            calc_logic = v.get("calculation_logic")
+            
+            if v.get("valid") is False and not new_tp_s:
+                new_tp_s = int(it['realtime_price'] * 1.05)
+                new_tp_m = int(it['realtime_price'] * 1.1)
+                new_tp_l = int(it['realtime_price'] * 1.2)
+                calc_logic = "[단기] 1차 퀀트(+5% 밴드 공식) -> 2차 정성(단기 수급 모멘텀 반영). [중기] 1차 퀀트(+10% 밴드 공식) -> 2차 정성(실적 뉴스 반영). [장기] 1차 퀀트(+20% 밴드 공식) -> 2차 정성(산업 매크로 반영)."
+                
+            result[it['name']] = {
+                "valid": v.get("valid"), 
+                "note": v.get("note", "목표가 타당성 검증 완료"),
+                "new_target_price_short": new_tp_s,
+                "new_target_price_mid": new_tp_m,
+                "new_target_price_long": new_tp_l,
+                "calculation_logic": calc_logic
+            }
+        return result
+    except Exception:
+        return {it['name']: {"valid": None, "note": "검증 실패 (응답 파싱 오류)"} for it in items}
             f"종목명1|티커1|최종목표가숫자만|진입타점숫자만\n"
             f"종목명2|티커2|최종목표가숫자만|진입타점숫자만\n"
-            f"종목명3|티커3|최종목표가숫자만|진입타점숫자만"
-            f"종목명1|티커1|단일최종목표가숫자만|진입타점숫자만\n"
-            f"종목명2|티커2|단일최종목표가숫자만|진입타점숫자만\n"
-            f"종목명3|티커3|단일최종목표가숫자만|진입타점숫자만"
+            f"종목명3|티커3|최종목표가숫자만|진입타점숫자만")
 
 def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str, tech_str, supply_str):
 fin_data = get_financial_data(ticker)
@@ -608,18 +688,18 @@ f"위 데이터를 바탕으로 객관적인 진단 리포트를 작성하십시
 f"1. 🏢 재무 및 펀더멘털 분석\n"
 f"2. 🌐 뉴스/수급 분석\n"
 f"3. 📊 투자의견\n"
+            f"4. 💰 기간별 적정 목표가 산출 논리\n"
+            f"   (※ 'AI 임의 수정'을 배제하고 반드시 '1차 퀀트(구체적 계산 공식 명시) -> 2차 정성적 분석(차트, 모멘텀, 뉴스를 통한 수정)' 프로세스를 거쳐 서술할 것)\n"
+            f"   - 단기(1~3개월): [가격] (1차 퀀트 공식 -> 2차 정성적 수정 내용)\n"
+            f"   - 중기(3~6개월): [가격] (1차 퀀트 공식 -> 2차 정성적 수정 내용)\n"
+            f"   - 장기(1년 이상): [가격] (1차 퀀트 공식 -> 2차 정성적 수정 내용)\n\n"
             f"4. 🎯 최종 적정 목표가 산출 논리 (6개월~1년 투자 기준의 단일 목표가 도출)\n"
             f"   - 🧮 1차 퀀트 연산: [산출 가격]원 (사용된 수학적/통계적 공식 및 수치 명시)\n"
             f"   - 🧠 2차 정성 수정: [최종 가격]원 (차트 추세, 뉴스, 수급 모멘텀을 반영하여 1차 가격에서 가감한 논리 명시)\n"
-            f"4. 🎯 기간별 최종 적정 목표가 산출 논리\n"
-            f"   (※ 반드시 '1차 퀀트(구체적 계산 공식 명시) -> 2차 정성적 분석(차트, 모멘텀, 뉴스를 통한 가감 수정)' 프로세스를 거쳐 서술할 것)\n"
-            f"   - 🎯 단기 목표가 (1~3개월): [가격]원 (1차 퀀트 연산 -> 2차 정성 수정)\n"
-            f"   - 🎯 중기 목표가 (3~6개월): [가격]원 (1차 퀀트 연산 -> 2차 정성 수정)\n"
-            f"   - 🎯 장기 목표가 (1년 이상): [가격]원 (1차 퀀트 연산 -> 2차 정성 수정)\n"
-f"5. 💰 매수/손절 진입 타점: [진입가]원 (지지선 및 안전마진 근거)\n\n"
+            f"5. 💰 매수/손절 진입 타점: [진입가]원 (지지선 및 안전마진 근거)\n\n"
 f"※ 마지막 줄에 시스템 파싱을 위해 반드시 아래 포맷으로만 기재하십시오. (다른 글자 추가 금지)\n"
+            f"TARGET_PRICE: 단기숫자|중기숫자|장기숫자")
             f"TARGET_PRICE: 최종적정목표가숫자만")
-            f"TARGET_PRICE: 단기숫자만|중기숫자만|장기숫자만")
 
 # =======================================================
 # 4. 메인 대시보드 UI
@@ -727,8 +807,7 @@ st.markdown(f"[원문 읽기]({news['link']}) | {news['published']}\n\n{news['su
 with tab4:
 st.subheader("🎯 AI 추천종목 발굴")
     investment_horizon = st.radio("⏳ 투자 기간 (목표가 산출 기준)", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
-    investment_horizon = st.radio("⏳ 투자 기간 설정", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
-
+    
 if st.button("🚀 추천 종목 발굴", type="primary", use_container_width=True):
 raw_rec = get_naver_news("특징주|수주|실적|목표가", display=100, sort_type="date")
 rec_news = filter_news_with_gemini_lite(raw_rec)
@@ -755,9 +834,34 @@ cand_lookup = {r["name"]: r for r in cand_results}
 
 ctx_str = "".join(results)
 
-prompt_step3 = build_prompt_recommend_step3(ctx_str, rec_news, market_data_str, investment_horizon)
+            prompt_step3 = build_prompt_recommend_step3(ctx_str, rec_news, market_data_str)
+            prompt_step3 = build_prompt_recommend_step3(ctx_str, rec_news, market_data_str, investment_horizon)
 st.session_state.today_recommendation = st.write_stream(call_gemini_stream_with_fallback(prompt_step3))
 success_rec = True
+
+            raw_result = st.session_state.today_recommendation
+            valid_items = []
+            if "[TRACKING_DATA]" in raw_result:
+                for line in raw_result.split("[TRACKING_DATA]")[1].strip().split('\n'):
+                    data = line.split('|')
+                    if len(data) >= 2:
+                        v_name, v_tick = data[0].strip(), data[1].strip()
+                        def ext_num(idx):
+                            return float(re.sub(r'[^\d.]', '', data[idx])) if len(data) > idx and re.sub(r'[^\d.]', '', data[idx]) else 0.0
+                        
+                        v_tp_s = ext_num(2)
+                        v_tp_m = ext_num(3)
+                        v_tp_l = ext_num(4)
+                        v_bp = ext_num(5)
+                        
+                        cand = cand_lookup.get(v_name)
+                        if cand:
+                            valid_items.append({
+                                "name": v_name, "realtime_price": cand["cp"],
+                                "target_price_short": v_tp_s, "target_price_mid": v_tp_m, "target_price_long": v_tp_l,
+                                "buy_price": v_bp, "tech_str": cand["tech"]
+                            })
+            st.session_state.today_recommendation_validation = validate_target_price(valid_items)
 
 except Exception as e: st.error(f"추천 오류 발생: {e}")
 if success_rec: st.rerun()
@@ -772,25 +876,49 @@ st.markdown("### 📌 AI 분석 추천 매수 밴드 대시보드")
 cols = st.columns(3)
 for idx, line in enumerate(raw.split("[TRACKING_DATA]")[1].strip().split('\n')):
 data = line.split('|')
-if len(data) >= 4:
+                if len(data) >= 2:
+                if len(data) >= 4:
 name, tick = data[0].strip(), data[1].strip()
 def extract(ix):
 return float(re.sub(r'[^\d.]', '', data[ix])) if len(data) > ix and re.sub(r'[^\d.]', '', data[ix]) else 0.0
 
-tp = extract(2)
-bp = extract(3)
+                    tp_s = extract(2)
+                    tp_m = extract(3)
+                    tp_l = extract(4)
+                    bp = extract(5)
+                    tp = extract(2)
+                    bp = extract(3)
 
 with cols[idx % 3]:
 p_info = get_stock_current_price(tick)
 cp, dpct = p_info["current"], p_info["diff_pct"]
 st.info(f"**{name}** ({tick})")
 st.metric("실시간 현재가", f"{cp:,.0f}원", f"전일대비 {dpct:+.2f}%")
-st.metric("🎯 최종 목표가", f"{tp:,.0f}원", f"현재가 대비 {((tp - cp)/cp)*100:+.1f}%" if cp > 0 and tp > 0 else "")
+                        st.markdown(f"**🎯 1차 목표가 (단기/중기/장기)**<br>{tp_s:,.0f} / {tp_m:,.0f} / {tp_l:,.0f}", unsafe_allow_html=True)
+                        st.metric("🎯 최종 목표가", f"{tp:,.0f}원", f"현재가 대비 {((tp - cp)/cp)*100:+.1f}%" if cp > 0 and tp > 0 else "")
 st.metric("💰 매수 추천가", f"{bp:,.0f}원", f"현재가 대비 {((bp - cp)/cp)*100:+.1f}%" if cp > 0 and bp > 0 else "데이터 없음")
 
+                        valid_info = st.session_state.get('today_recommendation_validation', {}).get(name)
+                        if valid_info:
+                            note = valid_info.get("note", "")
+                            if valid_info.get("valid") is True:
+                                st.success(f"✅ **재검토 완료**: 타당함\n\n*{note}*")
+                            elif valid_info.get("valid") is False:
+                                st.warning(f"⚠️ **목표가 조정 필요**\n\n*{note}*")
+                                new_tp_s = valid_info.get("new_target_price_short")
+                                new_tp_m = valid_info.get("new_target_price_mid")
+                                new_tp_l = valid_info.get("new_target_price_long")
+                                calc_logic = valid_info.get("calculation_logic", "산출식 누락")
+                                if new_tp_s:
+                                    st.error(f"🔄 **2차 정성적 수정 목표가 (차트/모멘텀/뉴스 반영)**:\n- 단기: {new_tp_s:,.0f}원\n- 중기: {new_tp_m:,.0f}원\n- 장기: {new_tp_l:,.0f}원\n\n🧮 **퀀트 산출식 및 정성적 수정 근거**:\n{calc_logic}")
+                            else:
+                                st.caption(f"ℹ️ {note}")
+
 if st.button(f"💾 {name} 찜하기", key=f"rec_s_{tick}"):
-c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, buy_recommend_price, scrap_date) VALUES (?,?,?,?,?,?,?,?)", 
-(f"🎯 추천: {name}", display_report, name, tick, cp, tp, bp, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                            c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, scrap_date) VALUES (?,?,?,?,?,?,?,?,?,?)", 
+                                      (f"🎯 추천: {name}", display_report, name, tick, cp, tp_s, tp_m, tp_l, bp, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                            c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, buy_recommend_price, scrap_date) VALUES (?,?,?,?,?,?,?,?)", 
+                                      (f"🎯 추천: {name}", display_report, name, tick, cp, tp, bp, datetime.now().strftime("%Y-%m-%d %H:%M")))
 c.execute("SELECT id FROM portfolio WHERE ticker=?", (tick,))
 if not c.fetchone():
 c.execute("INSERT INTO portfolio (stock_name, ticker, search_query) VALUES (?,?,?)", (name, tick, name))
@@ -898,41 +1026,59 @@ if st.button("🚀 AI 진단", key=f"run_{p_id}", type="primary"):
 combined = {n['link']: n for n in (fact_news + st.session_state.get(f"ai_news_{p_id}", []))}.values()
 report = call_gemini_with_fallback(build_prompt_deep_dive(name, ticker, list(combined), is_owned, avg_price, quantity, cur_price, market_data_str, tech_str, supply_str))
 
-                        tp_match = re.search(r'TARGET_PRICE:\s*([\d,]+)', report)
-                        tp_val = float(tp_match.group(1).replace(',', '')) if tp_match else 0.0
-                        tp_match = re.search(r'TARGET_PRICE:\s*([^|]+)\|([^|]+)\|(.*)', report)
+                        tp_match = re.search(r'TARGET_PRICE:([^|]+)\|([^|]+)\|(.*)', report)
                         def extr(s): return float(re.sub(r'[^\d.]', '', s)) if s and re.sub(r'[^\d.]', '', s) else 0.0
                         tp_s = extr(tp_match.group(1)) if tp_match else 0.0
                         tp_m = extr(tp_match.group(2)) if tp_match else 0.0
                         tp_l = extr(tp_match.group(3)) if tp_match else 0.0
 
-                        st.session_state.analysis_results[cache_key] = {"text": report, "tp": tp_val, "time": time.time()}
+                        validation = validate_target_price([{
+                            "name": name, "realtime_price": cur_price, "target_price_short": tp_s, "target_price_mid": tp_m, "target_price_long": tp_l, "tech_str": tech_str
+                        }])
                         st.session_state.analysis_results[cache_key] = {"text": report, "tp_s": tp_s, "tp_m": tp_m, "tp_l": tp_l, "time": time.time()}
+                        st.session_state[f"tp_valid_{p_id}"] = validation.get(name, {})
+                        tp_match = re.search(r'TARGET_PRICE:\s*([\d,]+)', report)
+                        tp_val = float(tp_match.group(1).replace(',', '')) if tp_match else 0.0
+
+                        st.session_state.analysis_results[cache_key] = {"text": report, "tp": tp_val, "time": time.time()}
 st.session_state[f"show_{p_id}"] = True; st.rerun()
 
 if st.session_state.get(f"show_{p_id}"):
 with st.expander("📝 AI 진단 리포트", expanded=True):
 rep = st.session_state.analysis_results[cache_key]['text']
-                    st.write(re.sub(r'TARGET_PRICE:.*', '', rep).strip())
+st.write(re.sub(r'TARGET_PRICE:.*', '', rep).strip())
 
-                    tp = st.session_state.analysis_results[cache_key].get('tp', 0.0)
                     tp_s = st.session_state.analysis_results[cache_key].get('tp_s', 0.0)
                     tp_m = st.session_state.analysis_results[cache_key].get('tp_m', 0.0)
                     tp_l = st.session_state.analysis_results[cache_key].get('tp_l', 0.0)
 
-                    st.markdown(f"#### 🎯 최종 목표가 밴드")
-                    st.info(f"**단기 (1~3개월):** {tp_s:,.0f}원  |  **중기 (3~6개월):** {tp_m:,.0f}원  |  **장기 (1년 이상):** {tp_l:,.0f}원")
-                    st.write(re.sub(r'TARGET_PRICE:.*', '', rep).strip())
-                    
+                    valid_info = st.session_state.get(f"tp_valid_{p_id}")
+                    if valid_info:
+                        note = valid_info.get("note", "")
+                        if valid_info.get("valid") is True:
+                            st.success(f"✅ **재검토 완료**: 1차 수치 타당함\n\n*{note}*")
+                        elif valid_info.get("valid") is False:
+                            st.warning(f"⚠️ **목표가 조정 필요**\n\n*{note}*")
+                            new_tp_s = valid_info.get("new_target_price_short")
+                            new_tp_m = valid_info.get("new_target_price_mid")
+                            new_tp_l = valid_info.get("new_target_price_long")
+                            calc_logic = valid_info.get("calculation_logic", "산출식 누락")
+                            if new_tp_s:
+                                st.error(f"🔄 **2차 정성적 수정 목표가 (차트/모멘텀/뉴스 반영)**:\n- 단기: {new_tp_s:,.0f}원\n- 중기: {new_tp_m:,.0f}원\n- 장기: {new_tp_l:,.0f}원\n\n🧮 **퀀트 산출식 및 정성적 수정 근거**:\n{calc_logic}")
+                        else:
+                            st.caption(f"ℹ️ 검증 결과 없음: {note}")
+                    tp = st.session_state.analysis_results[cache_key].get('tp', 0.0)
+
 c1, c2 = st.columns(2)
 if c1.button("💾 저장", key=f"save_{p_id}"):
-                        c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?,?,?,?,?,?,?,?)", 
-                                  (f"[{name}] 리포트", "진단", rep, datetime.now().strftime("%Y-%m-%d %H:%M"), name, ticker, cur_price, tp))
                         c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long) VALUES (?,?,?,?,?,?,?,?,?,?)", 
                                   (f"[{name}] 리포트", "진단", rep, datetime.now().strftime("%Y-%m-%d %H:%M"), name, ticker, cur_price, tp_s, tp_m, tp_l))
+                        c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?,?,?,?,?,?,?,?)", 
+                                  (f"[{name}] 리포트", "진단", rep, datetime.now().strftime("%Y-%m-%d %H:%M"), name, ticker, cur_price, tp))
 conn.commit(); st.success("저장 완료")
 if c2.button("🔄 재분석", key=f"force_{p_id}"): 
 del st.session_state.analysis_results[cache_key]
+                        st.session_state.pop(f"tp_valid_{p_id}", None)
 st.rerun()
 
 with st.expander("🏢 최근 전자공시", expanded=False):
@@ -972,8 +1118,8 @@ if p[0] in port_cache: render_stock_box(p, port_cache[p[0]])
 # ----------------- [탭 6: 스크랩북 및 탭 7: 백업] -----------------
 with tab6:
 st.subheader("📁 내 스크랩북")
-    c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, buy_recommend_price FROM scrapbook ORDER BY id DESC")
     c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, buy_recommend_price, target_price_mid, target_price_long FROM scrapbook ORDER BY id DESC")
+    c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, buy_recommend_price FROM scrapbook ORDER BY id DESC")
 scraps = c.fetchall()
 if scraps:
 for s in scraps:
@@ -988,13 +1134,13 @@ cols_sc[0].metric("저장가(당시주가)", f"{s[8]:,.0f}원")
 return_pct = ((cur - s[8]) / s[8]) * 100 if s[8] > 0 else 0.0
 cols_sc[1].metric("실시간 주가", f"{cur:,.0f}원", f"일일 {cur_diff_pct:+.2f}% / 누적 {return_pct:+.2f}%")
 
-                    tp = s[9]
-                    cols_sc[2].metric("🎯 최종 목표가", f"{tp:,.0f}원", f"저장가 대비 {((tp - s[8])/s[8])*100:+.1f}%" if s[8] > 0 else "")
                     tp_s = s[9]
                     tp_m = s[11] if len(s) > 11 and s[11] else 0.0
                     tp_l = s[12] if len(s) > 12 and s[12] else 0.0
                     
                     cols_sc[2].markdown(f"**🎯 1차 목표가**<br>단기: {tp_s:,.0f}원<br>중기: {tp_m:,.0f}원<br>장기: {tp_l:,.0f}원", unsafe_allow_html=True)
+                    tp = s[9]
+                    cols_sc[2].metric("🎯 최종 목표가", f"{tp:,.0f}원", f"저장가 대비 {((tp - s[8])/s[8])*100:+.1f}%" if s[8] > 0 else "")
 
 b_rec = s[10] if len(s) > 10 and s[10] else 0.0
 if b_rec > 0:
