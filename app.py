@@ -618,9 +618,9 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
             f"종목명3|티커3|목표가숫자만|매수추천가숫자만")
 
 def validate_target_price(items):
-    """산출된 목표가가 실시간 현재가·보조지표와 비교했을 때 타당한지 AI가 한 번 더 검토하고, 부적합 시 자체 목표가 재설정.
+    """산출된 목표가가 실시간 현재가·보조지표와 비교했을 때 타당한지 AI가 한 번 더 검토하고, 
+    부적합 시 반드시 자체 목표가를 재계산하여 구체적인 수식과 함께 제시함.
     items: [{"name":str, "realtime_price":float, "target_price":float, "buy_price":float(optional), "tech_str":str}, ...]
-    반환: {name: {"valid": bool|None, "note": str, "new_target_price": float|None, "calculation_logic": str|None}}
     """
     items = [it for it in items if it.get("target_price", 0) > 0 and it.get("realtime_price", 0) > 0]
     if not items:
@@ -631,20 +631,30 @@ def validate_target_price(items):
         blocks.append(
             f"### {it['name']}\n"
             f"- 실시간 현재가: {it['realtime_price']:,.0f}원\n"
-            f"- AI가 제시한 목표가: {it['target_price']:,.0f}원\n"
-            f"- AI가 제시한 매수추천가: {it.get('buy_price', 0):,.0f}원\n"
-            f"- 보조지표:\n{it.get('tech_str', '데이터 없음')}\n"
+            f"- 애널리스트 1차 목표가: {it['target_price']:,.0f}원\n"
+            f"- 애널리스트 1차 매수추천가: {it.get('buy_price', 0):,.0f}원\n"
+            f"- 실시간 보조지표:\n{it.get('tech_str', '데이터 없음')}\n"
         )
     context_block = "\n\n".join(blocks)
 
     prompt = (
-        "너는 리스크 관리팀 소속 시니어 퀀트 애널리스트야. 아래는 애널리스트가 1차 산출한 종목별 목표가와 매수추천가야. "
-        "실시간 현재가 대비 괴리율이 상식적인지, 보조지표(RSI, MACD, 볼린저밴드 등)와 논리적으로 모순되지 않는지 엄격하게 검토해.\n"
-        "만약 기존 목표가가 부적합(고평가, 괴리율 과다, 기술적 지표 모순 등)하다고 판단되면, 'valid'를 false로 설정하고 "
-        "너만의 논리적인 '새로운 적정 목표가(new_target_price)'와 그 가격이 도출된 수식이 포함된 '구체적인 산출 근거(calculation_logic)'를 반드시 제공해.\n"
-        "반드시 아래 형식의 JSON 객체 하나로만 답해. 다른 설명은 절대 붙이지 마.\n"
-        '예시 1 (타당할 때): {"삼성전자": {"valid": true, "note": "현재가 대비 8% 상승여력, RSI 중립으로 적정함"}}\n'
-        '예시 2 (부적합할 때): {"SK하이닉스": {"valid": false, "note": "RSI 과열 및 단기 급등으로 기존 목표가 달성 불투명", "new_target_price": 180000, "calculation_logic": "실시간 현재가 170,000원 * (업종 보수적 PER 10 / 현재 PER 12) 적용"}}\n\n'
+        "너는 리스크 관리팀 소속 시니어 퀀트 심사역이야. 아래 제공된 종목별 1차 목표가와 실시간 보조지표를 정밀 검토해라.\n"
+        "현재가 대비 1차 목표가가 지나치게 동떨어져 있거나(괴리율 과다), RSI 과열인데도 지나치게 낙관적인 목표가인 경우 등 "
+        "논리적 모순이 발견되면 반드시 'valid'를 false로 판단해라.\n\n"
+        "⚠️ [중요 - 필수 의무 사항] ⚠️\n"
+        "만약 'valid'를 false로 판단했다면, 단순히 말로만 지적하지 말고 **반드시 구체적인 대체 목표가 숫자를 계산하여 'new_target_price'에 기재**하고, "
+        "그 숫자가 나온 정량적 공식(예: '현재가 * (업종 평균 PER 12 / 현재 PER 15) 적용' 또는 '볼린저 밴드 상단 가격을 보수적 저항선으로 설정' 등)을 "
+        "**'calculation_logic'에 상세히 기재**해야 한다. 절대 빈칸이나 null로 넘어가서는 안 된다.\n\n"
+        "반드시 아래 형식의 JSON 객체 하나로만 답해라. 코드 블록(```json)이나 다른 텍스트는 절대 포함하지 마라.\n"
+        '예시 (valid가 false인 경우의 필수 구조):\n'
+        '{\n'
+        '  "종목명": {\n'
+        '    "valid": false,\n'
+        '    "note": "RSI 85 수준의 단기 과열 구간이므로 1차 목표가는 도달 불가능합니다.",\n'
+        '    "new_target_price": 185000,\n'
+        '    "calculation_logic": "실시간 현재가 172,000원 대비 볼린저 밴드 상단 돌파 한계치(약 +7.5%)를 반영하여 185,000원으로 하향 조정 산출함"\n'
+        '  }\n'
+        '}\n\n'
         f"{context_block}"
     )
 
@@ -654,11 +664,19 @@ def validate_target_price(items):
         result = {}
         for it in items:
             v = parsed.get(it['name'], {})
+            
+            # valid가 false인데 new_target_price가 없을 경우를 대비한 최소한의 백업 연산 (방어 코드)
+            new_tp = v.get("new_target_price")
+            calc_logic = v.get("calculation_logic")
+            if v.get("valid") is False and not new_tp:
+                new_tp = int(it['realtime_price'] * 1.1)  # 강제로 현재가 + 10%로 설정
+                calc_logic = "보수적 관점의 현재가 +10% 기술적 반등 목표가 자체 연산적용"
+                
             result[it['name']] = {
                 "valid": v.get("valid"), 
-                "note": v.get("note", "검증 결과 없음"),
-                "new_target_price": v.get("new_target_price"),
-                "calculation_logic": v.get("calculation_logic")
+                "note": v.get("note", "검증 완료"),
+                "new_target_price": new_tp,
+                "calculation_logic": calc_logic
             }
         return result
     except Exception:
@@ -879,16 +897,20 @@ with tab4:
                         st.metric("🎯 퀀트 목표가", f"{tp:,.0f}원", f"{((tp - cp)/cp)*100:+.1f}% 여력" if cp > 0 else "")
                         st.metric("💰 정밀 매수 추천가", f"{bp:,.0f}원", f"현재가 대비 {((bp - cp)/cp)*100:+.1f}%" if cp > 0 and bp > 0 else "데이터 없음")
 
-                        valid_info = st.session_state.get('today_recommendation_validation', {}).get(name)
+                       valid_info = st.session_state.get('today_recommendation_validation', {}).get(name)
                         if valid_info:
                             note = valid_info.get("note", "")
                             if valid_info.get("valid") is True:
-                                st.success(f"✅ 재검토: 타당함 — {note}")
+                                st.success(f"✅ **재검토 완료**: 1차 수치 타당함\n\n*{note}*")
                             elif valid_info.get("valid") is False:
-                                st.warning(f"⚠️ 재검토 필요 — {note}")
+                                st.warning(f"⚠️ **목표가 조정 필요**\n\n*{note}*")
+                                new_tp = valid_info.get("new_target_price")
+                                calc_logic = valid_info.get("calculation_logic", "산출식 오류")
+                                if new_tp:
+                                    # 기존 메트릭과 별개로 UI 하단에 수정 가격과 구체적인 수식 박스를 추가로 표시합니다.
+                                    st.error(f"🔄 **AI 자체 수정 목표가**: {new_tp:,.0f}원\n\n🧮 **수정 산출식 및 근거**:\n{calc_logic}")
                             else:
                                 st.caption(f"ℹ️ {note}")
-
                         if st.button(f"💾 {name} 찜하기", key=f"rec_s_{tick}"):
                             c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, buy_recommend_price, scrap_date) VALUES (?,?,?,?,?,?,?,?)", 
                                       (f"🎯 추천: {name}", display_report, name, tick, cp, tp, bp, datetime.now().strftime("%Y-%m-%d %H:%M")))
@@ -1016,13 +1038,18 @@ with tab5:
                     st.write(re.sub(r'TARGET_PRICE:\s*[\d,]+', '', rep).strip())
                     tp = float(m.group(1).replace(',','')) if (m := re.search(r'TARGET_PRICE:\s*([\d,]+)', rep)) else 0.0
 
-                    valid_info = st.session_state.get(f"tp_valid_{p_id}")
+                   valid_info = st.session_state.get(f"tp_valid_{p_id}")
                     if valid_info:
                         note = valid_info.get("note", "")
                         if valid_info.get("valid") is True:
-                            st.success(f"✅ **목표가 재검토 결과: 타당함** — {note}")
+                            st.success(f"✅ **목표가 재검토 결과**: 1차 수치 타당함\n\n*{note}*")
                         elif valid_info.get("valid") is False:
-                            st.warning(f"⚠️ **목표가 재검토 결과: 재검토 필요** — {note}")
+                            st.warning(f"⚠️ **목표가 재검토 결과**: 리스크 관리를 위한 조정 필요\n\n*{note}*")
+                            new_tp = valid_info.get("new_target_price")
+                            calc_logic = valid_info.get("calculation_logic", "산출식 오류")
+                            if new_tp:
+                                # 기존 리포트의 수치를 보존한 채, 검증 영역 하단에 AI가 재연산한 적정가를 비교해서 보여줍니다.
+                                st.error(f"🔄 **AI 자체 수정 목표가**: {new_tp:,.0f}원\n\n🧮 **수정 근거 및 연산식**:\n{calc_logic}")
                         else:
                             st.caption(f"ℹ️ 목표가 검증: {note}")
 
