@@ -4,11 +4,14 @@ import sqlite3
 import re
 import io
 import threading
+import requests
 from datetime import datetime
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google import genai
+
+MODEL_NAME = "gemini-3.5-flash"
 
 # =======================================================
 # 1. 페이지 설정 및 비밀번호 로그인
@@ -64,7 +67,10 @@ columns_to_add = [
     ("scrapbook", "target_price", "REAL DEFAULT 0.0"),
     ("scrapbook", "target_price_mid", "REAL DEFAULT 0.0"),
     ("scrapbook", "target_price_long", "REAL DEFAULT 0.0"),
-    ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0")
+    ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0"),
+    ("portfolio", "model_used", "TEXT"),
+    ("portfolio", "report_time", "TEXT"),
+    ("scrapbook", "model_used", "TEXT")
 ]
 
 for table, col, dtype in columns_to_add:
@@ -121,7 +127,7 @@ def call_gemini_with_fallback(prompt):
         return "API 호출 대기 시간 초과"
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        return client.models.generate_content(model='gemini-3.5-flash', contents=prompt).text
+        return client.models.generate_content(model=MODEL_NAME, contents=prompt).text
     except Exception as e:
         return f"호출 실패: {e}"
     finally:
@@ -134,16 +140,82 @@ def call_gemini_stream_with_fallback(prompt):
         return
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        for chunk in client.models.generate_content_stream(model='gemini-3.5-flash', contents=prompt):
+        for chunk in client.models.generate_content_stream(model=MODEL_NAME, contents=prompt):
             if chunk.text:
                 yield chunk.text
     finally:
         _gemini_semaphore.release()
 
+def parse_won(s):
+    """AI가 '72만원', '1.5억원' 처럼 한글 단위를 섞어 써도 정확한 원 단위 숫자로 변환.
+    단위를 무시하고 숫자만 추출하면 자릿수가 통째로 날아가므로(예: 72만원 -> 72원),
+    조/억/만 단위를 먼저 인식해서 배수를 곱해준다."""
+    if not s:
+        return 0.0
+    s = str(s).strip()
+    multiplier = 1
+    if '조' in s:
+        multiplier = 1_000_000_000_000
+        s = s.split('조')[0]
+    elif '억' in s:
+        multiplier = 100_000_000
+        s = s.split('억')[0]
+    elif '만' in s:
+        multiplier = 10_000
+        s = s.split('만')[0]
+    num_str = re.sub(r'[^\d.]', '', s)
+    return float(num_str) * multiplier if num_str else 0.0
+
+def fetch_current_prices(codes):
+    """네이버 증권 실시간 시세 조회 (6자리 KRX 종목코드 기준).
+    반환: {코드: {"current":.., "diff":.., "diff_pct":..}}"""
+    valid_codes = []
+    for c in codes:
+        digits = re.sub(r'[^\d]', '', str(c or ""))
+        if len(digits) == 6:
+            valid_codes.append(digits)
+    if not valid_codes:
+        return {}
+    try:
+        url = f"https://polling.finance.naver.com/api/realtime/domestic/stock/{','.join(valid_codes)}"
+        res = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
+        payload = res.json()
+    except Exception:
+        return {}
+
+    def find_datas(obj):
+        if isinstance(obj, dict):
+            if "datas" in obj and isinstance(obj["datas"], list):
+                return obj["datas"]
+            for v in obj.values():
+                found = find_datas(v)
+                if found is not None:
+                    return found
+        return None
+
+    datas = find_datas(payload) or []
+    out = {}
+    for item in datas:
+        code = str(item.get("itemCode") or item.get("code") or item.get("cd") or "")
+        def to_f(*keys):
+            for k in keys:
+                if k in item and item[k] not in (None, ""):
+                    try:
+                        return float(str(item[k]).replace(",", ""))
+                    except ValueError:
+                        continue
+            return 0.0
+        out[code] = {
+            "current": to_f("closePrice", "nv"),
+            "diff": to_f("compareToPreviousClosePrice", "cv"),
+            "diff_pct": to_f("fluctuationsRatio", "cr"),
+        }
+    return out
+
 def build_prompt_deep_dive(stock_name, market_str):
     return (f"[{stock_name} 진단]\n[시장 지표]\n{market_str}\n\n위 데이터를 바탕으로 객관적인 진단 리포트를 작성하십시오.\n"
             f"1. 🏢 재무 및 펀더멘털 분석\n2. 🌐 뉴스/수급 분석\n"
-            f"※ 반드시 마지막 줄에 파싱을 위해 아래 형식으로만 적으세요.\n"
+            f"※ 반드시 마지막 줄에 파싱을 위해 아래 형식으로만 적으세요. 가격은 '만원/억원' 등 단위 없이 원 단위 순수 숫자만 적으세요.\n"
             f"TARGET_PRICE: 단기숫자만|중기숫자만|장기숫자만|매수추천가숫자만")
 
 def build_prompt_recommend_step3(news_list, market_str, horizon):
@@ -160,7 +232,8 @@ def build_prompt_recommend_step3(news_list, market_str, horizon):
             f"  └ 🧮 1차 퀀트 연산: [산출 가격]원 (공식 명시)\n"
             f"  └ 🧠 2차 정성 수정: (가감 논리 명시)\n"
             f"- 💰 진입 타점: [진입가]원\n\n"
-            f"※ 반드시 마지막 줄에 파싱을 위해 아래 형식으로만 적으세요.\n"
+            f"※ 반드시 마지막 줄에 파싱을 위해 아래 형식으로만 적으세요. 가격은 '만원/억원' 등 단위 없이 원 단위 순수 숫자만 적으세요.\n"
+            f"티커는 반드시 KRX 6자리 종목코드로 적으세요 (예: 005930).\n"
             f"[TRACKING_DATA]\n"
             f"종목명1|티커1|최종목표가숫자만|진입타점숫자만\n"
             f"종목명2|티커2|최종목표가숫자만|진입타점숫자만\n"
@@ -214,10 +287,12 @@ with tab1:
         prompt = f"최신 뉴스 브리핑:\n[지표]: {market_data_str}\n" + "\n".join([n['title'] for n in news_list])
         with st.spinner("AI가 뉴스를 분석하고 있습니다..."):
             st.session_state.realtime_analysis = "".join(call_gemini_stream_with_fallback(prompt))
+            st.session_state.realtime_analysis_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     if st.session_state.get("realtime_analysis"):
         with st.expander("🤖 AI 분석 결과", expanded=True):
             st.write(st.session_state.realtime_analysis)
+            st.caption(f"🧠 생성 모델: {MODEL_NAME} · {st.session_state.get('realtime_analysis_time', '')}")
 
     for news in news_list:
         with st.expander(f"🕒 {news['title']}"):
@@ -247,33 +322,60 @@ with tab4:
         prompt = build_prompt_recommend_step3(rec_news, market_data_str, investment_horizon)
         with st.spinner("AI가 종목을 발굴하고 있습니다..."):
             st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(prompt))
+            st.session_state.today_recommendation_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
         with st.expander("🤖 AI 추천 리포트", expanded=True):
             st.write(raw.split("[TRACKING_DATA]")[0].strip())
+            st.caption(f"🧠 생성 모델: {MODEL_NAME} · {st.session_state.get('today_recommendation_time', '')}")
 
             if "[TRACKING_DATA]" in raw:
-                cols_rec = st.columns(3)
                 block = raw.split("[TRACKING_DATA]")[1].strip().replace("```", "")
-                for idx, line in enumerate(block.split('\n')):
+
+                parsed_rows = []
+                for line in block.split('\n'):
                     if not line.strip():
                         continue
                     data = line.split('|')
                     if len(data) >= 4:
                         name, tick = data[0].strip(), data[1].strip()
-                        def extr(ix):
-                            val_str = re.sub(r'[^\d.]', '', data[ix])
-                            return float(val_str) if val_str else 0.0
-                        tp, bp = extr(2), extr(3)
+                        tp, bp = parse_won(data[2]), parse_won(data[3])
+                        parsed_rows.append((name, tick, tp, bp))
 
-                        with cols_rec[idx % 3]:
-                            st.info(f"**{name}** ({tick})")
-                            st.metric("🎯 최종 목표가", f"{tp:,.0f}원")
-                            st.metric("💰 매수 추천가", f"{bp:,.0f}원")
-                            if st.button(f"💾 찜하기", key=f"rec_s_{tick}"):
-                                c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, buy_recommend_price, scrap_date) VALUES (?,?,?,?,?,?,?,?)",
-                                          (f"🎯 추천: {name}", raw, name, tick, 0.0, tp, bp, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                # 종목별 현재가는 한 번에 배치 조회 (API 호출 최소화)
+                price_map = fetch_current_prices([r[1] for r in parsed_rows])
+
+                cols_rec = st.columns(3)
+                for idx, (name, tick, tp, bp) in enumerate(parsed_rows):
+                    code = re.sub(r'[^\d]', '', tick)
+                    price_info = price_map.get(code, {})
+                    current = price_info.get("current", 0.0)
+                    diff = price_info.get("diff", 0.0)
+                    diff_pct = price_info.get("diff_pct", 0.0)
+
+                    with cols_rec[idx % 3]:
+                        with st.container(border=True):
+                            st.markdown(f"**{name}** `{tick}`")
+                            if current > 0:
+                                st.metric("현재가", f"{current:,.0f}원", delta=f"{diff:+,.0f}원 ({diff_pct:+.2f}%)")
+                            else:
+                                st.metric("현재가", "조회 실패", delta="종목코드 확인 필요", delta_color="off")
+
+                            c_tp, c_bp = st.columns(2)
+                            c_tp.metric("🎯 목표가", f"{tp:,.0f}원")
+                            c_bp.metric("💰 매수 추천가", f"{bp:,.0f}원")
+
+                            if current > 0 and tp > 0:
+                                gap_pct = (tp - current) / current * 100
+                                if gap_pct >= 0:
+                                    st.caption(f"🎯 목표가까지 **+{gap_pct:.1f}%** 남음")
+                                else:
+                                    st.caption(f"🎯 목표가 대비 **{gap_pct:.1f}%** 초과 달성")
+
+                            if st.button("💾 찜하기", key=f"rec_s_{tick}", use_container_width=True):
+                                c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, buy_recommend_price, scrap_date, model_used) VALUES (?,?,?,?,?,?,?,?,?)",
+                                          (f"🎯 추천: {name}", raw, name, tick, current, tp, bp, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME))
                                 conn.commit()
                                 st.success("스크랩 완료!")
 
@@ -293,11 +395,11 @@ with tab5:
             conn.commit()
             st.rerun()
 
-    c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp FROM portfolio")
+    c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time FROM portfolio")
     portfolios = c.fetchall()
 
     for p in portfolios:
-        p_id, name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp = p
+        p_id, name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time = p
         st.markdown(f"### 📌 [{name}]")
         col_info, col_btn = st.columns([3, 1])
         with col_info:
@@ -310,15 +412,13 @@ with tab5:
                 with st.spinner("AI가 진단하고 있습니다..."):
                     report = call_gemini_with_fallback(build_prompt_deep_dive(name, market_data_str))
                 tp_match = re.search(r'TARGET_PRICE:\s*([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|(.*)', report)
-                def extr(s):
-                    val_str = re.sub(r'[^\d.]', '', s) if s else ""
-                    return float(val_str) if val_str else 0.0
-                n_tp_s = extr(tp_match.group(1)) if tp_match else 0.0
-                n_tp_m = extr(tp_match.group(2)) if tp_match else 0.0
-                n_tp_l = extr(tp_match.group(3)) if tp_match else 0.0
-                n_bp = extr(tp_match.group(4)) if tp_match else 0.0
+                n_tp_s = parse_won(tp_match.group(1)) if tp_match else 0.0
+                n_tp_m = parse_won(tp_match.group(2)) if tp_match else 0.0
+                n_tp_l = parse_won(tp_match.group(3)) if tp_match else 0.0
+                n_bp = parse_won(tp_match.group(4)) if tp_match else 0.0
+                report_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-                c.execute("UPDATE portfolio SET report_text=?, tp_s=?, tp_m=?, tp_l=?, bp=? WHERE id=?", (report, n_tp_s, n_tp_m, n_tp_l, n_bp, p_id))
+                c.execute("UPDATE portfolio SET report_text=?, tp_s=?, tp_m=?, tp_l=?, bp=?, model_used=?, report_time=? WHERE id=?", (report, n_tp_s, n_tp_m, n_tp_l, n_bp, MODEL_NAME, report_time, p_id))
                 conn.commit()
                 st.rerun()
 
@@ -326,16 +426,17 @@ with tab5:
             with st.expander("📝 AI 진단 리포트", expanded=True):
                 st.info(f"**단기:** {tp_s:,.0f}원  |  **중기:** {tp_m:,.0f}원  |  **장기:** {tp_l:,.0f}원  |  **💰매수추천:** {bp:,.0f}원")
                 st.write(re.sub(r'TARGET_PRICE:.*', '', report_text).strip())
+                st.caption(f"🧠 생성 모델: {model_used or MODEL_NAME} · {report_time or ''}")
                 if st.button("💾 스크랩북에 저장", key=f"save_{p_id}"):
-                    c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                              (f"[{name}] 리포트", "진단", report_text, datetime.now().strftime("%Y-%m-%d %H:%M"), name, 0.0, tp_s, tp_m, tp_l, bp))
+                    c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, model_used) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                              (f"[{name}] 리포트", "진단", report_text, datetime.now().strftime("%Y-%m-%d %H:%M"), name, 0.0, tp_s, tp_m, tp_l, bp, model_used or MODEL_NAME))
                     conn.commit()
                     st.success("저장 완료")
         st.divider()
 
     if portfolios:
         st.subheader("🗑️ 관심종목 삭제")
-        to_delete = st.multiselect("삭제할 종목을 선택하세요", [name for _, name, _, _, _, _, _, _, _, _ in portfolios])
+        to_delete = st.multiselect("삭제할 종목을 선택하세요", [p[1] for p in portfolios])
         if st.button("선택 종목 삭제", type="primary"):
             for d_name in to_delete:
                 c.execute("DELETE FROM portfolio WHERE stock_name=?", (d_name,))
@@ -344,7 +445,7 @@ with tab5:
 
 with tab6:
     st.subheader("📁 내 스크랩북")
-    c.execute("SELECT id, title, analysis, scrap_date, stock_name, saved_price, target_price, buy_recommend_price, target_price_mid, target_price_long FROM scrapbook ORDER BY id DESC")
+    c.execute("SELECT id, title, analysis, scrap_date, stock_name, saved_price, target_price, buy_recommend_price, target_price_mid, target_price_long, model_used FROM scrapbook ORDER BY id DESC")
     scraps = c.fetchall()
 
     col_ctrl1, _ = st.columns([1, 4])
@@ -362,6 +463,7 @@ with tab6:
     for s in scraps:
         scrap_id, title, analysis, scrap_date, stock_name, saved_price = s[0], s[1], s[2], s[3], s[4], float(s[5] or 0)
         tp_s, b_rec, tp_m, tp_l = float(s[6] or 0), float(s[7] or 0), float(s[8] or 0), float(s[9] or 0)
+        model_used = s[10] if len(s) > 10 else None
 
         col_chk, col_exp = st.columns([0.05, 0.95])
         with col_chk:
@@ -374,3 +476,4 @@ with tab6:
                 cols_sc[1].markdown(f"**🎯 밴드**<br>단기: {tp_s:,.0f}<br>중기: {tp_m:,.0f}<br>장기: {tp_l:,.0f}", unsafe_allow_html=True)
                 cols_sc[2].metric("💰 매수 추천", f"{b_rec:,.0f}원" if b_rec > 0 else "기록 없음")
                 st.write(analysis)
+                st.caption(f"🧠 생성 모델: {model_used or '정보 없음 (이전 저장분)'}")
