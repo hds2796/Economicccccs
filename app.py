@@ -588,10 +588,10 @@ f"※ 반드시 마지막 줄에 파싱을 위해 아래 형식으로만 적으�
 f"[TRACKING_DATA]\n"
             f"종목명1|티커1|최종목표가숫자만|진입타점숫자만\n"
             f"종목명2|티커2|최종목표가숫자만|진입타점숫자만\n"
-            f"종목명3|티커3|최종목표가숫자만|진입타점숫자만")
+            f"종목명3|티커3|최종목표가숫자만|진입타점숫자만"
             f"종목명1|티커1|단일최종목표가숫자만|진입타점숫자만\n"
             f"종목명2|티커2|단일최종목표가숫자만|진입타점숫자만\n"
-            f"종목명3|티커3|단일최종목표가숫자만|진입타점숫자만")
+            f"종목명3|티커3|단일최종목표가숫자만|진입타점숫자만"
 
 def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str, tech_str, supply_str):
 fin_data = get_financial_data(ticker)
