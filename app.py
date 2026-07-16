@@ -575,9 +575,9 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str):
             f"### 🏆 [최종 추천 종목 3개]\n"
             f"1. 🥇 추천종목: [종목명] (티커)\n"
             f"- 선정 근거: (뉴스 모멘텀 및 수급 서술)\n"
-            f"- 🎯 단기 목표가 (1~3개월): [도출된 가격]\n"
-            f"- 🎯 중기 목표가 (3~6개월): [도출된 가격]\n"
-            f"- 🎯 장기 목표가 (1년 이상): [도출된 가격]\n"
+            f"- 🎯 단기 목표가 (1~3개월): [도출된 가격] (차트 저항선 및 수급 모멘텀을 포함한 상세한 산출 근거)\n"
+            f"- 🎯 중기 목표가 (3~6개월): [도출된 가격] (예상 EPS, 적정 PER 등 펀더멘털을 포함한 상세한 산출 근거)\n"
+            f"- 🎯 장기 목표가 (1년 이상): [도출된 가격] (해당 산업의 연평균 성장률(CAGR) 및 거시 경제를 포함한 상세한 산출 근거)\n"
             f"- 💰 매수 추천가: [진입가]\n\n"
             f"(2번, 3번 종목 동일하게 작성)\n\n"
             f"※ 반드시 마지막 줄에 파싱을 위해 아래 형식으로만 적으세요. 다른 글자나 설명 추가 절대 금지.\n"
@@ -607,7 +607,7 @@ def validate_target_price(items):
         "⚠️ [중요 - 필수 의무 사항] ⚠️\n"
         "만약 'valid'를 false로 판단했다면, 단순히 말로만 지적하지 말고 **반드시 구체적인 대체 목표가 숫자를 계산하여 "
         "'new_target_price_short', 'new_target_price_mid', 'new_target_price_long'에 기재**하고, "
-        "그 숫자가 나온 공식이나 논리를 'calculation_logic'에 상세히 기재해라.\n\n"
+        "그 숫자가 나온 공식을 'calculation_logic'에 기재해라. 이때 **단기(차트/수급), 중기(실적/PER), 장기(산업성장률/매출) 각각의 관점에서 왜 해당 가격이 도출되었는지 구체적인 수치(EPS, PER, 저항선 등)를 포함하여 3문장 이상 상세하게 서술해라.**\n\n"
         "반드시 아래 형식의 JSON 객체 하나로만 답해라. 코드 블록(```json)을 써도 좋고 안 써도 좋으니 JSON 형식만 완벽히 지켜라.\n"
         '예시:\n'
         '{\n'
@@ -617,7 +617,7 @@ def validate_target_price(items):
         '    "new_target_price_short": 185000,\n'
         '    "new_target_price_mid": 195000,\n'
         '    "new_target_price_long": 220000,\n'
-        '    "calculation_logic": "실시간 현재가 대비 보수적 상승률(5%, 10%, 20%) 반영"\n'
+        '    "calculation_logic": "[단기] RSI 85 과열로 인한 조정 대비 +5% 저항선 설정. [중기] 내년 예상 EPS 4,500원 및 보수적 PER 12배 적용. [장기] 해당 섹터 연평균 성장률(CAGR) 15% 복리 반영."\n'
         '  }\n'
         '}\n\n'
         f"{context_block}"
@@ -641,7 +641,7 @@ def validate_target_price(items):
                 new_tp_s = int(it['realtime_price'] * 1.05)
                 new_tp_m = int(it['realtime_price'] * 1.1)
                 new_tp_l = int(it['realtime_price'] * 1.2)
-                calc_logic = "보수적 관점의 자체 연산 (단기 +5%, 중기 +10%, 장기 +20%) 강제 적용"
+                calc_logic = "[단기] 5% 단기 저항선 반영. [중기] 10% 실적 컨센서스 상승치 반영. [장기] 20% 산업 거시 성장률 적용."
                 
             result[it['name']] = {
                 "valid": v.get("valid"), 
@@ -670,7 +670,10 @@ def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, q
             f"1. 🏢 재무 및 펀더멘털 분석\n"
             f"2. 🌐 뉴스/수급 분석\n"
             f"3. 📊 투자의견\n"
-            f"4. 💰 단기(1~3개월), 중기(3~6개월), 장기(1년 이상) 적정 목표가 제시\n\n"
+            f"4. 💰 기간별 적정 목표가 상세 산출 논리\n"
+            f"   - 단기(1~3개월): [가격] (볼린저 밴드, 매물대 등 기술적 분석 상세 서술)\n"
+            f"   - 중기(3~6개월): [가격] (실적 추정치, 동종업계 PER 비교 상세 서술)\n"
+            f"   - 장기(1년 이상): [가격] (거시 경제, 산업 재편, 핵심 파이프라인 가치 상세 서술)\n\n"
             f"※ 마지막 줄에 시스템 파싱을 위해 반드시 아래 포맷으로만 기재하십시오. (다른 글자 추가 금지)\n"
             f"TARGET_PRICE: 단기숫자|중기숫자|장기숫자")
 
