@@ -89,24 +89,44 @@ with st.sidebar:
             flow = Flow.from_client_config(client_config, scopes=['https://www.googleapis.com/auth/drive.file'], redirect_uri=st.secrets["REDIRECT_URI"])
             auth_url, _ = flow.authorization_url(prompt='consent')
             
-            # [복구된 원래 방식] 군더더기 없이 깔끔한 텍스트 하이퍼링크로 복구
             st.markdown(f'[👉 구글 계정으로 로그인하기]({auth_url})')
             
+            # [핵심 수정]: 스트림릿의 Session State 유실을 우회하는 직접 통신 로직
             if "code" in st.query_params:
-                flow.fetch_token(code=st.query_params["code"])
-                creds = flow.credentials
-                # ... 이하 기존 코드 동일 ...
-                creds = flow.credentials
-                st.session_state['google_auth_token'] = {
-                    'token': creds.token, 
-                    'refresh_token': creds.refresh_token, 
-                    'token_uri': creds.token_uri, 
-                    'client_id': creds.client_id, 
-                    'client_secret': creds.client_secret, 
-                    'scopes': creds.scopes
-                }
-                st.query_params.clear()
-                st.rerun()
+                code = st.query_params["code"]
+                try:
+                    import urllib.request
+                    import urllib.parse
+                    cfg = client_config["web"]
+                    data = urllib.parse.urlencode({
+                        "code": code,
+                        "client_id": cfg["client_id"],
+                        "client_secret": cfg["client_secret"],
+                        "redirect_uri": st.secrets["REDIRECT_URI"],
+                        "grant_type": "authorization_code"
+                    }).encode("utf-8")
+                    req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+                    with urllib.request.urlopen(req, timeout=5) as res:
+                        tok = json.loads(res.read().decode("utf-8"))
+                        st.session_state['google_auth_token'] = {
+                            'token': tok.get('access_token'),
+                            'refresh_token': tok.get('refresh_token'),
+                            'token_uri': 'https://oauth2.googleapis.com/token',
+                            'client_id': cfg["client_id"],
+                            'client_secret': cfg["client_secret"],
+                            'scopes': ['https://www.googleapis.com/auth/drive.file']
+                        }
+                        st.query_params.clear()
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"❌ 연동 실패 (토큰 교환 에러): {e}")
+        except Exception as e:
+            st.warning("Client Config 세팅이 필요합니다.")
+    else:
+        st.success("✅ 드라이브 연동 완료")
+        if st.button("연동 해제", use_container_width=True):
+            del st.session_state['google_auth_token']
+            st.rerun()
         except Exception:
             st.warning("Client Config 세팅이 필요합니다.")
     else:
