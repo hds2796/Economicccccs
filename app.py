@@ -236,21 +236,16 @@ def raw_calculate_technical_indicators(ticker, realtime_price=None):
             df = yf.Ticker(ticker).history(period="1y")
             
         if df is not None and not df.empty:
-            df = df.dropna(subset=['Close']) # 종가 없는 날은 삭제
-
-        # 💡 [실시간 연동] yfinance의 마지막 봉은 전일 종가(장중엔 아예 당일 데이터가 없거나 지연됨).
-        # 실시간 현재가가 주어지면 이를 "오늘의 종가"로 반영해서 MA/RSI/MACD/볼린저가
-        # 실시간 주가 기준으로 재계산되도록 한다.
+            df = df.dropna(subset=['Close'])
+            
         if df is not None and not df.empty and realtime_price and realtime_price > 0:
             today_kst = datetime.now(timezone(timedelta(hours=9))).date()
             last_idx = df.index[-1]
             if last_idx.date() == today_kst:
-                # 오늘자 봉이 이미 있으면 실시간가로 갱신
                 df.loc[last_idx, 'Close'] = realtime_price
                 df.loc[last_idx, 'High'] = max(df.loc[last_idx, 'High'], realtime_price)
                 df.loc[last_idx, 'Low'] = min(df.loc[last_idx, 'Low'], realtime_price)
             else:
-                # 오늘자 봉이 아직 없으면(장중 지연/휴장 등) 실시간가로 새 행을 추가
                 new_row = df.iloc[[-1]].copy()
                 new_row.index = [pd.Timestamp(today_kst)]
                 new_row['Close'] = realtime_price
@@ -259,14 +254,10 @@ def raw_calculate_technical_indicators(ticker, realtime_price=None):
                 df = pd.concat([df, new_row])
             
         if df is not None and len(df) >= 2: 
-            # 💡 [핵심 패치] 꼼수 제거. 엄격하게 20일, 60일 거래일이 꽉 차야만 연산! 모자라면 자연스럽게 NaN 발생.
             ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
             ma60 = float(df['Close'].rolling(60).mean().iloc[-1])
-            
-            # 52주 고점/저점도 최소 100일 이상의 데이터가 있을 때만 인정
             high52 = float(df['High'].rolling(252, min_periods=100).max().iloc[-1])
             low52 = float(df['Low'].rolling(252, min_periods=100).min().iloc[-1])
-            
             std20 = float(df['Close'].rolling(20).std().iloc[-1])
             bb_upper = float(ma20 + (std20 * 2))
             bb_lower = float(ma20 - (std20 * 2))
@@ -283,7 +274,6 @@ def raw_calculate_technical_indicators(ticker, realtime_price=None):
             rs = gain / loss if loss > 0 else 0
             rsi = float(100 - (100 / (1 + rs)) if loss > 0 else 100)
             
-            # 💡 포맷팅 헬퍼: NaN(데이터 없음)일 경우 에러 대신 "데이터 부족" 정직하게 출력
             def fmt(val, is_price=True):
                 if math.isnan(val): return "데이터 부족"
                 return f"{val:,.0f}원" if is_price else f"{val:+.2f}"
@@ -301,6 +291,7 @@ def raw_calculate_technical_indicators(ticker, realtime_price=None):
     except Exception as e: 
         pass
     return "- 기술적 지표 연산 불가 (데이터 누락)"
+
 def raw_fetch_naver_disclosures(ticker):
     try:
         code_match = re.search(r'\d{6}', ticker)
@@ -354,7 +345,7 @@ def raw_fetch_supply_demand_trend(ticker):
 
 
 # =======================================================
-# 💡 [핵심] 4단계 폭포수 우회 및 에러 추적 (스트리밍 버그 완벽 수정)
+# 💡 [핵심] 4단계 폭포수 우회 및 에러 추적
 # =======================================================
 def get_fallback_models(use_lite):
     if use_lite:
@@ -365,16 +356,10 @@ def get_fallback_models(use_lite):
         ('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite (Fallback)')
     ]
 
-# 포트폴리오 종목이 늘어나면 ThreadPoolExecutor(max_workers=10)가 Gemini를 동시에 여러 번 호출해
-# 프리뷰 모델 용량을 순간적으로 초과시켜 503을 유발함. 뉴스/주가 스크래핑 병렬성은 그대로 두고
-# Gemini 호출만 별도로 "동시에 최대 N개"로 제한한다.
 GEMINI_CONCURRENCY_LIMIT = 3
 _gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
-GEMINI_ACQUIRE_TIMEOUT = 25  # 슬롯이 이 시간 안에 안 비면 무한 대기 대신 에러로 전환
+GEMINI_ACQUIRE_TIMEOUT = 25  
 
-# 3.5-flash처럼 트래픽이 몰리는 모델이 일시적으로 503을 내도, 우리 폴백(다음 모델로 이동)으로
-# 넘어가기 전에 SDK 레벨에서 짧게 몇 번 더 재시도해본다. attempts=3, 1초~4초 지수 백오프.
-# (초당 여러 번 재시도하는 게 아니라 짧은 지연 후 재시도이므로 세마포어 대기시간에 큰 영향 없음)
 GEMINI_HTTP_OPTIONS = genai_types.HttpOptions(
     retry_options=genai_types.HttpRetryOptions(
         attempts=3,
@@ -406,7 +391,7 @@ def call_gemini_with_fallback(prompt, is_json=False, use_lite=False):
                 if not is_json:
                     badge_name = base_badge
                     if idx > 0: badge_name += f" - ⚠️ 우회 사유: {last_error}"
-                    res = f"*(🤖 **엔진 식별 프로토콜:** `[💡 {badge_name}]`)*\n\n" + res
+                    res = f"*(🤖 **AI 엔진:** `[{badge_name}]`)*\n\n" + res
                 return res
             except Exception as e:
                 last_error = get_clean_error(e, m)
@@ -428,36 +413,29 @@ def call_gemini_stream_with_fallback(prompt):
 
         for idx, (m, base_badge) in enumerate(models):
             try:
-                # 1. 일단 서버에 요청을 보냅니다.
                 response = client.models.generate_content_stream(model=m, contents=prompt)
                 iterator = iter(response)
-
-                # 2. 명찰을 달기 전에 첫 번째 데이터 덩어리를 끄집어내 봅니다. (여기서 503, 404 에러가 터집니다)
                 first_chunk = next(iterator)
 
-                # 3. 에러 없이 무사히 통과했다면? 드디어 화면에 명찰을 1번만 당당하게 박습니다!
                 badge_name = base_badge
                 if idx > 0: badge_name += f" - ⚠️ 우회 사유: {last_error}"
-                yield f"*(🤖 **엔진 식별 프로토콜:** `[💡 {badge_name}]`)*\n\n"
+                yield f"*(🤖 **AI 엔진:** `[{badge_name}]`)*\n\n"
 
-                # 4. 아까 꺼내둔 첫 번째 글자를 화면에 찍어주고, 나머지도 이어서 출력합니다.
                 if first_chunk.text: yield first_chunk.text
                 for chunk in iterator:
                     if chunk.text: yield chunk.text
-                return # 성공적으로 다 썼으니 여기서 함수 종료!
+                return 
 
             except StopIteration:
                 return
             except Exception as e:
-                # 에러가 터지면 명찰을 찍지 않고, 다음 모델(예비 타이어)로 넘어갑니다.
                 last_error = get_clean_error(e, m)
                 continue
 
-        # 모든 모델(3.5 -> 3 -> 2.5 -> 3.1)이 다 터졌을 때만 띄우는 최후의 에러 메시지
         yield f"\n\n🚨 **분석 실패:** 서버 과부하 또는 한도 초과로 분석을 완료하지 못했습니다. (사유: {last_error})"
     finally:
-        # 정상 종료/예외/제너레이터 강제 중단(GeneratorExit) 어떤 경우든 반드시 슬롯 반납
         _gemini_semaphore.release()
+
 # =======================================================
 # 기존 캐시 및 데이터 연산 유닛
 # =======================================================
@@ -482,12 +460,6 @@ def filter_news_with_gemini_lite(raw_news_list):
     return raw_news_list[:12]
 
 def filter_news_with_gemini_lite_batch(stocks_news_map):
-    """여러 종목의 뉴스를 한 번의 Gemini 호출로 일괄 필터링.
-    종목별로 따로 호출하던 것을 하나로 묶어서, 포트폴리오 새로고침 시 발생하던
-    동시다발적 Gemini 호출(503 유발 원인)을 근본적으로 줄인다.
-    stocks_news_map: {p_id(str 또는 int): raw_news_list}
-    반환: {str(p_id): filtered_news_list}
-    """
     stocks_news_map = {str(k): v for k, v in stocks_news_map.items() if v}
     if not stocks_news_map:
         return {}
@@ -517,7 +489,6 @@ def filter_news_with_gemini_lite_batch(stocks_news_map):
             result[p_id] = filtered if filtered else news_list[:12]
         return result
     except Exception:
-        # 실패 시 종목별로 상위 12개만 보수적으로 반환 (기존 단건 함수의 폴백과 동일한 안전망)
         return {p_id: news_list[:12] for p_id, news_list in stocks_news_map.items()}
 
 def fetch_unique_realtime_news(query):
@@ -594,10 +565,9 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
             f"[예비 후보 5종목 팩트체크 데이터 (현재가 및 등락률 포함)]:\n{candidate_context}\n"
             f"[최신 관련 뉴스 팩트]:\n{combined}\n\n"
             f"위 데이터를 분석하여, '{investment_horizon}' 투자에 부적합한 종목 2개를 먼저 제외하고, 최종 3개만 엄선하여 보고서를 작성하십시오.\n\n"
-            f"⚠️ 절대 주의사항 (Chain-of-Thought 수학적 논리 전개) ⚠️\n"
+            f"⚠️ 절대 주의사항 ⚠️\n"
             f"1. 목표가 산출 시, 반드시 위 [예비 후보 5종목 팩트체크 데이터]에 제공된 '실시간 현재가' 숫자를 그대로 사용해 "
-            f"`[실시간 현재가 × (동종업계 적정 PER 추정치 ÷ 현재 PER)]` 수식을 텍스트로 적고 직접 계산하여 목표가를 산출하십시오. "
-            f"임의로 다른 현재가를 가정하거나 반올림하지 마십시오.\n"
+            f"`[실시간 현재가 × (동종업계 적정 PER 추정치 ÷ 현재 PER)]` 수식을 텍스트로 적고 직접 계산하여 목표가를 산출하십시오.\n"
             f"2. 매수추천가 산출 시, 반드시 제공된 보조지표 중 `볼린저 밴드 하단` 또는 `장기 이평선`, `52주 최저가` 중 하나를 언급하며 방어적인 진입가를 수식처럼 작성하십시오.\n"
             f"3. 탈락시킨 2개 종목은 아래 '최종 추천 종목' 목록에 절대 중복되면 안 됩니다.\n\n"
             f"[보고서 필수 양식]\n"
@@ -618,10 +588,8 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
             f"종목명3|티커3|목표가숫자만|매수추천가숫자만")
 
 def validate_target_price(items):
-    """산출된 목표가가 실시간 현재가·보조지표와 비교했을 때 타당한지 AI가 한 번 더 검토하고, 
-    부적합 시 반드시 자체 목표가를 재계산하여 구체적인 수식과 함께 제시함.
-    items: [{"name":str, "realtime_price":float, "target_price":float, "buy_price":float(optional), "tech_str":str}, ...]
-    """
+    """산출된 목표가가 실시간 현재가·보조지표와 비교했을 때 타당한지 AI가 한 번 더 검토하고,
+    부적합 시 반드시 자체 목표가를 재계산하여 구체적인 수식과 함께 제시함."""
     items = [it for it in items if it.get("target_price", 0) > 0 and it.get("realtime_price", 0) > 0]
     if not items:
         return {}
@@ -665,11 +633,10 @@ def validate_target_price(items):
         for it in items:
             v = parsed.get(it['name'], {})
             
-            # valid가 false인데 new_target_price가 없을 경우를 대비한 최소한의 백업 연산 (방어 코드)
             new_tp = v.get("new_target_price")
             calc_logic = v.get("calculation_logic")
             if v.get("valid") is False and not new_tp:
-                new_tp = int(it['realtime_price'] * 1.1)  # 강제로 현재가 + 10%로 설정
+                new_tp = int(it['realtime_price'] * 1.1)
                 calc_logic = "보수적 관점의 현재가 +10% 기술적 반등 목표가 자체 연산적용"
                 
             result[it['name']] = {
@@ -731,7 +698,7 @@ with tab1:
         st.session_state.realtime_analysis = st.write_stream(call_gemini_stream_with_fallback(build_prompt_realtime(st.session_state.current_realtime_news[:20], market_data_str)))
         st.rerun()
     if st.session_state.realtime_analysis:
-        with st.expander("📊 AI 종합 브리핑", expanded=True):
+        with st.expander("📊 AI 실시간 시황 종합 브리핑", expanded=True):
             st.write(st.session_state.realtime_analysis)
             if st.button("💾 이 리포트 스크랩", key="sc_rt_all"):
                 c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date) VALUES (?, ?, ?, ?)", ("📰 실시간 시황 종합 브리핑", "실시간 수집 기반 요약", st.session_state.realtime_analysis, datetime.now().strftime("%Y-%m-%d %H:%M"))); conn.commit(); st.success("저장 완료")
@@ -763,7 +730,7 @@ with tab2:
     
     col_e1, col_e2 = st.columns([4, 1])
     with col_e1:
-        if st.button("마켓 브리핑 리포트 생성", type="primary", use_container_width=True):
+        if st.button("🤖 AI 종합 마켓 브리핑 리포트 생성", type="primary", use_container_width=True):
             res = call_gemini_with_fallback(build_prompt_overall(get_naver_news(eco_query, display=50, sort_type="date"), market_data_str))
             score = int(m.group(1)) if (m := re.search(r'SCORE:\s*(\d+)', res)) else 50
             c.execute("INSERT INTO market_score_history (check_date, score) VALUES (?, ?)", (datetime.now().strftime("%Y-%m-%d %H:%M"), score)); conn.commit()
@@ -773,7 +740,7 @@ with tab2:
             fetch_unique_eco_news(eco_query); st.rerun()
 
     if st.session_state.overall_analysis:
-        st.markdown(f"**시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
+        st.markdown(f"**실시간 AI 시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
         with st.expander("📝 거시 브리핑 리포트", expanded=True): st.write(st.session_state.overall_analysis['text'])
     
     for i, news in enumerate(st.session_state.current_eco_news):
@@ -811,9 +778,9 @@ with tab3:
             st.markdown(f"[원문 읽기]({news['link']}) | {news['published']}\n\n{news['summary']}")
 
 with tab4:
-    st.subheader("🎯 AI 맞춤 추천종목 발굴")
+    st.subheader("🎯 AI 추천종목 발굴")
     investment_horizon = st.radio("투자 기간 설정", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
-    if st.button("🚀 유망 종목 정밀 발굴 가동", type="primary", use_container_width=True):
+    if st.button("🚀 추천 종목 발굴", type="primary", use_container_width=True):
         raw_rec = get_naver_news("특징주|수주|실적|목표가", display=100, sort_type="date")
         rec_news = filter_news_with_gemini_lite(raw_rec)
         
@@ -822,13 +789,12 @@ with tab4:
         try:
             candidates = json.loads(re.search(r'\[.*\]', res1, re.S).group())[:5]
             
-            # 💡 [핵심 패치] 5차선 고속도로 병렬 처리로 1분 대기시간 싹쓸이!
             def fetch_candidate_data(c_info):
                 t = c_info.get('ticker', '')
                 name = c_info.get('name', '')
                 p_info = raw_get_stock_current_price(t)
                 cp, dpct = p_info["current"], p_info["diff_pct"]
-                tech = raw_calculate_technical_indicators(t, realtime_price=cp)  # 실시간가 반영
+                tech = raw_calculate_technical_indicators(t, realtime_price=cp)
                 fin = get_financial_data(t)
                 text_block = f"- 종목: {name}({t})\n  실시간 현재가: {cp:,.0f}원 (전일대비 {dpct:+.2f}%)\n  보조지표: \n{tech}\n  재무: \n{fin}\n"
                 return {"name": name, "ticker": t, "cp": cp, "tech": tech, "text": text_block}
@@ -836,16 +802,14 @@ with tab4:
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 cand_results = list(executor.map(fetch_candidate_data, candidates))
             results = [r["text"] for r in cand_results]
-            cand_lookup = {r["name"]: r for r in cand_results}  # 검증 단계에서 실시간가/보조지표 재사용
+            cand_lookup = {r["name"]: r for r in cand_results}
             
             ctx_str = "".join(results)
             
-            # 💡 [핵심 패치] 답답하게 기다릴 필요 없이 실시간 타자(스트리밍) 효과로 전면 교체
             prompt_step3 = build_prompt_recommend_step3(ctx_str, rec_news, market_data_str, investment_horizon)
             st.session_state.today_recommendation = st.write_stream(call_gemini_stream_with_fallback(prompt_step3))
             success_rec = True
 
-            # 목표가/매수추천가 산출 결과를 실시간가·보조지표 기준으로 한 번 더 검증 (1회 배치 호출)
             raw_result = st.session_state.today_recommendation
             valid_items = []
             if "[TRACKING_DATA]" in raw_result:
@@ -894,7 +858,7 @@ with tab4:
                         cp, dpct = p_info["current"], p_info["diff_pct"]
                         st.info(f"**{name}** ({tick})")
                         st.metric("실시간 현재가", f"{cp:,.0f}원", f"전일대비 {dpct:+.2f}%")
-                        st.metric("🎯 퀀트 목표가", f"{tp:,.0f}원", f"{((tp - cp)/cp)*100:+.1f}% 여력" if cp > 0 else "")
+                        st.metric("🎯 1차 퀀트 목표가", f"{tp:,.0f}원", f"{((tp - cp)/cp)*100:+.1f}% 여력" if cp > 0 else "")
                         st.metric("💰 정밀 매수 추천가", f"{bp:,.0f}원", f"현재가 대비 {((bp - cp)/cp)*100:+.1f}%" if cp > 0 and bp > 0 else "데이터 없음")
 
                         valid_info = st.session_state.get('today_recommendation_validation', {}).get(name)
@@ -907,10 +871,10 @@ with tab4:
                                 new_tp = valid_info.get("new_target_price")
                                 calc_logic = valid_info.get("calculation_logic", "산출식 오류")
                                 if new_tp:
-                                    # 기존 메트릭과 별개로 UI 하단에 수정 가격과 구체적인 수식 박스를 추가로 표시합니다.
                                     st.error(f"🔄 **AI 자체 수정 목표가**: {new_tp:,.0f}원\n\n🧮 **수정 산출식 및 근거**:\n{calc_logic}")
                             else:
                                 st.caption(f"ℹ️ {note}")
+
                         if st.button(f"💾 {name} 찜하기", key=f"rec_s_{tick}"):
                             c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, buy_recommend_price, scrap_date) VALUES (?,?,?,?,?,?,?,?)", 
                                       (f"🎯 추천: {name}", display_report, name, tick, cp, tp, bp, datetime.now().strftime("%Y-%m-%d %H:%M")))
@@ -923,7 +887,7 @@ with tab4:
 # 💡 [탭 5: 관심종목]
 # =======================================================
 with tab5:
-    st.subheader("⭐️ 내 관심종목 & 종합 진단")
+    st.subheader("⭐️ 내 관심종목 진단")
     with st.form("add_stock"):
         new_s = st.text_input("종목명 입력 (예: 카카오, 삼성전자)")
         st_owned = st.radio("보유상태", ["미보유", "보유중"], horizontal=True)
@@ -962,7 +926,7 @@ with tab5:
                 tasks_to_run.append((p, st.session_state.port_starts.get(p_id, 1), NAVER_CLIENT_ID, NAVER_CLIENT_SECRET))
 
         if tasks_to_run:
-            with st.spinner("⚡ 퀀트 레이더 가동: 실시간 주가 및 뉴스 스크래핑 중..."):
+            with st.spinner("⚡ 실시간 주가 및 뉴스 스크래핑 중..."):
                 def fetch_stock_raw_worker(p_tuple):
                     p, start_idx, cid, sec = p_tuple
                     p_id, name, query, ticker, owned, avg, qnt = p
@@ -974,14 +938,11 @@ with tab5:
                     
                     broad = "|".join([k.strip() for k in (query or name).split(" OR ")])
                     raw_news = raw_fetch_naver_news(broad, display=50, start=start_idx, sort_type="date", cid=cid, secret=sec)
-                    # Gemini 필터링은 여기서 하지 않고, 아래에서 전 종목을 한 번에 묶어서 처리한다
-                    # (종목마다 따로 부르면 병렬 실행 시 Gemini에 순간적으로 요청이 몰려 503을 유발함)
                     return p_id, p_info, raw_news, tech, supply, dart
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                     raw_results = list(executor.map(fetch_stock_raw_worker, tasks_to_run))
 
-                # 전 종목 뉴스를 한데 모아 Gemini 호출 1번으로 일괄 필터링
                 news_map = {r[0]: r[2] for r in raw_results}
                 filtered_map = filter_news_with_gemini_lite_batch(news_map)
 
@@ -1018,9 +979,9 @@ with tab5:
             with col_btn:
                 cache_key = f"deep_{p_id}"
                 if cache_key in st.session_state.analysis_results:
-                    if st.button("📊 저장된 리포트 보기", key=f"view_{p_id}", type="primary"): st.session_state[f"show_{p_id}"] = True
+                    if st.button("📊 저장된 진단 보기", key=f"view_{p_id}", type="primary"): st.session_state[f"show_{p_id}"] = True
                 else:
-                    if st.button("종합 리포트", key=f"run_{p_id}", type="primary"):
+                    if st.button("🚀 AI 진단", key=f"run_{p_id}", type="primary"):
                         combined = {n['link']: n for n in (fact_news + st.session_state.get(f"ai_news_{p_id}", []))}.values()
                         report = call_gemini_with_fallback(build_prompt_deep_dive(name, ticker, list(combined), is_owned, avg_price, quantity, cur_price, market_data_str, tech_str, supply_str))
                         tp_match = re.search(r'TARGET_PRICE:\s*([\d,]+)', report)
@@ -1038,13 +999,7 @@ with tab5:
                     st.write(re.sub(r'TARGET_PRICE:\s*[\d,]+', '', rep).strip())
                     tp = float(m.group(1).replace(',','')) if (m := re.search(r'TARGET_PRICE:\s*([\d,]+)', rep)) else 0.0
 
-                   if st.session_state.get(f"show_{p_id}"):
-                with st.expander("📝 AI 종합 진단 리포트", expanded=True):
-                    rep = st.session_state.analysis_results[cache_key]['text']
-                    st.write(re.sub(r'TARGET_PRICE:\s*[\d,]+', '', rep).strip())
-                    tp = float(m.group(1).replace(',','')) if (m := re.search(r'TARGET_PRICE:\s*([\d,]+)', rep)) else 0.0
-
-                    valid_info = st.session_state.get(f"tp_valid_{p_id}") # ✅ 윗줄과 세로 열 일치
+                    valid_info = st.session_state.get(f"tp_valid_{p_id}")
                     if valid_info:
                         note = valid_info.get("note", "")
                         if valid_info.get("valid") is True:
@@ -1057,6 +1012,7 @@ with tab5:
                                 st.error(f"🔄 **AI 자체 수정 목표가**: {new_tp:,.0f}원\n\n🧮 **수정 근거 및 연산식**:\n{calc_logic}")
                         else:
                             st.caption(f"ℹ️ 목표가 검증: {note}")
+
                     c1, c2 = st.columns(2)
                     if c1.button("💾 스크랩 저장", key=f"save_{p_id}"):
                         c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?,?,?,?,?,?,?,?)", (f"[{name}] 리포트", "심층 퀀트 진단", rep, datetime.now().strftime("%Y-%m-%d %H:%M"), name, ticker, cur_price, tp)); conn.commit(); st.success("저장 완료")
@@ -1101,7 +1057,7 @@ with tab5:
 
 # ----------------- [탭 6: 스크랩북 및 탭 7: 백업] -----------------
 with tab6:
-    st.subheader("📁 내 스크랩북 & AI 예측 트래킹")
+    st.subheader("📁 내 스크랩북")
     c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, buy_recommend_price FROM scrapbook ORDER BY id DESC")
     scraps = c.fetchall()
     if scraps:
@@ -1116,7 +1072,7 @@ with tab6:
                     cols_sc[0].metric("저장가(당시주가)", f"{s[8]:,.0f}원")
                     return_pct = ((cur - s[8]) / s[8]) * 100 if s[8] > 0 else 0.0
                     cols_sc[1].metric("실시간 주가", f"{cur:,.0f}원", f"일일 {cur_diff_pct:+.2f}% / 누적 {return_pct:+.2f}%")
-                    cols_sc[2].metric("🎯 퀀트 목표가", f"{s[9]:,.0f}원", f"{(cur / s[9]) * 100 if s[9] > 0 else 0.0:.1f}% 달성")
+                    cols_sc[2].metric("🎯 1차 퀀트 목표가", f"{s[9]:,.0f}원", f"{(cur / s[9]) * 100 if s[9] > 0 else 0.0:.1f}% 달성")
                     
                     b_rec = s[10] if len(s) > 10 and s[10] else 0.0
                     if b_rec > 0:
