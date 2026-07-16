@@ -996,9 +996,9 @@ with tab5:
             with col_btn:
                 cache_key = f"deep_{p_id}"
                 if cache_key in st.session_state.analysis_results:
-                    if st.button("📊 저장된 진단 보기", key=f"view_{p_id}", type="primary"): st.session_state[f"show_{p_id}"] = True
+                    if st.button("📊 저장된 리포트 보기", key=f"view_{p_id}", type="primary"): st.session_state[f"show_{p_id}"] = True
                 else:
-                    if st.button("🚀 AI 앙상블 진단", key=f"run_{p_id}", type="primary"):
+                    if st.button("종합 리포트", key=f"run_{p_id}", type="primary"):
                         combined = {n['link']: n for n in (fact_news + st.session_state.get(f"ai_news_{p_id}", []))}.values()
                         report = call_gemini_with_fallback(build_prompt_deep_dive(name, ticker, list(combined), is_owned, avg_price, quantity, cur_price, market_data_str, tech_str, supply_str))
                         tp_match = re.search(r'TARGET_PRICE:\s*([\d,]+)', report)
