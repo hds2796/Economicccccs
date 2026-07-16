@@ -35,7 +35,7 @@ if not check_password(): st.stop()
 
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-# 데이터베이스 세팅 (영구 보존을 위한 report_text 등 컬럼 구성)
+# 데이터베이스 세팅
 conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
 c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS scrapbook (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, link TEXT, summary TEXT, analysis TEXT, scrap_date TEXT)''')
@@ -102,7 +102,7 @@ with st.sidebar:
             st.rerun()
 
 # =======================================================
-# 3. Gemini AI 처리
+# 3. Gemini AI 처리 및 프롬프트 빌더
 # =======================================================
 GEMINI_CONCURRENCY_LIMIT = 3
 _gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
@@ -135,6 +135,27 @@ def build_prompt_deep_dive(stock_name, market_str):
             f"1. 🏢 재무 및 펀더멘털 분석\n2. 🌐 뉴스/수급 분석\n"
             f"※ 반드시 마지막 줄에 파싱을 위해 아래 형식으로만 적으세요.\n"
             f"TARGET_PRICE: 단기숫자만|중기숫자만|장기숫자만|매수추천가숫자만")
+
+# 종목 발굴용 프롬프트 (복구 완료)
+def build_prompt_recommend_step3(news_list, market_str, horizon):
+    combined = "\n".join([f"- {n['title']}" for n in news_list[:15]])
+    return (f"당신은 엄격한 애널리스트입니다.\n"
+            f"[시장 거시 상황]: {market_str}\n"
+            f"[선택된 투자 기간]: {horizon}\n"
+            f"[수급 및 이슈]:\n{combined}\n\n"
+            f"가장 적합한 3개 종목을 엄선하여 보고서를 작성하십시오.\n"
+            f"### 🏆 [최종 추천 종목 3개]\n"
+            f"1. 🥇 추천종목: [종목명] (티커)\n"
+            f"- 💡 추천 사유: (핵심 모멘텀 서술)\n"
+            f"- 🎯 {horizon} 최종 목표가: [최종 가격]원\n"
+            f"  └ 🧮 1차 퀀트 연산: [산출 가격]원 (공식 명시)\n"
+            f"  └ 🧠 2차 정성 수정: (가감 논리 명시)\n"
+            f"- 💰 진입 타점: [진입가]원\n\n"
+            f"※ 반드시 마지막 줄에 파싱을 위해 아래 형식으로만 적으세요.\n"
+            f"[TRACKING_DATA]\n"
+            f"종목명1|티커1|최종목표가숫자만|진입타점숫자만\n"
+            f"종목명2|티커2|최종목표가숫자만|진입타점숫자만\n"
+            f"종목명3|티커3|최종목표가숫자만|진입타점숫자만")
 
 # =======================================================
 # 4. 메인 UI 및 데이터 매핑
@@ -191,8 +212,39 @@ with tab3:
         for news in sectors_data.get(selected_sector, []):
             with st.expander(f"🏭 {news['title']}"): st.write(news['summary'])
 
+# --- [종목 발굴 탭 복구 완료] ---
 with tab4:
-    st.subheader("🎯 종목 발굴 (준비중)")
+    st.subheader("🎯 AI 추천종목 발굴")
+    investment_horizon = st.radio("⏳ 투자 기간 설정", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
+    
+    if st.button("🚀 추천 종목 발굴", type="primary", use_container_width=True):
+        rec_news = g_data.get("realtime_news", []) + g_data.get("eco_news", [])
+        prompt = build_prompt_recommend_step3(rec_news, market_data_str, investment_horizon)
+        st.session_state.today_recommendation = st.write_stream(call_gemini_stream_with_fallback(prompt))
+
+    if st.session_state.get('today_recommendation'):
+        raw = st.session_state.today_recommendation
+        st.write(raw.split("[TRACKING_DATA]")[0].strip())
+        
+        if "[TRACKING_DATA]" in raw:
+            cols = st.columns(3)
+            block = raw.split("[TRACKING_DATA]")[1].strip().replace("```", "")
+            for idx, line in enumerate(block.split('\n')):
+                data = line.split('|')
+                if len(data) >= 4:
+                    name, tick = data[0].strip(), data[1].strip()
+                    def extr(ix): return float(re.sub(r'[^\d.]', '', data[ix])) if len(data) > ix and re.sub(r'[^\d.]', '', data[ix]) else 0.0
+                    tp, bp = extr(2), extr(3)
+
+                    with cols[idx % 3]:
+                        st.info(f"**{name}** ({tick})")
+                        st.metric("🎯 최종 목표가", f"{tp:,.0f}원")
+                        st.metric("💰 매수 추천가", f"{bp:,.0f}원")
+                        if st.button(f"💾 찜하기", key=f"rec_s_{tick}"):
+                            c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, buy_recommend_price, scrap_date) VALUES (?,?,?,?,?,?,?,?)", 
+                                      (f"🎯 추천: {name}", raw, name, tick, 0.0, tp, bp, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                            conn.commit()
+                            st.success("스크랩 완료!")
 
 with tab5:
     st.subheader("⭐️ 관심종목 진단")
@@ -243,7 +295,6 @@ with tab5:
                     st.success("저장 완료")
         st.divider()
 
-    # 삭제 UI 하단 배치
     if portfolios:
         st.subheader("🗑️ 관심종목 삭제")
         to_delete = st.multiselect("삭제할 종목을 선택하세요", [name for _, name, _, _, _, _, _, _, _, _ in portfolios])
