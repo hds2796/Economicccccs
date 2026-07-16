@@ -618,10 +618,9 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
             f"종목명3|티커3|목표가숫자만|매수추천가숫자만")
 
 def validate_target_price(items):
-    """산출된 목표가가 실시간 현재가·보조지표와 비교했을 때 타당한지 AI가 한 번 더 검토.
+    """산출된 목표가가 실시간 현재가·보조지표와 비교했을 때 타당한지 AI가 한 번 더 검토하고, 부적합 시 자체 목표가 재설정.
     items: [{"name":str, "realtime_price":float, "target_price":float, "buy_price":float(optional), "tech_str":str}, ...]
-    반환: {name: {"valid": bool|None, "note": str}}
-    여러 종목을 한 번의 호출로 묶어서 처리 (호출 폭주 방지 원칙과 동일).
+    반환: {name: {"valid": bool|None, "note": str, "new_target_price": float|None, "calculation_logic": str|None}}
     """
     items = [it for it in items if it.get("target_price", 0) > 0 and it.get("realtime_price", 0) > 0]
     if not items:
@@ -639,11 +638,13 @@ def validate_target_price(items):
     context_block = "\n\n".join(blocks)
 
     prompt = (
-        "너는 리스크 관리팀 소속 시니어 심사역이야. 아래는 애널리스트가 이미 산출한 종목별 목표가/매수추천가야. "
-        "실시간 현재가 대비 괴리율이 상식적인 범위인지, 보조지표(RSI 과열/과매도, MACD 방향, 이평선, 볼린저밴드)와 "
-        "논리적으로 모순되지 않는지 검토해서 각 종목마다 '타당함' 또는 '재검토 필요' 여부와 20자 내외의 짧은 사유를 판단해.\n"
+        "너는 리스크 관리팀 소속 시니어 퀀트 애널리스트야. 아래는 애널리스트가 1차 산출한 종목별 목표가와 매수추천가야. "
+        "실시간 현재가 대비 괴리율이 상식적인지, 보조지표(RSI, MACD, 볼린저밴드 등)와 논리적으로 모순되지 않는지 엄격하게 검토해.\n"
+        "만약 기존 목표가가 부적합(고평가, 괴리율 과다, 기술적 지표 모순 등)하다고 판단되면, 'valid'를 false로 설정하고 "
+        "너만의 논리적인 '새로운 적정 목표가(new_target_price)'와 그 가격이 도출된 수식이 포함된 '구체적인 산출 근거(calculation_logic)'를 반드시 제공해.\n"
         "반드시 아래 형식의 JSON 객체 하나로만 답해. 다른 설명은 절대 붙이지 마.\n"
-        '예: {"삼성전자": {"valid": true, "note": "현재가 대비 8% 상승여력, RSI 중립"}}\n\n'
+        '예시 1 (타당할 때): {"삼성전자": {"valid": true, "note": "현재가 대비 8% 상승여력, RSI 중립으로 적정함"}}\n'
+        '예시 2 (부적합할 때): {"SK하이닉스": {"valid": false, "note": "RSI 과열 및 단기 급등으로 기존 목표가 달성 불투명", "new_target_price": 180000, "calculation_logic": "실시간 현재가 170,000원 * (업종 보수적 PER 10 / 현재 PER 12) 적용"}}\n\n'
         f"{context_block}"
     )
 
@@ -653,7 +654,12 @@ def validate_target_price(items):
         result = {}
         for it in items:
             v = parsed.get(it['name'], {})
-            result[it['name']] = {"valid": v.get("valid"), "note": v.get("note", "검증 결과 없음")}
+            result[it['name']] = {
+                "valid": v.get("valid"), 
+                "note": v.get("note", "검증 결과 없음"),
+                "new_target_price": v.get("new_target_price"),
+                "calculation_logic": v.get("calculation_logic")
+            }
         return result
     except Exception:
         return {it['name']: {"valid": None, "note": "검증 실패 (AI 응답 파싱 오류)"} for it in items}
@@ -707,7 +713,7 @@ with tab1:
         st.session_state.realtime_analysis = st.write_stream(call_gemini_stream_with_fallback(build_prompt_realtime(st.session_state.current_realtime_news[:20], market_data_str)))
         st.rerun()
     if st.session_state.realtime_analysis:
-        with st.expander("📊 AI 실시간 시황 종합 브리핑", expanded=True):
+        with st.expander("📊 AI 종합 브리핑", expanded=True):
             st.write(st.session_state.realtime_analysis)
             if st.button("💾 이 리포트 스크랩", key="sc_rt_all"):
                 c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date) VALUES (?, ?, ?, ?)", ("📰 실시간 시황 종합 브리핑", "실시간 수집 기반 요약", st.session_state.realtime_analysis, datetime.now().strftime("%Y-%m-%d %H:%M"))); conn.commit(); st.success("저장 완료")
@@ -739,7 +745,7 @@ with tab2:
     
     col_e1, col_e2 = st.columns([4, 1])
     with col_e1:
-        if st.button("🤖 AI 종합 마켓 브리핑 리포트 생성", type="primary", use_container_width=True):
+        if st.button("마켓 브리핑 리포트 생성", type="primary", use_container_width=True):
             res = call_gemini_with_fallback(build_prompt_overall(get_naver_news(eco_query, display=50, sort_type="date"), market_data_str))
             score = int(m.group(1)) if (m := re.search(r'SCORE:\s*(\d+)', res)) else 50
             c.execute("INSERT INTO market_score_history (check_date, score) VALUES (?, ?)", (datetime.now().strftime("%Y-%m-%d %H:%M"), score)); conn.commit()
@@ -749,7 +755,7 @@ with tab2:
             fetch_unique_eco_news(eco_query); st.rerun()
 
     if st.session_state.overall_analysis:
-        st.markdown(f"**실시간 AI 시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
+        st.markdown(f"**시장 심리 지수: {st.session_state.overall_analysis['score']}/100**")
         with st.expander("📝 거시 브리핑 리포트", expanded=True): st.write(st.session_state.overall_analysis['text'])
     
     for i, news in enumerate(st.session_state.current_eco_news):
@@ -895,7 +901,7 @@ with tab4:
 # 💡 [탭 5: 관심종목]
 # =======================================================
 with tab5:
-    st.subheader("⭐️ 내 관심종목 & AI 앙상블 진단")
+    st.subheader("⭐️ 내 관심종목 & 종합 진단")
     with st.form("add_stock"):
         new_s = st.text_input("종목명 입력 (예: 카카오, 삼성전자)")
         st_owned = st.radio("보유상태", ["미보유", "보유중"], horizontal=True)
