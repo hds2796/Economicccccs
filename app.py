@@ -20,6 +20,7 @@ def check_password():
     if "pwd" in st.query_params:
         if st.query_params["pwd"] == st.secrets["APP_PASSWORD"]:
             st.session_state["password_correct"] = True
+            
     if st.session_state.get("password_correct", False): 
         return True
     
@@ -49,7 +50,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS portfolio
              (id INTEGER PRIMARY KEY AUTOINCREMENT, stock_name TEXT)''')
 conn.commit()
 
-# 신규 기능 지원을 위한 동적 테이블 컬럼 추가
 columns_to_add = [
     ("portfolio", "is_owned", "INTEGER DEFAULT 0"),
     ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
@@ -115,6 +115,7 @@ with st.sidebar:
             flow = Flow.from_client_config(client_config, scopes=['https://www.googleapis.com/auth/drive.file'], redirect_uri=st.secrets["REDIRECT_URI"])
             auth_url, _ = flow.authorization_url(prompt='consent')
             
+            # 원래 정상 작동했던 Iframe 버튼 방식 롤백
             st.markdown(f'<a href="{auth_url}" target="_self"><button style="width:100%;">구글 계정으로 로그인</button></a>', unsafe_allow_html=True)
             
             if "code" in st.query_params:
@@ -125,15 +126,6 @@ with st.sidebar:
                 st.rerun()
         except Exception:
             st.warning("Client Config 세팅이 필요합니다.")
-    else:
-        st.success("✅ 드라이브 연동 완료")
-        if st.button("연동 해제", use_container_width=True):
-            del st.session_state['google_auth_token']
-            st.rerun()
-                except Exception as e:
-                    st.error(f"❌ 연동 실패 (토큰 교환 에러): {e}")
-        except Exception:
-            st.warning("Client Config 세팅 상태를 확인해 주세요.")
     else:
         st.success("✅ 드라이브 연동 완료")
         if st.button("연동 해제", use_container_width=True):
@@ -212,7 +204,7 @@ st.caption(f"☁️ 최종 동기화 시각: {g_data.get('updated_at', '알 수 
 market_data = g_data.get("market_status", {})
 market_data_str = ", ".join([f"{k}: {v['current']}({v['diff_pct']}%)" for k, v in market_data.items() if v.get('current', 0) > 0])
 
-# 메인 지표 카드 영역 (수집 오류에 대한 방어벽 강화)
+# 메인 지표 카드 영역
 target_indices = ["코스피", "코스닥", "S&P 500", "원/달러 환율"]
 cols = st.columns(4)
 for i, key in enumerate(target_indices):
@@ -235,10 +227,8 @@ for i, key in enumerate(target_indices):
 
 st.divider()
 
-# 탭 구조 정의
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📰 실시간 브리핑", "🔥 핵심 경제", "📑 섹터 뉴스", "🎯 종목 발굴", "⭐️ 관심종목", "📁 스크랩북"])
 
-# --- [탭 1: 실시간 브리핑] ---
 with tab1:
     st.subheader("📰 실시간 경제·시사 뉴스 분석")
     news_list = g_data.get("realtime_news", [])
@@ -249,14 +239,12 @@ with tab1:
         with st.expander(f"🕒 {news['title']}"): 
             st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
 
-# --- [탭 2: 핵심 경제 뉴스] ---
 with tab2:
     st.subheader("今日 핵심 경제 뉴스")
     for news in g_data.get("eco_news", []):
         with st.expander(f"📰 {news['title']}"): 
             st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
 
-# --- [탭 3: 섹터 뉴스] ---
 with tab3:
     st.subheader("📑 섹터 뉴스")
     sectors_data = g_data.get("sectors", {})
@@ -266,7 +254,6 @@ with tab3:
             with st.expander(f"🏭 {news['title']}"): 
                 st.write(news['summary'])
 
-# --- [탭 4: 종목 발굴 (복구 완료)] ---
 with tab4:
     st.subheader("🎯 AI 추천종목 발굴")
     investment_horizon = st.radio("⏳ 투자 기간 설정", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
@@ -304,7 +291,6 @@ with tab4:
                             conn.commit()
                             st.success("스크랩 완료!")
 
-# --- [탭 5: 관심종목] ---
 with tab5:
     st.subheader("⭐️ 관심종목 진단")
     with st.form("add_stock"):
@@ -369,7 +355,6 @@ with tab5:
             conn.commit()
             st.rerun()
 
-# --- [탭 6: 내 스크랩북] ---
 with tab6:
     st.subheader("📁 내 스크랩북")
     c.execute("SELECT id, title, analysis, scrap_date, stock_name, saved_price, target_price, buy_recommend_price, target_price_mid, target_price_long FROM scrapbook ORDER BY id DESC")
