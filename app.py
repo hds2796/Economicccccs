@@ -897,7 +897,7 @@ with tab5:
                         st.session_state.analysis_results[cache_key] = {"text": report, "tp_s": tp_s, "tp_m": tp_m, "tp_l": tp_l, "time": time.time()}
                         st.session_state[f"show_{p_id}"] = True; st.rerun()
 
-         if st.session_state.get(f"show_{p_id}") and cache_key in st.session_state.analysis_results:
+           if st.session_state.get(f"show_{p_id}") and cache_key in st.session_state.analysis_results:
                 with st.expander("📝 AI 진단 리포트", expanded=True):
                     rep = st.session_state.analysis_results[cache_key]['text']
                     
