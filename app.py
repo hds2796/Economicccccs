@@ -55,6 +55,8 @@ for table, col, dtype in [
     ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("scrapbook", "stock_name", "TEXT"),
     ("scrapbook", "ticker", "TEXT"), ("scrapbook", "saved_price", "REAL DEFAULT 0.0"),
     ("scrapbook", "target_price", "REAL DEFAULT 0.0"),
+    ("scrapbook", "target_price_mid", "REAL DEFAULT 0.0"),
+    ("scrapbook", "target_price_long", "REAL DEFAULT 0.0"),
     ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0")
 ]:
     try: c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}")
@@ -540,7 +542,7 @@ def get_financial_data(ticker):
     except: return "재무 정보 데이터 누락"
 
 # =======================================================
-# 💡 AI 프롬프트 빌더 (통합된 목표가 산출 모델 적용)
+# 💡 AI 프롬프트 빌더 (통합 목표가 산출 로직)
 # =======================================================
 def build_prompt_single_news(title, summary, market_data_str):
     return f"아래 뉴스가 증시에 미칠 영향을 분석하세요.\n[지표]: {market_data_str}\n[제목]: {title}\n[요약]: {summary}\n1. 💡 핵심 요약\n2. 📈 시장 파급력\n3. 🎯 연관 섹터"
@@ -575,16 +577,16 @@ def build_prompt_recommend_step3(candidate_context, news_list, market_data_str, 
             f"### 🏆 [최종 추천 종목 3개]\n"
             f"1. 🥇 추천종목: [종목명] (티커)\n"
             f"- 💡 구체적 추천 사유: (이 종목을 선택한 핵심 모멘텀 서술)\n"
-            f"- 🎯 최종 목표가: [최종 가격]원\n"
+            f"- 🎯 {horizon} 최종 목표가: [최종 가격]원\n"
             f"  └ 🧮 1차 퀀트 연산: [산출 가격]원 (사용된 공식 및 수치 명시)\n"
             f"  └ 🧠 2차 정성 수정: (차트/뉴스/수급을 기반으로 1차 가격에서 가감한 논리 명시)\n"
             f"- 💰 진입 타점: [진입가]원 (지지선 및 안전마진 근거)\n\n"
             f"(2번, 3번 종목 동일하게 작성)\n\n"
             f"※ 반드시 마지막 줄에 파싱을 위해 아래 형식으로만 적으세요. 다른 글자 추가 절대 금지.\n"
             f"[TRACKING_DATA]\n"
-            f"종목명1|티커1|최종목표가숫자만|진입타점숫자만\n"
-            f"종목명2|티커2|최종목표가숫자만|진입타점숫자만\n"
-            f"종목명3|티커3|최종목표가숫자만|진입타점숫자만")
+            f"종목명1|티커1|단일최종목표가숫자만|진입타점숫자만\n"
+            f"종목명2|티커2|단일최종목표가숫자만|진입타점숫자만\n"
+            f"종목명3|티커3|단일최종목표가숫자만|진입타점숫자만")
 
 def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, quantity, current_price, market_data_str, tech_str, supply_str):
     fin_data = get_financial_data(ticker)
@@ -601,12 +603,14 @@ def build_prompt_deep_dive(stock_name, ticker, news_list, is_owned, avg_price, q
             f"1. 🏢 재무 및 펀더멘털 분석\n"
             f"2. 🌐 뉴스/수급 분석\n"
             f"3. 📊 투자의견\n"
-            f"4. 🎯 최종 적정 목표가 산출 논리 (6개월~1년 투자 기준의 단일 목표가 도출)\n"
-            f"   - 🧮 1차 퀀트 연산: [산출 가격]원 (사용된 수학적/통계적 공식 및 수치 명시)\n"
-            f"   - 🧠 2차 정성 수정: [최종 가격]원 (차트 추세, 뉴스, 수급 모멘텀을 반영하여 1차 가격에서 가감한 논리 명시)\n"
+            f"4. 🎯 기간별 최종 적정 목표가 산출 논리\n"
+            f"   (※ 반드시 '1차 퀀트(구체적 계산 공식 명시) -> 2차 정성적 분석(차트, 모멘텀, 뉴스를 통한 가감 수정)' 프로세스를 거쳐 서술할 것)\n"
+            f"   - 🎯 단기 목표가 (1~3개월): [가격]원 (1차 퀀트 연산 -> 2차 정성 수정)\n"
+            f"   - 🎯 중기 목표가 (3~6개월): [가격]원 (1차 퀀트 연산 -> 2차 정성 수정)\n"
+            f"   - 🎯 장기 목표가 (1년 이상): [가격]원 (1차 퀀트 연산 -> 2차 정성 수정)\n"
             f"5. 💰 매수/손절 진입 타점: [진입가]원 (지지선 및 안전마진 근거)\n\n"
             f"※ 마지막 줄에 시스템 파싱을 위해 반드시 아래 포맷으로만 기재하십시오. (다른 글자 추가 금지)\n"
-            f"TARGET_PRICE: 최종적정목표가숫자만")
+            f"TARGET_PRICE: 단기숫자만|중기숫자만|장기숫자만")
 
 # =======================================================
 # 4. 메인 대시보드 UI
@@ -713,7 +717,7 @@ with tab3:
 
 with tab4:
     st.subheader("🎯 AI 추천종목 발굴")
-    investment_horizon = st.radio("⏳ 투자 기간 (목표가 산출 기준)", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
+    investment_horizon = st.radio("⏳ 투자 기간 설정", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
     
     if st.button("🚀 추천 종목 발굴", type="primary", use_container_width=True):
         raw_rec = get_naver_news("특징주|수주|실적|목표가", display=100, sort_type="date")
@@ -884,23 +888,31 @@ with tab5:
                         combined = {n['link']: n for n in (fact_news + st.session_state.get(f"ai_news_{p_id}", []))}.values()
                         report = call_gemini_with_fallback(build_prompt_deep_dive(name, ticker, list(combined), is_owned, avg_price, quantity, cur_price, market_data_str, tech_str, supply_str))
                         
-                        tp_match = re.search(r'TARGET_PRICE:\s*([\d,]+)', report)
-                        tp_val = float(tp_match.group(1).replace(',', '')) if tp_match else 0.0
+                        tp_match = re.search(r'TARGET_PRICE:\s*([^|]+)\|([^|]+)\|(.*)', report)
+                        def extr(s): return float(re.sub(r'[^\d.]', '', s)) if s and re.sub(r'[^\d.]', '', s) else 0.0
+                        tp_s = extr(tp_match.group(1)) if tp_match else 0.0
+                        tp_m = extr(tp_match.group(2)) if tp_match else 0.0
+                        tp_l = extr(tp_match.group(3)) if tp_match else 0.0
 
-                        st.session_state.analysis_results[cache_key] = {"text": report, "tp": tp_val, "time": time.time()}
+                        st.session_state.analysis_results[cache_key] = {"text": report, "tp_s": tp_s, "tp_m": tp_m, "tp_l": tp_l, "time": time.time()}
                         st.session_state[f"show_{p_id}"] = True; st.rerun()
 
             if st.session_state.get(f"show_{p_id}"):
                 with st.expander("📝 AI 진단 리포트", expanded=True):
                     rep = st.session_state.analysis_results[cache_key]['text']
+                    
+                    tp_s = st.session_state.analysis_results[cache_key].get('tp_s', 0.0)
+                    tp_m = st.session_state.analysis_results[cache_key].get('tp_m', 0.0)
+                    tp_l = st.session_state.analysis_results[cache_key].get('tp_l', 0.0)
+
+                    st.markdown(f"#### 🎯 최종 목표가 밴드")
+                    st.info(f"**단기 (1~3개월):** {tp_s:,.0f}원  |  **중기 (3~6개월):** {tp_m:,.0f}원  |  **장기 (1년 이상):** {tp_l:,.0f}원")
                     st.write(re.sub(r'TARGET_PRICE:.*', '', rep).strip())
                     
-                    tp = st.session_state.analysis_results[cache_key].get('tp', 0.0)
-
                     c1, c2 = st.columns(2)
                     if c1.button("💾 저장", key=f"save_{p_id}"):
-                        c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price) VALUES (?,?,?,?,?,?,?,?)", 
-                                  (f"[{name}] 리포트", "진단", rep, datetime.now().strftime("%Y-%m-%d %H:%M"), name, ticker, cur_price, tp))
+                        c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long) VALUES (?,?,?,?,?,?,?,?,?,?)", 
+                                  (f"[{name}] 리포트", "진단", rep, datetime.now().strftime("%Y-%m-%d %H:%M"), name, ticker, cur_price, tp_s, tp_m, tp_l))
                         conn.commit(); st.success("저장 완료")
                     if c2.button("🔄 재분석", key=f"force_{p_id}"): 
                         del st.session_state.analysis_results[cache_key]
@@ -943,7 +955,7 @@ with tab5:
 # ----------------- [탭 6: 스크랩북 및 탭 7: 백업] -----------------
 with tab6:
     st.subheader("📁 내 스크랩북")
-    c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, buy_recommend_price FROM scrapbook ORDER BY id DESC")
+    c.execute("SELECT id, title, link, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, buy_recommend_price, target_price_mid, target_price_long FROM scrapbook ORDER BY id DESC")
     scraps = c.fetchall()
     if scraps:
         for s in scraps:
@@ -958,8 +970,11 @@ with tab6:
                     return_pct = ((cur - s[8]) / s[8]) * 100 if s[8] > 0 else 0.0
                     cols_sc[1].metric("실시간 주가", f"{cur:,.0f}원", f"일일 {cur_diff_pct:+.2f}% / 누적 {return_pct:+.2f}%")
                     
-                    tp = s[9]
-                    cols_sc[2].metric("🎯 최종 목표가", f"{tp:,.0f}원", f"저장가 대비 {((tp - s[8])/s[8])*100:+.1f}%" if s[8] > 0 else "")
+                    tp_s = s[9]
+                    tp_m = s[11] if len(s) > 11 and s[11] else 0.0
+                    tp_l = s[12] if len(s) > 12 and s[12] else 0.0
+                    
+                    cols_sc[2].markdown(f"**🎯 1차 목표가**<br>단기: {tp_s:,.0f}원<br>중기: {tp_m:,.0f}원<br>장기: {tp_l:,.0f}원", unsafe_allow_html=True)
                     
                     b_rec = s[10] if len(s) > 10 and s[10] else 0.0
                     if b_rec > 0:
