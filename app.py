@@ -392,12 +392,21 @@ def fetch_realtime_data_direct(seen_links):
     except: return None
 
 # =======================================================
-# 상태 변수 선언 및 누적 머지 기능 구현
+# 상태 변수 선언 및 데이터 누적 병합 (최신순 유지)
 # =======================================================
+cached_data = fetch_cached_global_data() or {}
+
 if "seen_realtime_links" not in st.session_state: 
     st.session_state.seen_realtime_links = set()
+
+# 💡 수정: 초기 상태를 비워두지 않고 구글 드라이브 캐시로 베이스라인 구축 (섹터 뉴스 증발 방지)
 if "realtime_cache" not in st.session_state: 
-    st.session_state.realtime_cache = {"market_status": {}, "realtime_news": [], "sector_news": {}, "updated_at": "대기 중"}
+    st.session_state.realtime_cache = {
+        "market_status": cached_data.get("market_status", {}),
+        "realtime_news": cached_data.get("realtime_news", []),
+        "sector_news": cached_data.get("sector_news", {}),
+        "updated_at": cached_data.get("updated_at", "대기 중")
+    }
 
 def merge_realtime_data(new_data):
     if not new_data: return
@@ -406,12 +415,14 @@ def merge_realtime_data(new_data):
     old_market = old_data.get("market_status", {})
     old_market.update(new_data.get("market_status", {}))
     
-    merged_news = dedupe_news(old_data.get("realtime_news", []) + new_data.get("realtime_news", []))
+    # 💡 수정: 새로운 뉴스를 무조건 '앞쪽(Prepend)'에 붙여 최신순 유지
+    merged_news = dedupe_news(new_data.get("realtime_news", []) + old_data.get("realtime_news", []))
     
     old_sector = old_data.get("sector_news", {})
     new_sector = new_data.get("sector_news", {})
     for sec, items in new_sector.items():
-        old_sector[sec] = dedupe_news(old_sector.get(sec, []) + items)
+        # 💡 수정: 새로운 섹터 뉴스도 리스트의 앞쪽에 배치
+        old_sector[sec] = dedupe_news(items + old_sector.get(sec, []))
         
     st.session_state.realtime_cache = {
         "market_status": old_market,
@@ -420,16 +431,7 @@ def merge_realtime_data(new_data):
         "updated_at": new_data.get("updated_at", old_data.get("updated_at", "알 수 없음"))
     }
 
-cached_data = fetch_cached_global_data() or {}
-
-if not st.session_state.realtime_cache.get("realtime_news"):
-    with st.spinner("데이터 로딩 중..."):
-        new_data = fetch_realtime_data_direct(st.session_state.seen_realtime_links)
-        if new_data:
-            merge_realtime_data(new_data)
-            for n in new_data.get("realtime_news", []): 
-                st.session_state.seen_realtime_links.add(n['link'])
-
+# 갱신 전 렌더링용 변수 확보
 g_data = st.session_state.realtime_cache
 
 col_title, col_refresh = st.columns([5, 1.2])
@@ -461,14 +463,15 @@ st.divider()
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경제", "섹터 뉴스", "종목 발굴", "관심종목 진단", "스크랩북"])
 
 # =======================================================
-# 탭 1: 실시간 브리핑 (UI 10개 제한 / 분석 전체 데이터 활용)
+# 탭 1: 실시간 브리핑 (최신순으로 최대 10개 고정 출력)
 # =======================================================
 with tab1:
     st.subheader("실시간 시황 브리핑")
     news_pool = g_data.get("realtime_news", [])
     
     if news_pool:
-        with st.expander(f"📰 수집된 실시간 뉴스 (최신 10건 표시 / 총 {len(news_pool)}건 수집됨)", expanded=True):
+        # 최신 병합 리스트에서 10개를 가져옵니다. 10개가 안 되면 있는 것 전부(기존 내역 포함) 최신순으로 출력됩니다.
+        with st.expander(f"📰 수집된 실시간 뉴스 (최신 10건 표시 / 총 {len(news_pool)}건 누적)", expanded=True):
             for idx, n in enumerate(news_pool[:10]): 
                 st.markdown(f"{idx+1}. [{n['title']}]({n['link']})")
     else:
@@ -507,13 +510,11 @@ with tab2:
         st.info("조회된 핵심 경제 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 3: 섹터 뉴스 (상시 렌더링 유지)
+# 탭 3: 섹터 뉴스 (상시 렌더링 유지 완료)
 # =======================================================
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
     sec_news = g_data.get("sector_news", {})
-    if not sec_news:
-        sec_news = cached_data.get("sector_news", {})
     
     if sec_news:
         for sec, items in sec_news.items():
