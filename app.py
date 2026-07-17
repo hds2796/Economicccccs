@@ -20,16 +20,26 @@ MODEL_NAME = "gemini-3.5-flash"
 st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide")
 
 # =======================================================
-# 비밀번호 기반 자동 유저 식별 로그인
+# 비밀번호 기반 자동 유저 식별 로그인 (URL 파라미터 지원)
 # =======================================================
 def check_password():
+    passwords_dict = st.secrets.get("USER_PASSWORDS", {})
+    
+    # 1. URL 파라미터 확인 (/?pwd=비밀번호)
+    if "pwd" in st.query_params:
+        url_pwd = st.query_params["pwd"]
+        if url_pwd in passwords_dict:
+            st.session_state["password_correct"] = True
+            st.session_state["user_id"] = passwords_dict[url_pwd]
+            
+    # 2. 세션 상태 확인
     if "password_correct" in st.session_state and st.session_state["password_correct"]:
         return True
 
+    # 3. 로그인 폼 렌더링
     st.title("Project2_Stock 로그인")
     password = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("접속하기"):
-        passwords_dict = st.secrets.get("USER_PASSWORDS", {})
         if password in passwords_dict:
             st.session_state["password_correct"] = True
             st.session_state["user_id"] = passwords_dict[password]
@@ -302,18 +312,17 @@ with col_refresh:
         with st.spinner("갱신 중..."):
             new_data = fetch_realtime_data_direct(st.session_state.seen_realtime_links)
             if new_data:
+                st.session_state.realtime_cache = new_data
                 new_news = new_data.get("realtime_news", [])
-                if not new_news:
-                    st.info("새로운 데이터가 없습니다.")
-                else:
-                    st.session_state.realtime_cache = new_data
+                if new_news:
                     for n in new_news:
                         st.session_state.seen_realtime_links.add(n['link'])
                 st.rerun()
+            else:
+                st.error("데이터 갱신에 실패했습니다. API 연결 상태를 확인해주세요.")
 
-# 🛠️ 수정한 안전장치: 데이터가 비어있어도 UI 전체가 멈추는 현상(st.stop)을 방지
 if not g_data:
-    st.warning("⚠️ 실시간 데이터를 호출하지 못했습니다. 상단의 '실시간 갱신' 버튼을 눌러주세요.")
+    st.warning("실시간 데이터를 호출하지 못했습니다. 상단의 '실시간 갱신' 버튼을 눌러주세요.")
 
 with col_title:
     st.caption(f"실시간: {g_data.get('updated_at', '알 수 없음')} | 캐시: {cached_data.get('updated_at', '알 수 없음')} | 사용자: {current_user}")
@@ -494,7 +503,6 @@ with tab4:
                         tech_data_str += f"- 펀더멘털: PER {fund['per']} | PBR {fund['pbr']} | EPS {fund['eps']:,.0f} | BPS {fund['bps']:,.0f}\n\n"
             
             with st.spinner("최종 심층 분석 중..."):
-                # 🛠️ 청산 기한 프롬프트 삭제 및 정성평가 퀀트 수식 심층 서술 지시 반영
                 step2_prompt = (
                     f"당신은 감정을 철저히 배제하고 숫자와 팩트로만 승부하는 퀀트 및 차트 애널리스트입니다.\n"
                     f"선택된 투자 기간: {investment_horizon}\n\n"
@@ -606,14 +614,13 @@ with tab5:
                     if fund:
                         data_str += f"[퀀트] PER: {fund['per']} | PBR: {fund['pbr']} | EPS: {fund['eps']:,.0f} | BPS: {fund['bps']:,.0f}\n"
                     
-                    # 🛠️ 청산 기한 삭제 및 매수의견, 풍부한 정량 공식 서술 유도 프롬프트 반영
                     prompt = (f"[{name} 진단]\n[실데이터]\n{data_str}\n\n"
                               f"당신은 객관적인 수치에 입각해 판단하는 애널리스트입니다. 감정적 표현과 이모지를 배제하십시오.\n\n"
                               f"아래 항목들을 분량을 축소하지 말고 상세히 서술하여 리포트를 작성하십시오.\n"
                               f"- 매수의견: (현재가 대비 정량적 밸류에이션을 근거로 Buy/Hold/Sell 명시)\n"
-                              f"- 모멘텀 분석: (관련 핵심 이슈 요약)\n"
-                              f"- 기술적 분석: (이평선, MACD 등 제공된 수치를 연동한 차트 서술)\n"
-                              f"- 퀀트 분석: (제공된 펀더멘털 지표를 적용한 구체적인 주가 계산 공식과 수치 증명 명시)\n"
+                              f"- 모멘텀 분석\n"
+                              f"- 기술적 분석 (이평선, MACD 등 실제 값 사용)\n"
+                              f"- 퀀트 분석 (제공된 지표를 적용한 구체적인 주가 계산 공식과 수치 증명 명시)\n"
                               f"- 목표가 산출 근거: (단기, 중기, 장기 가격을 도출해낸 구체적인 수식과 근거 서술)\n\n"
                               f"※ 반드시 마지막 줄에 아래 파싱 형식으로만 작성.\n"
                               f"TARGET_PRICE: 단기숫자만|중기숫자만|장기숫자만|매수추천가숫자만")
@@ -654,7 +661,6 @@ with tab5:
                 st.caption(f"🧠 분석 모델: {model_used or MODEL_NAME}")
                 
                 if st.button("결과 저장", key=f"save_{p_id}"):
-                    # 🛠️ 관심종목 스크랩 시 ticker 누락 방지 조치 완료
                     c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                               (f"{name} 진단", "", report_text, datetime.now().strftime("%Y-%m-%d %H:%M"), name, code, current, tp_s, tp_m, tp_l, bp, MODEL_NAME, current_user))
                     conn.commit(); st.success("저장 완료")
@@ -707,7 +713,6 @@ with tab6:
             with st.expander(f"[{scrap_date}] {title}"):
                 cols_sc = st.columns(5)
                 cols_sc[0].metric("저장 당시가", f"{saved_price:,.0f}원")
-                # 🛠️ 실시간 현재가와 목표가 대비 괴리율 표시 적용
                 if current_price > 0:
                     cols_sc[1].metric("현재가", f"{current_price:,.0f}원", delta=f"{diff:+,.0f}원 ({diff_pct:+.2f}%)")
                 else:
