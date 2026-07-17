@@ -95,12 +95,25 @@ def get_drive_service_for_file():
     creds = Credentials.from_service_account_info(info, scopes=['https://www.googleapis.com/auth/drive.file', 'https://www.googleapis.com/auth/drive.readonly'])
     return build('drive', 'v3', credentials=creds)
 
+def get_drive_service_for_file():
+    info = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    # 수동으로 공유한 파일을 인식할 수 있도록 권한 범위를 최상위(drive)로 확장합니다.
+    creds = Credentials.from_service_account_info(info, scopes=['https://www.googleapis.com/auth/drive'])
+    return build('drive', 'v3', credentials=creds)
+
 def backup_db_to_drive():
     try:
+        conn.commit() # 현재까지의 DB 변경사항을 파일에 물리적으로 저장
+        
         drive_service = get_drive_service_for_file()
-        folder_id = st.secrets.get("GOOGLE_BACKUP_FOLDER_ID", "")
+        folder_id = st.secrets.get("GOOGLE_BACKUP_FOLDER_ID", "").strip()
         file_name = "market_analysis.db"
         
+        if not folder_id:
+            st.error("secrets에 GOOGLE_BACKUP_FOLDER_ID가 비어있습니다.")
+            return False
+            
+        # 드라이브에 수동으로 올려둔 파일이 있는지 검색
         query = f"'{folder_id}' in parents and name = '{file_name}' and trashed = false"
         results = drive_service.files().list(q=query, fields="files(id)").execute()
         files = results.get('files', [])
@@ -108,16 +121,21 @@ def backup_db_to_drive():
         media = MediaFileUpload(file_name, mimetype='application/octet-stream', resumable=True)
         
         if files:
+            # 수동으로 올린 파일을 찾은 경우: 해당 파일 ID 위에 덮어쓰기(Update)를 수행하여 용량 초과를 우회합니다.
             file_id = files[0]['id']
             drive_service.files().update(fileId=file_id, media_body=media).execute()
+            return True
         else:
-            file_metadata = {'name': file_name, 'parents': [folder_id]}
-            drive_service.files().create(body=file_metadata, media_body=media).execute()
-        return True
+            # 파일을 찾지 못한 경우에만 생성을 시도합니다.
+            file_metadata = {
+                'name': file_name,
+                'parents': [folder_id]
+            }
+            drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            return True
     except Exception as e:
         st.error(f"백업 실패: {e}")
         return False
-
 def restore_db_from_drive():
     try:
         drive_service = get_drive_service_for_file()
