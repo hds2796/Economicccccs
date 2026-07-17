@@ -358,7 +358,8 @@ def fetch_current_prices(codes):
 def dedupe_news(news_list):
     seen = set(); out = []
     for n in news_list or []:
-        key = n.get("link") or n.get("title")
+        # 링크(link) 대신 제목(title)을 절대적인 고유 키(Key)로 사용하여 필터링
+        key = n.get("title", "").strip()
         if not key or key in seen: continue
         seen.add(key); out.append(n)
     return out
