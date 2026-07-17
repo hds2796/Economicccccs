@@ -578,23 +578,24 @@ with tab4:
         if not rec_news:
             st.error("분석 대상 뉴스 풀이 비어있습니다. 실시간 갱신을 먼저 진행해 주세요.")
         else:
-            with st.spinner("1차 종목 선별 중..."):
+            with st.spinner("1차 후보군 10개 선별 중..."):
+                # 1. 후보군을 10개로 확대
                 articles_str = "\n".join([f"- {n['title']}" for n in rec_news[:50]])
                 step1_prompt = (f"다음 경제 뉴스를 바탕으로 {investment_horizon} 상승 모멘텀이 뛰어난 "
-                                f"한국 주식 종목 3개를 골라 종목코드 6자리만 JSON 배열로 출력하라.\n"
-                                f"예: [\"005930\", \"000660\", \"035420\"]\n오직 JSON만 출력할 것.\n\n{articles_str}")
+                                f"한국 주식 종목 10개를 골라 종목코드 6자리만 JSON 배열로 출력하라.\n"
+                                f"예: [\"005930\", \"000660\", ...]\n오직 JSON만 출력할 것.\n\n{articles_str}")
                 
                 step1_res = call_gemini_with_fallback(step1_prompt)
                 match = re.search(r'\[.*\]', step1_res, re.DOTALL)
                 selected_tickers = []
                 if match:
-                    try: selected_tickers = json.loads(match.group(0))[:3]
+                    try: selected_tickers = json.loads(match.group(0))[:10]
                     except: pass
                 if not selected_tickers:
                     st.error("종목 선별에 실패했습니다. 다시 시도해주세요.")
                     st.stop()
             
-            with st.spinner("선별 종목의 기술적/퀀트 데이터 계산 중..."):
+            with st.spinner("후보군 데이터 계산 중..."):
                 tech_data_str = ""
                 for ticker in selected_tickers:
                     ticker = re.sub(r'[^\d]', '', ticker)
@@ -609,30 +610,31 @@ with tab4:
                     tech_data_str += f"[{name} ({ticker})]\n"
                     
                     if tech:
-                        tech_data_str += f"- 현재가: {tech['current']:,.0f}\n"
-                        tech_data_str += f"- 차트: 52주 최고 {tech['high_52']:,.0f} / 최저 {tech['low_52']:,.0f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f}\n"
-                        tech_data_str += f"- MACD: {tech['macd']:,.2f} | 시그널: {tech['signal']:,.2f}\n"
+                        tech_data_str += f"- 현재가: {tech['current']:,.0f} | 52주 고/저: {tech['high_52']:,.0f}/{tech['low_52']:,.0f} | 20일선: {tech['ma20']:,.0f} | MACD: {tech['macd']:,.2f}\n"
                     if fund:
-                        tech_data_str += f"- 펀더멘털: PER {fund['per']} | PBR {fund['pbr']} | EPS {fund['eps']:,.0f} | BPS {fund['bps']:,.0f}\n\n"
+                        tech_data_str += f"- 펀더멘털: PER {fund['per']} | PBR {fund['pbr']} | EPS {fund['eps']:,.0f}\n\n"
             
-            with st.spinner("최종 심층 분석 중..."):
+            with st.spinner("최종 우량 3종목 엄선 및 심층 분석 중..."):
+                # 2. 10개 중 3개만 엄선하는 2차 필터링 프롬프트
                 step2_prompt = (
-                    f"당신은 객관적인 사실과 숫자에 기반해 판단하는 퀀트/차트 애널리스트입니다.\n"
-                    f"선택된 투자 기간: {investment_horizon}\n\n"
-                    f"[추출된 실데이터]\n{tech_data_str}\n"
-                    f"제공된 데이터를 신뢰하여 아래 항목들을 상세히 서술해 리포트를 작성하십시오. 불필요한 감정적 수사는 배제합니다.\n\n"
+                    f"당신은 퀀트 애널리스트입니다. 제공된 10개 후보군 중, "
+                    f"데이터가 확실하고 '강력 매수(Buy)'가 가능한 3개 종목만 엄선하십시오.\n\n"
+                    f"[10개 후보군 실데이터]\n{tech_data_str}\n\n"
+                    f"=== 분석 지시 ===\n"
+                    f"1. 지표상 'Hold'나 'Sell'이 적절한 종목은 과감히 버리십시오.\n"
+                    f"2. 엄격한 필터링 후, 가장 확신이 드는 상위 3개 종목에 대해서만 심층 리포트를 작성하십시오.\n"
+                    f"3. 3개 미만으로 추려져도 좋으니, 반드시 확실한 'Buy' 종목만 리포트하십시오.\n\n"
+                    f"=== 리포트 작성 항목 ===\n"
                     f"[종목명] (티커)\n"
-                    f"- 매수의견: (현재가 대비 정량적 가치를 판단하여 Buy/Hold/Sell 명시)\n"
-                    f"- 모멘텀 분석: (관련 핵심 이슈 요약)\n"
-                    f"- 기술적 분석: (이평선 위치, MACD 등 실제 숫자에 기반한 차트 추세 서술)\n"
-                    f"- 퀀트 분석: (제공된 PER, EPS, PBR, BPS 수치를 활용하여 적용된 적정주가 산출 공식과 계산 과정을 구체적이고 투명하게 명시)\n"
-                    f"- 목표가 산출 근거: (퀀트 밸류에이션 결과와 기술적 매물대/지지선을 유기적으로 융합하여 단기·중기·장기 목표가를 도출해낸 구체적인 수식과 논리를 상세히 서술)\n"
-                    f"- 진입 타점: (기술적 지지선에 기반한 현실적인 진입 가격)\n\n"
-                    f"※ 마지막 줄은 반드시 아래 파싱 형식으로만 출력. 가격은 단위 없이 숫자로만 기입.\n"
+                    f"- 매수의견: 반드시 'Buy' 의견인 정량적 근거 명시\n"
+                    f"- 모멘텀 분석: (핵심 이슈)\n"
+                    f"- 기술적 분석: (이평선, MACD 등 실제 지표 활용)\n"
+                    f"- 퀀트 분석: (적정주가 산출 공식과 계산 과정 명시)\n"
+                    f"- 목표가 산출 근거: (수식과 논리 서술)\n"
+                    f"- 진입 타점\n\n"
+                    f"※ 마지막 줄은 반드시 아래 파싱 형식으로 출력.\n"
                     f"[TRACKING_DATA]\n"
-                    f"종목명1|티커1|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만\n"
-                    f"종목명2|티커2|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만\n"
-                    f"종목명3|티커3|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만"
+                    f"종목명|티커|단기목표가|중기목표가|장기목표가|진입타점"
                 )
                 st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step2_prompt))
 
