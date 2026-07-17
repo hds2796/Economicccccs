@@ -19,21 +19,28 @@ MODEL_NAME = "gemini-3.5-flash"
 
 st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide")
 
+# =======================================================
+# 비밀번호 기반 자동 유저 식별 로그인
+# =======================================================
 def check_password():
-    if "pwd" in st.query_params:
-        if st.query_params["pwd"] == st.secrets["APP_PASSWORD"]: st.session_state["password_correct"] = True
-    if st.session_state.get("password_correct", False): return True
+    if "password_correct" in st.session_state and st.session_state["password_correct"]:
+        return True
 
     st.title("Project2_Stock 로그인")
     password = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("접속하기"):
-        if password == st.secrets["APP_PASSWORD"]:
+        passwords_dict = st.secrets.get("USER_PASSWORDS", {})
+        if password in passwords_dict:
             st.session_state["password_correct"] = True
+            st.session_state["user_id"] = passwords_dict[password]
             st.rerun()
-        else: st.error("비밀번호가 일치하지 않습니다.")
+        else:
+            st.error("비밀번호가 일치하지 않습니다.")
     return False
 
 if not check_password(): st.stop()
+
+current_user = st.session_state["user_id"]
 
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 API_GATEWAY_REALTIME_URL = st.secrets.get("API_GATEWAY_REALTIME_URL", "")
@@ -47,6 +54,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOIN
 c.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KEY AUTOINCREMENT, calc_date TEXT, score REAL)''')
 conn.commit()
 
+# 멀티유저 대응을 위한 user_id 컬럼 자동 추가 및 기존 데이터 마이그레이션
 columns_to_add = [
     ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
     ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("portfolio", "report_text", "TEXT"),
@@ -56,7 +64,8 @@ columns_to_add = [
     ("scrapbook", "saved_price", "REAL DEFAULT 0.0"), ("scrapbook", "target_price", "REAL DEFAULT 0.0"),
     ("scrapbook", "target_price_mid", "REAL DEFAULT 0.0"), ("scrapbook", "target_price_long", "REAL DEFAULT 0.0"),
     ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0"), ("portfolio", "model_used", "TEXT"),
-    ("portfolio", "report_time", "TEXT"), ("portfolio", "ticker", "TEXT"), ("scrapbook", "model_used", "TEXT")
+    ("portfolio", "report_time", "TEXT"), ("portfolio", "ticker", "TEXT"), ("scrapbook", "model_used", "TEXT"),
+    ("portfolio", "user_id", "TEXT DEFAULT 'dongsu'"), ("scrapbook", "user_id", "TEXT DEFAULT 'dongsu'")
 ]
 for table, col, dtype in columns_to_add:
     try: c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}"); conn.commit()
@@ -306,7 +315,7 @@ if not g_data:
     st.stop()
 
 with col_title:
-    st.caption(f"실시간: {g_data.get('updated_at', '알 수 없음')} | 캐시: {cached_data.get('updated_at', '알 수 없음')}")
+    st.caption(f"실시간: {g_data.get('updated_at', '알 수 없음')} | 캐시: {cached_data.get('updated_at', '알 수 없음')} | 사용자: {current_user}")
 
 market_data = g_data.get("market_status", {})
 market_data_str = ", ".join([f"{k}: {v['current']}({v['diff_pct']}%)" for k, v in market_data.items() if v.get('current', 0) > 0])
@@ -329,7 +338,7 @@ st.divider()
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경제", "섹터 뉴스", "종목 발굴", "관심종목 진단", "스크랩북"])
 
 with tab1:
-    st.subheader("실시간 시사 뉴스 (노이즈 필터링 적용)")
+    st.subheader("실시간 시사 뉴스")
     news_list = dedupe_news(g_data.get("realtime_news", []))
 
     if not news_list:
@@ -406,7 +415,7 @@ with tab2:
             st.rerun()
 
 with tab3:
-    st.subheader("섹터 뉴스 (캐시 기반)")
+    st.subheader("섹터 뉴스")
     sectors_data = cached_data.get("sectors", {})
     
     if not sectors_data:
@@ -477,20 +486,22 @@ with tab4:
         with st.spinner("최종 심층 분석 중..."):
             step2_prompt = (
                 f"당신은 감정을 철저히 배제하고 숫자와 팩트로만 승부하는 퀀트 및 차트 애널리스트입니다.\n"
-                f"선택된 투자 기간: {investment_horizon}\n"
+                f"선택된 투자 기간: {investment_horizon}\n\n"
                 f"[추출된 실데이터]\n{tech_data_str}\n"
                 f"위 종목들의 실제 제공된 '현재가', '차트 지표', '펀더멘털 지표'를 절대적으로 신뢰하여 분석하십시오.\n\n"
-                f"아래 양식에 맞춰 리포트를 작성하십시오. 단기/중기/장기 목표가를 왜 설정하였는지 설명하십시오.\n\n"
+                f"아래 항목들을 누락 없이 심층적이고 풍부하게 서술하여 리포트를 작성하십시오.\n\n"
                 f"[종목명] (티커)\n"
+                f"- 매수의견: (현재가 대비 정량적 가치를 판단하여 Buy/Hold/Sell 중 명확한 투자의견 제시)\n"
                 f"- 모멘텀 분석: (관련 핵심 이슈 요약)\n"
-                f"- 기술적 분석: (이평선 위치, MACD 등 실제 숫자에 기반한 서술)\n"
-                f"- 퀀트 분석: (제공된 PER, EPS, PBR 수치를 활용하여 적용된 적정주가 산출 공식과 계산 과정을 구체적으로 명시)\n"
-                f"- 최종 목표가 및 타점: (퀀트와 기술적 분석을 종합한 현실적인 단일 목표가와 진입 타점)\n\n"
-                f"※ 마지막 줄은 반드시 아래 파싱 형식으로만 출력.\n"
+                f"- 기술적 분석: (이평선 위치, MACD 등 실제 숫자에 기반한 차트 추세 서술)\n"
+                f"- 퀀트 분석: (제공된 PER, EPS, PBR, BPS 수치를 활용하여 적용된 적정주가 산출 공식과 계산 과정을 구체적이고 투명하게 명시)\n"
+                f"- 목표가 산출 근거: (퀀트 밸류에이션 결과와 기술적 매물대/지지선을 어떻게 유기적으로 융합하여 단기·중기·장기 목표가를 도출했는지 각각 구체적인 수식과 숫자를 들어 상세히 서술)\n"
+                f"- 진입 타점: (기술적 지지선에 기반한 현실적인 진입 가격)\n\n"
+                f"※ 마지막 줄은 반드시 아래 파싱 형식으로만 출력. 가격은 단위 없이 숫자로만 기입합니다. 단기/중기/장기는 복합 산출된 최종 목표가 밴드입니다.\n"
                 f"[TRACKING_DATA]\n"
-                f"종목명1|티커1|목표가숫자만|진입타점숫자만\n"
-                f"종목명2|티커2|목표가숫자만|진입타점숫자만\n"
-                f"종목명3|티커3|목표가숫자만|진입타점숫자만"
+                f"종목명1|티커1|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만\n"
+                f"종목명2|티커2|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만\n"
+                f"종목명3|티커3|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만"
             )
             st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step2_prompt))
 
@@ -506,11 +517,12 @@ with tab4:
                 for line in block.split('\n'):
                     if not line.strip(): continue
                     data = line.split('|')
-                    if len(data) >= 4: parsed_rows.append((data[0].strip(), data[1].strip(), parse_won(data[2]), parse_won(data[3])))
+                    if len(data) >= 6: 
+                        parsed_rows.append((data[0].strip(), data[1].strip(), parse_won(data[2]), parse_won(data[3]), parse_won(data[4]), parse_won(data[5])))
 
                 price_map = fetch_current_prices([r[1] for r in parsed_rows])
                 cols_rec = st.columns(3)
-                for idx, (name, tick, tp, bp) in enumerate(parsed_rows):
+                for idx, (name, tick, tp_s, tp_m, tp_l, bp) in enumerate(parsed_rows):
                     code = re.sub(r'[^\d]', '', tick)
                     price_info = price_map.get(code, {})
                     current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
@@ -522,12 +534,12 @@ with tab4:
                             else: st.metric("현재가", "조회 실패")
                             
                             c_tp, c_bp = st.columns(2)
-                            c_tp.metric("종합 목표가", f"{tp:,.0f}")
+                            c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}<br>장: {tp_l:,.0f}", unsafe_allow_html=True)
                             c_bp.metric("진입 타점", f"{bp:,.0f}")
 
                             if st.button("스크랩", key=f"rec_s_{tick}", use_container_width=True):
-                                c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, buy_recommend_price, scrap_date, model_used) VALUES (?,?,?,?,?,?,?,?,?)",
-                                          (f"{name} 분석", raw, name, tick, current, tp, bp, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME))
+                                c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                                          (f"{name} 분석", raw, name, tick, current, tp_s, tp_m, tp_l, bp, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user))
                                 conn.commit(); st.success("저장 완료")
 
 with tab5:
@@ -548,11 +560,13 @@ with tab5:
                 final_qty = qty
             else: final_avg_p, final_qty = 0.0, 0
 
-            c.execute("INSERT INTO portfolio (stock_name, ticker, is_owned, avg_price, quantity) VALUES (?,?,?,?,?)", (new_s.strip(), code or '', is_owned_flag, final_avg_p, final_qty))
+            # 로그인한 사용자(current_user)의 ID를 명시적으로 귀속하여 저장
+            c.execute("INSERT INTO portfolio (stock_name, ticker, is_owned, avg_price, quantity, user_id) VALUES (?,?,?,?,?,?)", (new_s.strip(), code or '', is_owned_flag, final_avg_p, final_qty, current_user))
             conn.commit()
             st.rerun()
 
-    c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time, ticker FROM portfolio")
+    # 현재 로그인한 사용자 데이터만 격리 조회
+    c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time, ticker FROM portfolio WHERE user_id = ?", (current_user,))
     portfolios = c.fetchall()
     price_map_watch = fetch_current_prices([p[12] for p in portfolios if p[12]])
 
@@ -584,11 +598,14 @@ with tab5:
                         data_str += f"[퀀트] PER: {fund['per']} | PBR: {fund['pbr']} | EPS: {fund['eps']:,.0f} | BPS: {fund['bps']:,.0f}\n"
                     
                     prompt = (f"[{name} 진단]\n[실데이터]\n{data_str}\n\n"
-                              f"당신은 객관적인 수치에 입각해 판단하는 애널리스트입니다. 감정적 표현과 이모지를 배제하십시오. 단기/중기/장기 목표가를 왜 설정했는지도 설명하십시오. 또한, 매수의견을 진술하십시오.\n"
-                              f"1. 모멘텀 분석\n"
-                              f"2. 기술적 분석 (이평선, MACD 등 실제 값 사용)\n"
-                              f"3. 퀀트 분석 (제공된 펀더멘털 지표를 바탕으로 적정주가 도출 공식과 수치를 명시)\n"
-                              f"※ 반드시 마지막 줄에 아래 파싱 형식으로만 작성 (단기/중기/장기는 퀀트+기술적 종합 단일 목표가).\n"
+                              f"당신은 객관적인 수치에 입각해 판단하는 애널리스트입니다. 감정적 표현과 이모지를 배제하십시오.\n\n"
+                              f"아래 항목들을 분량을 축소하지 말고 상세히 서술하여 리포트를 작성하십시오.\n"
+                              f"- 매수의견: (현재가 대비 정량적 밸류에이션을 근거로 Buy/Hold/Sell 명시)\n"
+                              f"- 모멘텀 분석\n"
+                              f"- 기술적 분석 (이평선, MACD 등 실제 값 사용)\n"
+                              f"- 퀀트 분석 (제공된 지표를 적용한 구체적인 주가 계산 공식과 수치 증명 명시)\n"
+                              f"- 목표가 산출 근거: (단기, 중기, 장기 가격을 도출해낸 구체적인 수식과 근거 서술)\n\n"
+                              f"※ 반드시 마지막 줄에 아래 파싱 형식으로만 작성.\n"
                               f"TARGET_PRICE: 단기숫자만|중기숫자만|장기숫자만|매수추천가숫자만")
                     
                     report = call_gemini_with_fallback(prompt)
@@ -627,20 +644,21 @@ with tab5:
                 st.caption(f"🧠 분석 모델: {model_used or MODEL_NAME}")
                 
                 if st.button("결과 저장", key=f"save_{p_id}"):
-                    c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, model_used) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                              (f"{name} 진단", "", report_text, datetime.now().strftime("%Y-%m-%d %H:%M"), name, code, current, tp_s, tp_m, tp_l, bp, MODEL_NAME))
+                    c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                              (f"{name} 진단", "", report_text, datetime.now().strftime("%Y-%m-%d %H:%M"), name, code, current, tp_s, tp_m, tp_l, bp, MODEL_NAME, current_user))
                     conn.commit(); st.success("저장 완료")
         st.divider()
 
     if portfolios:
         to_delete = st.multiselect("삭제 항목 선택", [p[1] for p in portfolios])
         if st.button("선택 삭제"):
-            for d_name in to_delete: c.execute("DELETE FROM portfolio WHERE stock_name=?", (d_name,))
+            for d_name in to_delete: c.execute("DELETE FROM portfolio WHERE stock_name=? AND user_id=?", (d_name, current_user))
             conn.commit(); st.rerun()
 
 with tab6:
     st.subheader("스크랩북")
-    c.execute("SELECT id, title, analysis, scrap_date, stock_name, saved_price, target_price, buy_recommend_price, target_price_mid, target_price_long, model_used, ticker FROM scrapbook ORDER BY id DESC")
+    # 현재 로그인한 사용자 데이터만 격리 조회
+    c.execute("SELECT id, title, analysis, scrap_date, stock_name, saved_price, target_price, buy_recommend_price, target_price_mid, target_price_long, model_used, ticker FROM scrapbook WHERE user_id = ? ORDER BY id DESC", (current_user,))
     scraps = c.fetchall()
 
     col_ctrl1, _ = st.columns([1, 4])
@@ -648,7 +666,7 @@ with tab6:
         if st.button("체크된 항목 삭제", use_container_width=True):
             to_delete_ids = [sid.split("_")[1] for sid, checked in st.session_state.items() if sid.startswith("chk_") and checked]
             if to_delete_ids:
-                c.executemany("DELETE FROM scrapbook WHERE id=?", [(int(i),) for i in to_delete_ids])
+                c.executemany("DELETE FROM scrapbook WHERE id=? AND user_id=?", [(int(i), current_user) for i in to_delete_ids])
                 conn.commit()
                 for sid in list(st.session_state.keys()):
                     if sid.startswith("chk_"): st.session_state.pop(sid)
