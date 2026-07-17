@@ -23,7 +23,8 @@ from google import genai
 MODEL_NAME = "gemini-3.5-flash"
 LITE_MODEL_NAME = "gemini-3.1-flash-lite"
 
-st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide")
+# 💡 사이드바 기본 열림 설정 적용
+st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 
 # =======================================================
 # 비밀번호 기반 로그인 및 유저 식별
@@ -176,11 +177,6 @@ def restore_db_from_drive():
 
 with st.sidebar:
     st.markdown(f"**👤 접속 계정:** `{current_user}`")
-    st.divider()
-    
-    st.subheader("⚙️ 퀀트 시스템 설정")
-    k_factor = st.slider("손절 계수 (k)", min_value=1.0, max_value=3.5, value=2.0, step=0.1, help="값이 클수록 손절폭이 넓어집니다. 잦은 손절이 발생하면 값을 올리세요.")
-    
     st.divider()
     st.subheader("💾 데이터베이스 관리")
     if st.button("☁️ 구글 드라이브 백업", use_container_width=True):
@@ -479,14 +475,22 @@ if not st.session_state.realtime_cache.get("realtime_news"):
 
 g_data = st.session_state.realtime_cache
 
-col_title, col_refresh = st.columns([5, 1.2])
+# 💡 UI 픽스 1: K 슬라이더 메인 노출 (직관성 강화)
+st.markdown("### 📊 실시간 시장 지표")
+col_title, col_k1, col_k2, col_refresh = st.columns([2, 1.5, 3.5, 1.2])
 with col_refresh:
     if st.button("실시간 갱신", use_container_width=True):
         with st.spinner("갱신 중..."):
             if new_data := fetch_realtime_data_direct(): merge_realtime_data(new_data)
             st.rerun()
 
-with col_title: st.caption(f"실시간(누적): {g_data.get('updated_at', '알 수 없음')} | 캐시: {cached_data.get('updated_at', '알 수 없음')}")
+with col_title: 
+    st.caption(f"누적: {g_data.get('updated_at', '알 수 없음')}")
+
+with col_k1:
+    k_factor = st.slider("⚙️ 손절 계수(K) 조절", min_value=1.0, max_value=3.5, value=2.0, step=0.1, help="시장 변동성에 따른 손절폭(k) 조절")
+with col_k2:
+    st.caption("1.5(타이트한 방어) ◀ `2.0(표준)` ▶ 2.5(추세 스윙)")
 
 market_data = g_data.get("market_status", {})
 cols = st.columns(4)
@@ -501,7 +505,7 @@ st.divider()
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경제", "섹터 뉴스", "종목 발굴", "관심종목 진단", "스크랩북"])
 
 # =======================================================
-# 탭 1: 실시간 브리핑
+# 탭 1 ~ 3
 # =======================================================
 with tab1:
     st.subheader("실시간 시황 브리핑")
@@ -516,9 +520,6 @@ with tab1:
             with st.spinner("Lite 모델 압축 중..."): lite_summary = call_gemini_lite_summary(f"다음 뉴스를 요약하라:\n\n{news_str}")
             with st.spinner("Flash 3.5 모델 분석 중..."): st.write_stream(call_gemini_stream_with_fallback(f"지표:\n{json.dumps(market_data)}\n\n요약:\n{lite_summary}\n\n시장 흐름 심층 분석 서술."))
 
-# =======================================================
-# 탭 2: 핵심 경제 (개별 분석 UI 복구)
-# =======================================================
 with tab2:
     st.subheader("핵심 경제 종합 브리핑 및 심리 지수")
     c.execute("SELECT calc_date, score FROM sentiment_history ORDER BY calc_date ASC")
@@ -556,9 +557,6 @@ with tab2:
     else: 
         st.info("조회된 핵심 경제 뉴스가 없습니다. 람다 연동을 확인하세요.")
 
-# =======================================================
-# 탭 3: 섹터 뉴스
-# =======================================================
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
     sec_news = g_data.get("sectors") or cached_data.get("sectors") or g_data.get("sector_news", {})
@@ -645,6 +643,7 @@ with tab4:
                     f"**🟢 강세 논리 (Bull Case)**\n"
                     f"**🔴 약세/위험 논리 (Bear Case)**\n"
                     f"**⚖️ 최종 판단 및 리스크 평가**\n"
+                    f"- 목표가 설정 근거: 단기/중기/장기 목표가를 각각 얼마로 책정했는지 명시하고 차트/퀀트 근거를 상세히 설명할 것.\n"
                     f"</ANALYSIS_티커숫자>\n\n"
                     f"※ 마지막 줄은 아래 파싱 형식으로 출력 (손절가 필수)\n"
                     f"[TRACKING_DATA]\n"
@@ -654,7 +653,7 @@ with tab4:
 
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
-        with st.expander("추천 리포트"):
+        with st.expander("추천 리포트", expanded=True):
             display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw.split("[TRACKING_DATA]")[0].strip())
             st.write(display_text)
             
@@ -688,7 +687,7 @@ with tab4:
                                 conn.commit(); st.success(f"✅ 리포트 스크랩 완료!")
 
 # =======================================================
-# 탭 5: 관심종목 진단
+# 탭 5: 관심종목 진단 (💡 목표가 UI 복구 및 프롬프트 명확화)
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
@@ -769,6 +768,7 @@ with tab5:
                         if tech: data_str += f"[차트] MACD: {tech['macd']:,.2f}\n"
                         data_str += f"{calc_result_log}\n[요약]\n{lite_summary}"
                         
+                        # 💡 목표가 설정 이유 상세 작성 프롬프트 개선
                         prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_str}\n\n"
                                   f"당신은 리스크 관리에 철저한 애널리스트입니다.\n"
                                   f"1. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 이 종목을 지금 매수/보유/매도해야 하는가?'**에 대한 핵심 논리를 최상단에 선언하십시오.\n"
@@ -780,6 +780,7 @@ with tab5:
                                   f"**🟢 강세 논리 (Bull Case)**\n"
                                   f"**🔴 약세/위험 논리 (Bear Case)**\n"
                                   f"**⚖️ 최종 판단 및 리스크 평가**\n"
+                                  f"- 목표가 산출 논리: 단기/중기/장기 목표가를 명확히 얼마로 설정했는지 적고, 왜 그 가격을 도출했는지 구체적인 근거를 서술할 것.\n"
                                   f"※ 마지막 줄은 아래 파싱 형식으로 출력\n"
                                   f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가|단기손절가|중기손절가|장기손절가")
                         report = call_gemini_with_fallback(prompt)
@@ -802,9 +803,15 @@ with tab5:
                     conn.commit(); st.rerun()
 
             if report_text:
-                with st.expander("진단 리포트"):
+                # 💡 목표가 UI가 화면에 제대로 출력되도록 복구
+                with st.expander("진단 리포트", expanded=True):
                     st.write(re.sub(r'TARGET_PRICE:.*', '', report_text).strip())
-                    st.markdown(f"**🔴 시간 축별 손절가 라인:** 단기 {sl_s:,.0f}원 | 중기 {sl_m:,.0f}원 | 장기 {sl_l:,.0f}원")
+                    st.divider()
+                    col_tgt, col_sl = st.columns(2)
+                    with col_tgt:
+                        st.markdown(f"**🎯 AI 설정 목표가 밴드**\n* 단기: {tp_s:,.0f}원\n* 중기: {tp_m:,.0f}원\n* 장기: {tp_l:,.0f}원")
+                    with col_sl:
+                        st.markdown(f"**🔴 파이썬 연산 손절 라인**\n* 단기: {sl_s:,.0f}원\n* 중기: {sl_m:,.0f}원\n* 장기: {sl_l:,.0f}원")
                     
                     if st.button("스크랩북에 저장하여 가격 추적하기", key=f"scrap_t5_{p_id}", use_container_width=True):
                         c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -813,7 +820,7 @@ with tab5:
             st.divider()
 
 # =======================================================
-# 탭 6: 스크랩북 (과거 데이터 기반 완벽한 적중률 추적)
+# 탭 6: 스크랩북
 # =======================================================
 with tab6:
     st.subheader("저장된 분석 리포트 및 모델 검증")
