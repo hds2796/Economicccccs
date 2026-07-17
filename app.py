@@ -855,23 +855,40 @@ with tab4:
                                 st.success(f"✅ '{name}' 종목의 리포트가 내 스크랩북에 저장되었습니다!")
 
 # =======================================================
-# 탭 5: 관심종목 진단 (동적 연산 적용)
+# 탭 5: 관심종목 진단 (입력폼 완벽 초기화 적용)
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
     own_status = st.radio("상태", ["미보유", "보유"], horizontal=True, key="add_own_status")
     
+    # 💡 세션 상태를 활용한 완벽한 폼 초기화 로직 구현
+    if "input_stock_name" not in st.session_state: st.session_state["input_stock_name"] = ""
+    if "input_avg_price" not in st.session_state: st.session_state["input_avg_price"] = "0"
+    if "input_quantity" not in st.session_state: st.session_state["input_quantity"] = 0
+
     with st.form("add_stock", clear_on_submit=True):
-        new_s = st.text_input("종목명 (예: 삼성전자)")
+        new_s = st.text_input("종목명 (예: 삼성전자)", key="widget_stock_name")
         c2, c3 = st.columns(2)
-        avg_p = c2.text_input("평단가", value="0", disabled=(own_status == "미보유"))
-        qty = c3.number_input("수량", min_value=0, value=0, disabled=(own_status == "미보유"))
+        avg_p = c2.text_input("평단가", value="0", disabled=(own_status == "미보유"), key="widget_avg_price")
+        qty = c3.number_input("수량", min_value=0, value=0, disabled=(own_status == "미보유"), key="widget_quantity")
+        
         if st.form_submit_button("추가") and new_s:
             code, matched_name = search_stock_code(new_s.strip())
             is_owned_flag = 1 if own_status == "보유" else 0
             final_avg_p = float(str(avg_p).replace(',', '')) if is_owned_flag else 0.0
-            c.execute("INSERT INTO portfolio (stock_name, ticker, is_owned, avg_price, quantity, user_id) VALUES (?,?,?,?,?,?)", (new_s.strip(), code or '', is_owned_flag, final_avg_p, qty if is_owned_flag else 0, current_user))
-            conn.commit(); st.rerun()
+            
+            # DB에 정상 저장
+            c.execute("INSERT INTO portfolio (stock_name, ticker, is_owned, avg_price, quantity, user_id) VALUES (?,?,?,?,?,?)", 
+                      (new_s.strip(), code or '', is_owned_flag, final_avg_p, qty if is_owned_flag else 0, current_user))
+            conn.commit()
+            
+            # 💡 성공 시 세션 상태에 저장된 입력값들을 강제로 비움
+            st.session_state["input_stock_name"] = ""
+            st.session_state["input_avg_price"] = "0"
+            st.session_state["input_quantity"] = 0
+            
+            st.success(f"✅ '{new_s.strip()}' 종목이 관심종목에 등록되었습니다.")
+            st.rerun()
 
     c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time, ticker FROM portfolio WHERE user_id = ?", (current_user,))
     portfolios = c.fetchall()
