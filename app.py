@@ -7,12 +7,14 @@ import requests
 import pandas as pd
 import urllib.request
 import urllib.parse
+import os
+import io
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from bs4 import BeautifulSoup
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google import genai
 
 MODEL_NAME = "gemini-3.5-flash"
@@ -25,14 +27,18 @@ st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide")
 def check_password():
     passwords_dict = st.secrets.get("USER_PASSWORDS", {})
     
-    # 1. URL 파라미터 확인 (/?pwd=비밀번호)
-    if "pwd" in st.query_params:
-        url_pwd = st.query_params["pwd"]
-        if url_pwd in passwords_dict:
+    # 1. URL 파라미터를 통한 자동 통과 확인
+    for key, val in st.query_params.items():
+        if key in passwords_dict:
             st.session_state["password_correct"] = True
-            st.session_state["user_id"] = passwords_dict[url_pwd]
-            
-    # 2. 세션 상태 확인
+            st.session_state["user_id"] = passwords_dict[key]
+            break
+        if val in passwords_dict:
+            st.session_state["password_correct"] = True
+            st.session_state["user_id"] = passwords_dict[val]
+            break
+
+    # 2. 세션 상태 확인 (이미 로그인된 경우)
     if "password_correct" in st.session_state and st.session_state["password_correct"]:
         return True
 
@@ -81,6 +87,89 @@ for table, col, dtype in columns_to_add:
     try: c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}"); conn.commit()
     except: pass
 
+# =======================================================
+# 데이터베이스 백업 및 복구 로직
+# =======================================================
+def get_drive_service_for_file():
+    info = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    creds = Credentials.from_service_account_info(info, scopes=['https://www.googleapis.com/auth/drive.file', 'https://www.googleapis.com/auth/drive.readonly'])
+    return build('drive', 'v3', credentials=creds)
+
+def backup_db_to_drive():
+    try:
+        drive_service = get_drive_service_for_file()
+        folder_id = st.secrets.get("GOOGLE_BACKUP_FOLDER_ID", "")
+        file_name = "market_analysis.db"
+        
+        query = f"'{folder_id}' in parents and name = '{file_name}' and trashed = false"
+        results = drive_service.files().list(q=query, fields="files(id)").execute()
+        files = results.get('files', [])
+        
+        media = MediaFileUpload(file_name, mimetype='application/octet-stream', resumable=True)
+        
+        if files:
+            file_id = files[0]['id']
+            drive_service.files().update(fileId=file_id, media_body=media).execute()
+        else:
+            file_metadata = {'name': file_name, 'parents': [folder_id]}
+            drive_service.files().create(body=file_metadata, media_body=media).execute()
+        return True
+    except Exception as e:
+        st.error(f"백업 실패: {e}")
+        return False
+
+def restore_db_from_drive():
+    try:
+        drive_service = get_drive_service_for_file()
+        folder_id = st.secrets.get("GOOGLE_BACKUP_FOLDER_ID", "")
+        file_name = "market_analysis.db"
+        
+        query = f"'{folder_id}' in parents and name = '{file_name}' and trashed = false"
+        results = drive_service.files().list(q=query, fields="files(id)").execute()
+        files = results.get('files', [])
+        
+        if not files:
+            st.error("드라이브에 백업된 파일이 없습니다.")
+            return False
+            
+        file_id = files[0]['id']
+        request = drive_service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            
+        conn.close() 
+        with open(file_name, 'wb') as f:
+            f.write(fh.getvalue())
+        return True
+    except Exception as e:
+        st.error(f"복구 실패: {e}")
+        return False
+
+# =======================================================
+# 사이드바: 설정 및 데이터 백업 관리
+# =======================================================
+with st.sidebar:
+    st.markdown(f"**👤 접속 계정:** `{current_user}`")
+    st.divider()
+    
+    st.subheader("⚙️ 데이터베이스 관리")
+    st.caption("앱 재시작 시 데이터 손실을 방지합니다.")
+    
+    if st.button("☁️ 구글 드라이브 백업", use_container_width=True):
+        with st.spinner("클라우드 백업 중..."):
+            if backup_db_to_drive():
+                st.success("✅ 백업 완료")
+                
+    if st.button("🔄 드라이브에서 복구", use_container_width=True):
+        with st.spinner("데이터 복구 중..."):
+            if restore_db_from_drive():
+                st.success("✅ 복구 완료! 새로고침 진행합니다.")
+                st.rerun()
+
 @st.cache_data(ttl=1800)
 def fetch_cached_global_data():
     try:
@@ -92,7 +181,6 @@ def fetch_cached_global_data():
         files = results.get('files', [])
         if not files: return None
         request = drive_service.files().get_media(fileId=files[0]['id'])
-        import io
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
@@ -154,31 +242,38 @@ def get_fundamental_data(code):
         
         fund_data = {"per": "-", "pbr": "-", "eps": 0, "bps": 0}
         
-        per_elem = soup.find(id="_per")
-        if per_elem:
-            try: fund_data["per"] = float(re.search(r'[\d.]+', per_elem.get_text()).group())
-            except: pass
-            
-        pbr_elem = soup.find(id="_pbr")
-        if pbr_elem:
-            try: fund_data["pbr"] = float(re.search(r'[\d.]+', pbr_elem.get_text()).group())
-            except: pass
-            
-        eps_elem = soup.find(id="_eps")
-        if eps_elem:
-            try: fund_data["eps"] = int(re.sub(r'[^\d]', '', eps_elem.get_text()))
-            except: pass
+        cop_table = soup.find("div", class_="cop_details")
+        if cop_table:
+            trs = cop_table.find_all("tr")
+            for tr in trs:
+                th = tr.find("th")
+                if th:
+                    th_text = th.get_text().strip()
+                    key = None
+                    if "PER" in th_text: key = "per"
+                    elif "PBR" in th_text: key = "pbr"
+                    elif "EPS" in th_text: key = "eps"
+                    elif "BPS" in th_text: key = "bps"
+                    
+                    if key:
+                        tds = tr.find_all("td")
+                        for td in reversed(tds):
+                            txt = td.get_text().strip().replace(",", "")
+                            if txt and txt != "-" and re.search(r'\d', txt):
+                                val = float(re.search(r'[\d.]+', txt).group())
+                                fund_data[key] = val
+                                break
 
-        th_elements = soup.find_all("th")
-        for th in th_elements:
-            if "BPS" in th.get_text():
-                td = th.find_next("td")
-                if td:
-                    txt = re.sub(r'[^\d]', '', td.get_text())
-                    if txt:
-                        fund_data["bps"] = int(txt)
-                        break
-
+        if fund_data["per"] == "-":
+            per_elem = soup.find(id="_per")
+            if per_elem: fund_data["per"] = float(re.search(r'[\d.]+', per_elem.get_text()).group())
+        if fund_data["pbr"] == "-":
+            pbr_elem = soup.find(id="_pbr")
+            if pbr_elem: fund_data["pbr"] = float(re.search(r'[\d.]+', pbr_elem.get_text()).group())
+        if fund_data["eps"] == 0:
+            eps_elem = soup.find(id="_eps")
+            if eps_elem: fund_data["eps"] = float(re.search(r'[\d.]+', eps_elem.get_text().replace(',', '')).group())
+            
         return fund_data
     except Exception:
         return {"per": "-", "pbr": "-", "eps": 0, "bps": 0}
@@ -325,7 +420,7 @@ if not g_data:
     st.warning("실시간 데이터를 호출하지 못했습니다. 상단의 '실시간 갱신' 버튼을 눌러주세요.")
 
 with col_title:
-    st.caption(f"실시간: {g_data.get('updated_at', '알 수 없음')} | 캐시: {cached_data.get('updated_at', '알 수 없음')} | 사용자: {current_user}")
+    st.caption(f"실시간: {g_data.get('updated_at', '알 수 없음')} | 캐시: {cached_data.get('updated_at', '알 수 없음')}")
 
 market_data = g_data.get("market_status", {}) if g_data else {}
 market_data_str = ", ".join([f"{k}: {v['current']}({v['diff_pct']}%)" for k, v in market_data.items() if v.get('current', 0) > 0])
@@ -504,19 +599,18 @@ with tab4:
             
             with st.spinner("최종 심층 분석 중..."):
                 step2_prompt = (
-                    f"당신은 감정을 철저히 배제하고 숫자와 팩트로만 승부하는 퀀트 및 차트 애널리스트입니다.\n"
+                    f"당신은 객관적인 사실과 숫자에 기반해 판단하는 퀀트/차트 애널리스트입니다.\n"
                     f"선택된 투자 기간: {investment_horizon}\n\n"
                     f"[추출된 실데이터]\n{tech_data_str}\n"
-                    f"위 종목들의 실제 제공된 '현재가', '차트 지표', '펀더멘털 지표'를 절대적으로 신뢰하여 분석하십시오.\n\n"
-                    f"아래 항목들을 누락 없이 심층적이고 풍부하게 서술하여 리포트를 작성하십시오.\n\n"
+                    f"제공된 데이터를 신뢰하여 아래 항목들을 상세히 서술해 리포트를 작성하십시오. 불필요한 감정적 수사는 배제합니다.\n\n"
                     f"[종목명] (티커)\n"
-                    f"- 매수의견: (현재가 대비 정량적 가치를 판단하여 Buy/Hold/Sell 중 명확한 투자의견 제시)\n"
+                    f"- 매수의견: (현재가 대비 정량적 가치를 판단하여 Buy/Hold/Sell 명시)\n"
                     f"- 모멘텀 분석: (관련 핵심 이슈 요약)\n"
                     f"- 기술적 분석: (이평선 위치, MACD 등 실제 숫자에 기반한 차트 추세 서술)\n"
                     f"- 퀀트 분석: (제공된 PER, EPS, PBR, BPS 수치를 활용하여 적용된 적정주가 산출 공식과 계산 과정을 구체적이고 투명하게 명시)\n"
-                    f"- 목표가 산출 근거: (퀀트 밸류에이션 결과와 기술적 매물대/지지선을 어떻게 유기적으로 융합하여 단기·중기·장기 목표가를 도출했는지 각각 구체적인 수식과 숫자를 들어 상세히 서술)\n"
+                    f"- 목표가 산출 근거: (퀀트 밸류에이션 결과와 기술적 매물대/지지선을 유기적으로 융합하여 단기·중기·장기 목표가를 도출해낸 구체적인 수식과 논리를 상세히 서술)\n"
                     f"- 진입 타점: (기술적 지지선에 기반한 현실적인 진입 가격)\n\n"
-                    f"※ 마지막 줄은 반드시 아래 파싱 형식으로만 출력. 가격은 단위 없이 숫자로만 기입합니다.\n"
+                    f"※ 마지막 줄은 반드시 아래 파싱 형식으로만 출력. 가격은 단위 없이 숫자로만 기입.\n"
                     f"[TRACKING_DATA]\n"
                     f"종목명1|티커1|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만\n"
                     f"종목명2|티커2|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만\n"
@@ -615,13 +709,13 @@ with tab5:
                         data_str += f"[퀀트] PER: {fund['per']} | PBR: {fund['pbr']} | EPS: {fund['eps']:,.0f} | BPS: {fund['bps']:,.0f}\n"
                     
                     prompt = (f"[{name} 진단]\n[실데이터]\n{data_str}\n\n"
-                              f"당신은 객관적인 수치에 입각해 판단하는 애널리스트입니다. 감정적 표현과 이모지를 배제하십시오.\n\n"
-                              f"아래 항목들을 분량을 축소하지 말고 상세히 서술하여 리포트를 작성하십시오.\n"
+                              f"당신은 객관적인 사실과 숫자에 기반해 판단하는 퀀트/차트 애널리스트입니다.\n\n"
+                              f"아래 항목들을 상세히 서술하여 리포트를 작성하십시오.\n"
                               f"- 매수의견: (현재가 대비 정량적 밸류에이션을 근거로 Buy/Hold/Sell 명시)\n"
                               f"- 모멘텀 분석\n"
-                              f"- 기술적 분석 (이평선, MACD 등 실제 값 사용)\n"
+                              f"- 기술적 분석 (이평선, MACD 등 실제 값 연동)\n"
                               f"- 퀀트 분석 (제공된 지표를 적용한 구체적인 주가 계산 공식과 수치 증명 명시)\n"
-                              f"- 목표가 산출 근거: (단기, 중기, 장기 가격을 도출해낸 구체적인 수식과 근거 서술)\n\n"
+                              f"- 목표가 산출 근거: (단기, 중기, 장기 가격을 도출해낸 구체적인 수식과 근거 상세 서술)\n\n"
                               f"※ 반드시 마지막 줄에 아래 파싱 형식으로만 작성.\n"
                               f"TARGET_PRICE: 단기숫자만|중기숫자만|장기숫자만|매수추천가숫자만")
                     
