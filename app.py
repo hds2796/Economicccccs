@@ -12,6 +12,7 @@ from googleapiclient.http import MediaIoBaseDownload
 from google import genai
 
 MODEL_NAME = "gemini-3.5-flash"
+LITE_MODEL_NAME = "gemini-3.1-flash-lite"  # 기사 중요도 채점용 경량 모델. 실제 계정에서 쓰는 모델명이 다르면 이 값만 바꾸면 됨.
 
 # =======================================================
 # 1. 페이지 설정 및 비밀번호 로그인
@@ -122,13 +123,13 @@ def fetch_global_data():
 GEMINI_CONCURRENCY_LIMIT = 3
 _gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
 
-def call_gemini_with_fallback(prompt):
+def call_gemini_with_fallback(prompt, model=MODEL_NAME):
     acquired = _gemini_semaphore.acquire(timeout=25)
     if not acquired:
         return "API 호출 대기 시간 초과"
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        return client.models.generate_content(model=MODEL_NAME, contents=prompt).text
+        return client.models.generate_content(model=model, contents=prompt).text
     except Exception as e:
         return f"호출 실패: {e}"
     finally:
@@ -166,6 +167,24 @@ def parse_won(s):
         s = s.split('만')[0]
     num_str = re.sub(r'[^\d.]', '', s)
     return float(num_str) * multiplier if num_str else 0.0
+
+def search_stock_code(name):
+    """종목명으로 네이버 증권 자동완성 API를 조회해 6자리 종목코드를 자동으로 찾는다."""
+    if not name:
+        return None, None
+    try:
+        url = f"https://m.stock.naver.com/front-api/search/autoComplete?query={requests.utils.quote(name)}&target=stock,index,marketindicator,coin,ipo"
+        res = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
+        payload = res.json()
+        items = (payload.get("result") or {}).get("items", [])
+        # 코스피/코스닥 국내 주식을 우선으로 매칭
+        stock_items = [i for i in items if i.get("typeName") in ("코스피", "코스닥")] or items
+        if not stock_items:
+            return None, None
+        best = stock_items[0]
+        return best.get("code"), best.get("name")
+    except Exception:
+        return None, None
 
 def fetch_current_prices(codes):
     """네이버 증권 실시간 시세 조회 (6자리 KRX 종목코드 기준).
@@ -212,6 +231,44 @@ def fetch_current_prices(codes):
             "diff_pct": to_f("fluctuationsRatio", "cr"),
         }
     return out
+
+def dedupe_news(news_list):
+    """같은 기사가 여러 카테고리/키워드에 겹쳐 들어온 경우를 대비한 프론트엔드 안전장치.
+    링크 기준으로 중복 제거 (링크가 없으면 제목 기준)."""
+    seen = set()
+    out = []
+    for n in news_list or []:
+        key = n.get("link") or n.get("title")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(n)
+    return out
+
+def rank_articles_by_importance(articles):
+    """가벼운 모델(LITE_MODEL_NAME)로 기사들의 투자 중요도를 0~100점으로 채점해 중요도 순 정렬.
+    채점 실패 시 원래 순서를 그대로 반환(안전한 폴백)."""
+    if not articles:
+        return articles
+    numbered = "\n".join([f"{i}. {a['title']} | {a.get('summary', '')[:80]}" for i, a in enumerate(articles)])
+    prompt = (
+        "아래는 번호가 매겨진 뉴스 기사 목록이다. 각 기사가 한국 주식시장 투자자에게 "
+        "지금 얼마나 중요하고 시급한 정보인지 0~100점으로 채점하라. "
+        "다른 설명 없이 JSON 배열만 출력하라.\n"
+        '형식: [{"i": 번호, "score": 점수}, ...]\n\n'
+        f"{numbered}"
+    )
+    try:
+        raw = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not match:
+            return articles
+        scores = json.loads(match.group(0))
+        score_map = {int(s['i']): float(s.get('score', 0)) for s in scores if 'i' in s}
+        ranked_idx = sorted(range(len(articles)), key=lambda idx: score_map.get(idx, 0), reverse=True)
+        return [articles[idx] for idx in ranked_idx]
+    except Exception:
+        return articles
 
 def build_prompt_deep_dive(stock_name, market_str):
     return (f"[{stock_name} 진단]\n[시장 지표]\n{market_str}\n\n위 데이터를 바탕으로 객관적인 진단 리포트를 작성하십시오.\n"
@@ -290,7 +347,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📰 실시간 브리핑", "🔥 
 
 with tab1:
     st.subheader("📰 실시간 경제·시사 뉴스 분석")
-    news_list = g_data.get("realtime_news", [])
+    news_list = dedupe_news(g_data.get("realtime_news", []))
 
     if st.button("🤖 실시간 뉴스 기반 종합 분석", type="primary", use_container_width=True, key="btn_realtime"):
         articles_str = "\n".join([f"- {n['title']}\n  요약: {n.get('summary', '(요약 없음)')}" for n in news_list])
@@ -304,13 +361,13 @@ with tab1:
             st.write(st.session_state.realtime_analysis)
             st.caption(f"🧠 생성 모델: {MODEL_NAME} · {st.session_state.get('realtime_analysis_time', '')}")
 
-    for news in news_list:
+    for news in news_list[:10]:
         with st.expander(f"🕒 {news['title']}"):
             st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
 
 with tab2:
     st.subheader("今日 핵심 경제 뉴스")
-    eco_news_list = g_data.get("eco_news", [])
+    eco_news_list = dedupe_news(g_data.get("eco_news", []))
 
     if st.button("🤖 핵심 경제 뉴스 종합 분석", type="primary", use_container_width=True, key="btn_eco"):
         articles_str = "\n".join([f"- {n['title']}\n  요약: {n.get('summary', '(요약 없음)')}" for n in eco_news_list])
@@ -324,7 +381,7 @@ with tab2:
             st.write(st.session_state.eco_analysis)
             st.caption(f"🧠 생성 모델: {MODEL_NAME} · {st.session_state.get('eco_analysis_time', '')}")
 
-    for news in eco_news_list:
+    for news in eco_news_list[:10]:
         with st.expander(f"📰 {news['title']}"):
             st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
 
@@ -333,7 +390,21 @@ with tab3:
     sectors_data = g_data.get("sectors", {})
     if sectors_data:
         selected_sector = st.selectbox("관심 섹터 선택", list(sectors_data.keys()))
-        for news in sectors_data.get(selected_sector, []):
+        sector_news = dedupe_news(sectors_data.get(selected_sector, []))
+
+        if st.button(f"🤖 {selected_sector} 섹터 분석", type="primary", use_container_width=True, key=f"btn_sector_{selected_sector}"):
+            articles_str = "\n".join([f"- {n['title']}\n  요약: {n.get('summary', '(요약 없음)')}" for n in sector_news])
+            prompt = f"[{selected_sector}] 섹터 뉴스 분석:\n[지표]: {market_data_str}\n\n[기사 목록 ({len(sector_news)}건)]\n{articles_str}"
+            with st.spinner(f"AI가 {selected_sector} 섹터를 분석하고 있습니다..."):
+                st.session_state[f"sector_analysis_{selected_sector}"] = "".join(call_gemini_stream_with_fallback(prompt))
+                st.session_state[f"sector_analysis_time_{selected_sector}"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        if st.session_state.get(f"sector_analysis_{selected_sector}"):
+            with st.expander(f"🤖 {selected_sector} AI 분석 결과", expanded=True):
+                st.write(st.session_state[f"sector_analysis_{selected_sector}"])
+                st.caption(f"🧠 생성 모델: {MODEL_NAME} · {st.session_state.get(f'sector_analysis_time_{selected_sector}', '')}")
+
+        for news in sector_news[:10]:
             with st.expander(f"🏭 {news['title']}"):
                 st.write(news['summary'])
 
@@ -342,7 +413,9 @@ with tab4:
     investment_horizon = st.radio("⏳ 투자 기간 설정", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
 
     if st.button("🚀 추천 종목 발굴", type="primary", use_container_width=True, key="btn_recommend"):
-        rec_news = g_data.get("realtime_news", []) + g_data.get("eco_news", [])
+        rec_news = dedupe_news(g_data.get("realtime_news", []) + g_data.get("eco_news", []))
+        with st.spinner("AI(라이트)가 기사 중요도를 채점하고 있습니다..."):
+            rec_news = rank_articles_by_importance(rec_news)
         prompt = build_prompt_recommend_step3(rec_news, market_data_str, investment_horizon)
         with st.spinner("AI가 종목을 발굴하고 있습니다..."):
             st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(prompt))
@@ -405,17 +478,20 @@ with tab4:
 
 with tab5:
     st.subheader("⭐️ 관심종목 진단")
-    with st.form("add_stock"):
-        c0, c1 = st.columns(2)
-        new_s = c0.text_input("종목명 입력 (예: 삼성전자, 카카오)")
-        new_ticker = c1.text_input("종목코드 (6자리, 예: 005930)", max_chars=6, help="입력하면 현재가를 자동으로 보여줍니다.")
 
-        own_status = st.radio("보유 상태", ["👀 미보유 (관심만)", "💼 보유"], horizontal=True)
+    # st.form 안에서는 위젯을 바꿔도 제출 전까지 화면이 다시 그려지지 않아서
+    # 보유/미보유 라디오를 폼 밖으로 빼서 선택 즉시 평단가/수량 활성화 여부가 반영되게 함
+    own_status = st.radio("보유 상태", ["👀 미보유 (관심만)", "💼 보유"], horizontal=True, key="add_own_status")
+
+    with st.form("add_stock"):
+        new_s = st.text_input("종목명 입력 (예: 삼성전자, 카카오)")
+        st.caption("종목코드는 자동으로 찾아드려요. 정확한 매칭을 위해 정식 종목명을 입력해주세요.")
         c2, c3 = st.columns(2)
         avg_p = c2.text_input("평단가", value="0", disabled=(own_status.startswith("👀")))
         qty = c3.number_input("수량", min_value=0, value=0, disabled=(own_status.startswith("👀")))
 
         if st.form_submit_button("➕ 종목 등록") and new_s:
+            code, matched_name = search_stock_code(new_s.strip())
             is_owned_flag = 1 if own_status.startswith("💼") else 0
             if is_owned_flag:
                 try:
@@ -425,10 +501,19 @@ with tab5:
                 final_qty = qty
             else:
                 final_avg_p, final_qty = 0.0, 0
+
             c.execute("INSERT INTO portfolio (stock_name, ticker, is_owned, avg_price, quantity) VALUES (?,?,?,?,?)",
-                      (new_s.strip(), re.sub(r'[^\d]', '', new_ticker or ''), is_owned_flag, final_avg_p, final_qty))
+                      (new_s.strip(), code or '', is_owned_flag, final_avg_p, final_qty))
             conn.commit()
+            if code:
+                st.session_state.watch_add_msg = ("success", f"✅ '{matched_name}'({code}) 등록 완료! 현재가가 자동으로 표시됩니다.")
+            else:
+                st.session_state.watch_add_msg = ("warning", f"⚠️ '{new_s.strip()}' 종목코드를 찾지 못했어요. 종목은 등록되었지만 현재가는 표시되지 않습니다.")
             st.rerun()
+
+    if st.session_state.get("watch_add_msg"):
+        level, msg = st.session_state.pop("watch_add_msg")
+        getattr(st, level)(msg)
 
     c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time, ticker FROM portfolio")
     portfolios = c.fetchall()
