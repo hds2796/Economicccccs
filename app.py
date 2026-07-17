@@ -541,7 +541,6 @@ for i, key in enumerate(["코스피", "코스닥", "S&P 500", "원/달러 환율
             st.metric(label=key, value=f"{val:,.2f}" if val else "점검중", delta=f"{diff:+.2f} ({diff_pct:+.2f}%)" if val else None)
 
 st.divider()
-# 💡 탭 7 제거 및 원복
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경제", "섹터 뉴스", "종목 발굴", "관심종목 진단", "스크랩북"])
 
 # =======================================================
@@ -566,12 +565,15 @@ with tab1:
 with tab2:
     st.subheader("핵심 경제 종합 브리핑 및 시장 심리")
     
-    # 심리 지수 추출 및 평균화 시각화
+    # 심리 지수 일간 평균 추출 및 최근 7일(일주일) 시각화 적용
     c.execute("SELECT calc_date, score FROM sentiment_history ORDER BY calc_date ASC")
     if sentiment_rows := c.fetchall():
         df_sent = pd.DataFrame(sentiment_rows, columns=['date', 'score'])
         df_sent['date'] = pd.to_datetime(df_sent['date']).dt.strftime('%Y-%m-%d')
         df_avg = df_sent.groupby('date')['score'].mean().reset_index().set_index('date')
+        
+        # 💡 최근 7일치 트렌드만 추출
+        df_avg_7d = df_avg.tail(7)
         
         today_str = datetime.now().strftime('%Y-%m-%d')
         if not df_avg.empty:
@@ -582,9 +584,10 @@ with tab2:
             with col_s1:
                 diff = today_score - prev_score
                 st.metric("오늘의 평균 시장 심리", f"{today_score:.1f}점", f"{diff:+.1f}p" if len(df_avg) > 1 else "첫 측정")
-                st.caption("0(공포) ◀ 50(중립) ▶ 100(탐욕)\n*일간 평균치 반영")
+                st.caption("0(공포) ◀ 50(중립) ▶ 100(탐욕)\n*최근 7일 트렌드")
             with col_s2:
-                st.line_chart(df_avg['score'], height=150)
+                # 💡 7일치 데이터 선 그래프
+                st.line_chart(df_avg_7d['score'], height=150)
                 
     st.divider()
 
@@ -595,9 +598,9 @@ with tab2:
             with st.spinner("Lite 요약 중..."): 
                 lite_summary = call_gemini_lite_summary("요약하라:\n" + "\n".join([f"- {n['title']}" for n in eco_news[:50]]))
             with st.spinner("Flash 심층 분석 중..."):
-                # 💡 "앞으로 주식시장은?" 항목 추가 및 청산 기한 제약 삭제
+                # 💡 "앞으로 주식시장은?" 항목 추가 및 청산 기한 삭제
                 prompt = (
-                    f"당신은 매크로 퀀트 전략가입니다.\n"
+                    f"당신은 리스크 관리에 철저한 매크로 퀀트 전략가입니다.\n"
                     f"[현재 시장 지표]\n{json.dumps(market_data)}\n"
                     f"[거시 경제 요약]\n{lite_summary}\n\n"
                     f"=== 리포트 작성 항목 ===\n"
