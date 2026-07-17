@@ -11,8 +11,7 @@ import os
 import io
 import zipfile
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone, timedelta
-from email.utils import parsedate_to_datetime
+from datetime import datetime
 from bs4 import BeautifulSoup
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -182,18 +181,18 @@ with st.sidebar:
                 st.rerun()
 
 # =======================================================
-# 투 트랙 API 호출 (요약: Lite / 분석: Flash)
+# 투 트랙 API 호출 함수
 # =======================================================
 GEMINI_CONCURRENCY_LIMIT = 3
 _gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
 
 def call_gemini_lite_summary(prompt):
     acquired = _gemini_semaphore.acquire(timeout=25)
-    if not acquired: return ""
+    if not acquired: return "API 대기 시간 초과(Lite)"
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         return client.models.generate_content(model=LITE_MODEL_NAME, contents=prompt).text
-    except: return ""
+    except Exception as e: return f"요약 실패: {e}"
     finally: _gemini_semaphore.release()
 
 def call_gemini_with_fallback(prompt, model=MODEL_NAME):
@@ -215,7 +214,7 @@ def call_gemini_stream_with_fallback(prompt):
     finally: _gemini_semaphore.release()
 
 # =======================================================
-# 심층 데이터 크롤링 및 DART 연동
+# 크롤링 및 데이터 가공 유틸
 # =======================================================
 @st.cache_data(ttl=600)
 def get_dart_filings(stock_code):
@@ -225,7 +224,7 @@ def get_dart_filings(stock_code):
     if not row: return "DART 매핑 데이터 없음"
     corp_code = row[0]
     
-    bgn_de = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+    bgn_de = (datetime.now() - pd.Timedelta(days=90)).strftime("%Y%m%d")
     url = f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={corp_code}&bgn_de={bgn_de}&page_count=5"
     try:
         res = requests.get(url, timeout=5).json()
@@ -240,7 +239,6 @@ def get_advanced_fundamental_data(code):
     data = {"per": "-", "pbr": "-", "eps": 0, "bps": 0, "industry_per": "-", "quarter_trend": "정보 없음", "supply_demand": "정보 없음"}
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        # 1. 재무 및 업종 PER
         url = f"https://finance.naver.com/item/main.naver?code={code}"
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, "html.parser")
@@ -250,27 +248,23 @@ def get_advanced_fundamental_data(code):
         pbr_elem = soup.find(id="_pbr")
         if pbr_elem: data["pbr"] = pbr_elem.get_text()
         
-        ind_per = soup.find("em", id="_cns_eps") 
         th_elements = soup.find_all("th")
         for th in th_elements:
             if "동일업종 PER" in th.get_text():
                 td = th.find_next("td")
                 if td: data["industry_per"] = td.get_text().strip().replace('배', '')
         
-        # 8분기(최근 실적) 요약 추출
         cop_table = soup.find("div", class_="cop_details")
         if cop_table:
-            data["quarter_trend"] = "최근 실적 테이블 확인됨 (수치 변동성 분석 요망)"
+            data["quarter_trend"] = "최근 8분기 실적 변동성 데이터 존재 (재무 추세 요약 반영 필요)"
             
-        # 2. 수급 (기관/외국인)
         url_frgn = f"https://finance.naver.com/item/frgn.naver?code={code}"
         res_frgn = requests.get(url_frgn, headers=headers, timeout=5)
         soup_frgn = BeautifulSoup(res_frgn.text, "html.parser")
         table = soup_frgn.find("table", class_="type2")
         if table:
-            trs = table.find_all("tr")[3:8] # 최근 5거래일
-            inst_sum = 0
-            fore_sum = 0
+            trs = table.find_all("tr")[3:8]
+            inst_sum, fore_sum = 0, 0
             for tr in trs:
                 tds = tr.find_all("td")
                 if len(tds) >= 7:
@@ -292,25 +286,15 @@ def get_technical_data(code):
         soup = BeautifulSoup(res.text, "html.parser")
         items = soup.find_all('item')
         if not items: return None
-        
         df_data = [float(item['data'].split('|')[4]) for item in items]
         if len(df_data) < 60: return None
         
-        current = df_data[-1]
-        high_52 = max(df_data)
-        low_52 = min(df_data)
-        ma20 = sum(df_data[-20:]) / 20
-        ma60 = sum(df_data[-60:]) / 60
-        
         df = pd.Series(df_data)
-        ema12 = df.ewm(span=12, adjust=False).mean()
-        ema26 = df.ewm(span=26, adjust=False).mean()
-        macd = ema12 - ema26
+        macd = df.ewm(span=12, adjust=False).mean() - df.ewm(span=26, adjust=False).mean()
         signal = macd.ewm(span=9, adjust=False).mean()
-        
         return {
-            "current": current, "high_52": high_52, "low_52": low_52,
-            "ma20": ma20, "ma60": ma60, "macd": macd.iloc[-1], "signal": signal.iloc[-1]
+            "current": df_data[-1], "high_52": max(df_data), "low_52": min(df_data),
+            "ma20": sum(df_data[-20:]) / 20, "ma60": sum(df_data[-60:]) / 60, "macd": macd.iloc[-1], "signal": signal.iloc[-1]
         }
     except: return None
 
@@ -322,16 +306,9 @@ def fetch_stock_news(query, display=5):
         req = urllib.request.Request(url, headers={"X-NCP-APIGW-API-KEY-ID": NAVER_CLIENT_ID, "X-NCP-APIGW-API-KEY": NAVER_CLIENT_SECRET})
         with urllib.request.urlopen(req, timeout=3) as response:
             res = json.loads(response.read().decode('utf-8'))
-            items = []
-            for i in res.get("items", []):
-                title = BeautifulSoup(i['title'], "html.parser").get_text()
-                items.append({"title": title, "link": i['link']})
-            return items
+            return [{"title": BeautifulSoup(i['title'], "html.parser").get_text(), "link": i['link']} for i in res.get("items", [])]
     except: return []
 
-# =======================================================
-# 유틸 및 캐시 데이터
-# =======================================================
 def parse_won(s):
     if not s: return 0.0
     s = str(s).strip()
@@ -415,20 +392,16 @@ def fetch_realtime_data_direct(seen_links):
         return res.json()
     except: return None
 
-if "seen_realtime_links" not in st.session_state:
-    st.session_state.seen_realtime_links = set()
-if "realtime_cache" not in st.session_state:
-    st.session_state.realtime_cache = None
+if "seen_realtime_links" not in st.session_state: st.session_state.seen_realtime_links = set()
+if "realtime_cache" not in st.session_state: st.session_state.realtime_cache = None
 
 cached_data = fetch_cached_global_data() or {}
-
 if st.session_state.realtime_cache is None:
     with st.spinner("데이터 로딩 중..."):
         new_data = fetch_realtime_data_direct(st.session_state.seen_realtime_links)
         if new_data:
             st.session_state.realtime_cache = new_data
-            for n in new_data.get("realtime_news", []):
-                st.session_state.seen_realtime_links.add(n['link'])
+            for n in new_data.get("realtime_news", []): st.session_state.seen_realtime_links.add(n['link'])
 
 g_data = st.session_state.realtime_cache or {}
 
@@ -439,11 +412,8 @@ with col_refresh:
             new_data = fetch_realtime_data_direct(st.session_state.seen_realtime_links)
             if new_data:
                 st.session_state.realtime_cache = new_data
-                for n in new_data.get("realtime_news", []):
-                    st.session_state.seen_realtime_links.add(n['link'])
+                for n in new_data.get("realtime_news", []): st.session_state.seen_realtime_links.add(n['link'])
                 st.rerun()
-
-if not g_data: st.warning("실시간 데이터를 호출하지 못했습니다.")
 
 with col_title:
     st.caption(f"실시간: {g_data.get('updated_at', '알 수 없음')} | 캐시: {cached_data.get('updated_at', '알 수 없음')}")
@@ -457,16 +427,65 @@ for i, key in enumerate(target_indices):
             data = market_data[key]
             val, diff, diff_pct = data.get("current", 0.0), data.get("diff", 0.0), data.get("diff_pct", 0.0)
             if val == 0.0: st.metric(label=key, value="점검중")
-            elif key == "원/달러 환율": st.metric(label=key, value=f"{val:,.2f}", delta=f"{diff:+.2f} ({diff_pct:+.2f}%)")
             else: st.metric(label=key, value=f"{val:,.2f}", delta=f"{diff:+.2f} ({diff_pct:+.2f}%)")
-        else: st.metric(label=key, value="대기중")
 
 st.divider()
-
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경제", "섹터 뉴스", "종목 발굴", "관심종목 진단", "스크랩북"])
 
 # =======================================================
-# 탭 4: 종목 발굴 (투 트랙 최적화)
+# 탭 1: 실시간 브리핑 (투 트랙 파이프라인)
+# =======================================================
+with tab1:
+    st.subheader("실시간 지황 브리핑")
+    if st.button("브리핑 생성", key="btn_briefing"):
+        news_pool = g_data.get("realtime_news", [])
+        news_str = "\n".join([f"- {n['title']}: {n.get('description', '')}" for n in news_pool[:15]])
+        
+        with st.spinner("Lite 모델이 시황 뉴스를 상세히 압축 중..."):
+            summary_prompt = f"다음 실시간 속보 뉴스를 읽고, 누락 없이 중요한 시장 호악재 요소를 상세히 통합 요약하라. 분량 제한 없이 정보 가치를 보존하라:\n\n{news_str}"
+            lite_summary = call_gemini_lite_summary(summary_prompt)
+            
+        with st.spinner("Flash 3.5 모델이 시장 변화 및 의의를 분석 중..."):
+            analysis_prompt = (f"지표 데이터:\n{json.dumps(market_data)}\n\n[Lite 전처리 요약본]\n{lite_summary}\n\n"
+                               f"위 요약 자료와 지표를 근거로, 현재 주식시장의 흐름이 가지는 '구체적 의미'와 '향후 증시에 가져올 변화'를 철저히 객관적인 관점에서 심층 분석하여 서술하라.")
+            st.write_stream(call_gemini_stream_with_fallback(analysis_prompt))
+
+# =======================================================
+# 탭 2: 핵심 경제
+# =======================================================
+with tab2:
+    st.subheader("핵심 경제 뉴스 요약")
+    eco_news = cached_data.get("eco_news", [])
+    if eco_news:
+        for idx, n in enumerate(eco_news[:10]):
+            st.markdown(f"**[{idx+1}] {n['title']}**")
+            if st.button("심층 분석", key=f"eco_an_{idx}"):
+                with st.spinner("Lite 전처리 및 Flash 3.5 의미론적 분석 진행 중..."):
+                    l_sum = call_gemini_lite_summary(f"본 뉴스의 핵심적 사실을 왜곡 없이 상세히 요약하라:\n{n['title']}")
+                    flash_p = f"[뉴스 요약]\n{l_sum}\n\n이 사실이 거시 경제 및 관련 주식 섹터에 미칠 중장기 파급 효과와 거시적 변화 의의를 분석하라."
+                    st.write(call_gemini_with_fallback(flash_p))
+    else: st.info("조회된 핵심 경제 뉴스가 없습니다.")
+
+# =======================================================
+# 탭 3: 섹터 뉴스
+# =======================================================
+with tab3:
+    st.subheader("섹터별 모멘텀 분석")
+    sec_news = g_data.get("sector_news", {}) if g_data else {}
+    if sec_news:
+        for sec, items in sec_news.items():
+            with st.expander(f"📁 {sec} 섹터 뉴스 ({len(items)})"):
+                titles = "\n".join([f"- {i['title']}" for i in items])
+                st.text(titles)
+                if st.button("섹터 종합 전망 분석", key=f"sec_btn_{sec}"):
+                    with st.spinner("Lite 섹터 통합 전처리 중..."):
+                        lite_s = call_gemini_lite_summary(f"다음 {sec} 섹터 뉴스들의 핵심 트렌드와 호악재 요인을 상세히 기술하라:\n{titles}")
+                    with st.spinner("Flash 3.5 주도주 변화 예측 중..."):
+                        flash_p = f"[{sec} 섹터 이슈 요약]\n{lite_s}\n\n이 트렌드가 향후 {sec} 섹터 내 주도주 흐름에 가져올 변화와 주식시장에 미칠 파장을 분석하라."
+                        st.write(call_gemini_with_fallback(flash_p))
+
+# =======================================================
+# 탭 4: 종목 발굴 (투 트랙 최적화 & 상세 요약)
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (심층 분석)")
@@ -475,14 +494,13 @@ with tab4:
     if st.button("추천 종목 발굴", use_container_width=True, key="btn_recommend"):
         rec_news = dedupe_news((g_data.get("realtime_news", []) if g_data else []) + (cached_data.get("eco_news", []) if cached_data else []))
         
-        if not rec_news:
-            st.error("분석 대상 뉴스 풀이 비어있습니다.")
+        if not rec_news: st.error("분석 대상 뉴스 풀이 비어있습니다.")
         else:
             with st.spinner("[1단계] 1차 후보군 10개 추출 중..."):
                 articles_str = "\n".join([f"- {n['title']}" for n in rec_news[:50]])
-                step1_prompt = (f"경제 뉴스를 바탕으로 상승 모멘텀이 뛰어난 주식 종목 10개를 골라 종목코드 6자리만 JSON 배열로 출력하라.\n"
-                                f"예: [\"005930\", \"000660\"]\n오직 JSON만 출력할 것.\n\n{articles_str}")
-                step1_res = call_gemini_with_fallback(step1_prompt, model=LITE_MODEL_NAME) # 1차는 가볍게
+                step1_prompt = (f"경제 뉴스를 바탕으로 투자기간 [{investment_horizon}] 동안 상승 모멘텀이 뛰어난 "
+                                f"한국 주식 종목 10개를 골라 종목코드 6자리만 JSON 배열로 출력하라.\n오직 JSON만 출력할 것.\n\n{articles_str}")
+                step1_res = call_gemini_with_fallback(step1_prompt, model=LITE_MODEL_NAME)
                 match = re.search(r'\[.*\]', step1_res, re.DOTALL)
                 selected_tickers = []
                 if match:
@@ -490,39 +508,49 @@ with tab4:
                     except: pass
                 if not selected_tickers: st.stop()
             
-            with st.spinner("[2단계] 후보군 심층 데이터 크롤링 및 요약 중..."):
+            with st.spinner("[2단계] 후보군 심층 데이터 크롤링 및 Lite 상세 요약 중..."):
                 tech_data_str = ""
                 for ticker in selected_tickers:
                     ticker = re.sub(r'[^\d]', '', ticker)
                     if len(ticker) != 6: continue
-                    code, name = ticker, ticker # 간이 처리
+                    try:
+                        res = requests.get(f"https://m.stock.naver.com/api/stock/{ticker}/basic", timeout=3).json()
+                        name = res.get("stockName", ticker)
+                    except: name = ticker
                     
                     tech = get_technical_data(ticker)
                     fund = get_advanced_fundamental_data(ticker)
                     dart_info = get_dart_filings(ticker)
+                    news_raw = fetch_stock_news(name, display=4)
+                    news_str = "\n".join([n['title'] for n in news_raw])
+                    
+                    # 💡 길이 제한을 두지 않고 상세히 수집 및 통합
+                    summary_prompt = f"다음은 {name} 종목의 공시와 관련 뉴스 리스트다. 누락 없이 호악재 및 경영 흐름을 상세히 요약하라:\n[공시]\n{dart_info}\n[뉴스]\n{news_str}"
+                    lite_summary = call_gemini_lite_summary(summary_prompt)
                     
                     tech_data_str += f"[{name} ({ticker})]\n"
                     if tech:
                         tech_data_str += f"- 차트: 현재가 {tech['current']:,.0f} | 20일선 {tech['ma20']:,.0f} | MACD {tech['macd']:,.2f}\n"
                     if fund:
-                        tech_data_str += f"- 펀더멘털: 종목PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']}\n"
+                        tech_data_str += f"- 펀더멘털: 종목PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']} | 실적트렌드: {fund['quarter_trend']}\n"
                         tech_data_str += f"- 수급동향: {fund['supply_demand']}\n"
-                        tech_data_str += f"- DART 공시: {dart_info}\n\n"
+                    tech_data_str += f"- Lite 정제 이슈 자료:\n{lite_summary}\n\n"
             
-            with st.spinner("[3단계] Flash 3.5 기반 퀀트 심층 분석 중..."):
+            with st.spinner("[3단계] Flash 3.5 기반 퀀트 심층 분석 및 시장 변화 분석 중..."):
                 step3_prompt = (
-                    f"당신은 퀀트 애널리스트입니다. 제공된 10개 후보군 중, "
-                    f"수급, 공시, 업종 PER 대비 저평가 여부를 종합해 'Buy'가 확실한 3개 종목만 엄선하십시오.\n\n"
+                    f"당신은 감정을 배제하는 철저한 퀀트 애널리스트입니다. 제공된 10개 후보군의 상세 데이터와 수급, 재무, 공시 요약본을 토대로 "
+                    f"업종 PER 대비 저평가 여부를 비교 검증하여 확실히 매수 매력도가 높은 상위 3개 종목만 엄선하십시오.\n\n"
                     f"[10개 후보군 심층 데이터]\n{tech_data_str}\n\n"
                     f"=== 분석 지시 ===\n"
-                    f"1. 수급이 꼬였거나 밸류에이션이 고평가된 종목은 과감히 버리십시오.\n"
-                    f"2. 엄선된 최대 3개 종목에 대해서만 심층 리포트를 작성하십시오.\n\n"
+                    f"1. 지표가 부실하거나 고평가된 종목은 배제하고, 확실한 'Buy' 종목만 리포트하십시오.\n"
+                    f"2. 각 추천 종목이 속한 섹터 및 해당 기업의 모멘텀이 향후 주식시장에 어떤 변화를 가져올지 구체적 의의를 반드시 분석 내용에 녹여내십시오.\n\n"
                     f"=== 리포트 작성 항목 ===\n"
                     f"[종목명] (티커)\n"
-                    f"- 매수의견: 반드시 'Buy' 의견인 정량적 근거\n"
-                    f"- 수급 및 공시 모멘텀: (외국인/기관 수급 및 DART 주요 이슈)\n"
-                    f"- 퀀트 밸류에이션: (업종 PER 비교 및 재무 분석)\n"
-                    f"- 목표가 산출 근거: (수식과 논리 서술)\n"
+                    f"- 매수의견: 반드시 'Buy' 의견인 정량적 근거 명시\n"
+                    f"- 수급 및 공시 분석\n"
+                    f"- 퀀트 밸류에이션: 업종 평균 PER/PBR과 철저히 비교 분석\n"
+                    f"- 시장 파급 효과 및 변화 의의: (해당 모멘텀이 시장에 가져올 변화 분석)\n"
+                    f"- 목표가 산출 근거\n"
                     f"- 진입 타점\n\n"
                     f"※ 반드시 아래 파싱 형식으로 출력.\n"
                     f"[TRACKING_DATA]\n"
@@ -534,8 +562,7 @@ with tab4:
         raw = st.session_state.today_recommendation
         with st.expander("추천 리포트", expanded=True):
             st.write(raw.split("[TRACKING_DATA]")[0].strip())
-            st.caption(f"🧠 분석 모델: {MODEL_NAME}")
-            # 파싱 및 카드 UI 렌더링 영역 (기존과 동일하므로 생략 없이 유지)
+            st.caption(f"🧠 전처리: {LITE_MODEL_NAME} | 최종 분석: {MODEL_NAME}")
             if "[TRACKING_DATA]" in raw:
                 block = raw.split("[TRACKING_DATA]")[1].strip().replace("```", "")
                 parsed_rows = []
@@ -554,13 +581,12 @@ with tab4:
                         with st.container(border=True):
                             st.markdown(f"**{name}** `{tick}`")
                             if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
-                            else: st.metric("현재가", "조회 실패")
                             c_tp, c_bp = st.columns(2)
                             c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}<br>장: {tp_l:,.0f}", unsafe_allow_html=True)
                             c_bp.metric("진입 타점", f"{bp:,.0f}")
                             if st.button("스크랩", key=f"rec_s_{tick}", use_container_width=True):
-                                c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                          (f"{name} 심층분석", "", raw, datetime.now().strftime("%Y-%m-%d %H:%M"), name, tick, current, tp_s, tp_m, tp_l, bp, MODEL_NAME, current_user))
+                                c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                                          (f"{name} 심층분석", raw, name, tick, current, tp_s, tp_m, tp_l, bp, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user))
                                 conn.commit(); st.success("저장 완료")
 
 # =======================================================
@@ -601,30 +627,30 @@ with tab5:
             if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
         with col_btn:
             if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
-                with st.spinner("데이터 수집 및 요약 -> 심층 분석 진행 중..."):
+                with st.spinner("데이터 수집 및 Lite 상세 요약 진행 중..."):
                     tech = get_technical_data(code)
                     fund = get_advanced_fundamental_data(code)
                     news_raw = fetch_stock_news(name, display=5)
                     dart_raw = get_dart_filings(code)
                     
                     news_str = "\n".join([n['title'] for n in news_raw])
-                    summary_prompt = f"다음 {name}의 뉴스와 공시를 읽고 핵심 호악재를 요약하라.\n[뉴스]\n{news_str}\n[공시]\n{dart_raw}"
+                    # 💡 제한 없이 상세히 통합 요약 진행
+                    summary_prompt = f"다음 {name}의 뉴스와 공시 데이터를 누락 없이 상세하게 사실 위주로 통합 요약하라:\n[뉴스]\n{news_str}\n[공시]\n{dart_raw}"
                     lite_summary = call_gemini_lite_summary(summary_prompt)
 
                     data_str = f"현재가: {current:,.0f}\n"
-                    if tech: data_str += f"[차트] 52주 고/저: {tech['high_52']}/{tech['low_52']} | 20일선: {tech['ma20']:,.0f} | MACD: {tech['macd']:,.2f}\n"
+                    if tech: data_str += f"[차트] 52주 고/저: {tech['high_52']}/{tech['low_52']} | MACD: {tech['macd']:,.2f}\n"
                     if fund: data_str += f"[펀더멘털] PER: {fund['per']} (업종 {fund['industry_per']}) | PBR: {fund['pbr']} | 수급: {fund['supply_demand']}\n"
-                    data_str += f"[이슈 요약]\n{lite_summary}"
+                    data_str += f"[정제된 상세 이슈 요약]\n{lite_summary}"
                     
                     prompt = (f"[{name} 진단]\n[실데이터]\n{data_str}\n\n"
-                              f"당신은 퀀트 애널리스트입니다.\n"
-                              f"- 매수의견: (현재가 및 수급 대비 밸류에이션 근거로 Buy/Hold/Sell 명시)\n"
-                              f"- 모멘텀 및 수급 분석\n"
-                              f"- 퀀트 밸류에이션 (업종PER 비교 포함)\n"
+                              f"당신은 퀀트 애널리스트입니다. 상기 요약 자료를 기반으로 주식시장에 미칠 거시적 변화와 파장을 종합하여 진단 리포트를 작성하십시오.\n"
+                              f"- 매수의견 (Buy/Hold/Sell 명시)\n"
+                              f"- 시장 파급 효과 및 주가 변화 의의 분석\n"
+                              f"- 퀀트 밸류에이션 (업종 평균과 비교 분석)\n"
                               f"- 목표가 산출 근거\n\n"
                               f"※ 마지막 줄은 아래 파싱 형식으로 작성.\n"
                               f"TARGET_PRICE: 단기|중기|장기|매수추천가")
-                    
                     report = call_gemini_with_fallback(prompt)
                 
                 tp_match = re.search(r'TARGET_PRICE:\s*([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|(.*)', report)
@@ -638,10 +664,21 @@ with tab5:
         if report_text:
             with st.expander("진단 리포트", expanded=True):
                 st.write(re.sub(r'TARGET_PRICE:.*', '', report_text).strip())
-                st.caption(f"🧠 전처리: {LITE_MODEL_NAME} | 분석: {MODEL_NAME}")
+                st.caption(f"🧠 전처리 요약: {LITE_MODEL_NAME} | 심층 의의 분석: {MODEL_NAME}")
         st.divider()
 
 # =======================================================
-# 탭 1,2,3,6 생략 없이 기존 코드 유지 (토큰 길이 관계상 구조만 결합)
+# 탭 6: 스크랩북
 # =======================================================
-# 탭 1~3, 6의 분석에도 LITE_MODEL_NAME을 적용하려면 동일하게 call_gemini_lite_summary를 활용하시면 됩니다.
+with tab6:
+    st.subheader("저장된 분석 리포트")
+    c.execute("SELECT id, title, stock_name, ticker, scrap_date, analysis, model_used FROM scrapbook WHERE user_id = ? ORDER BY id DESC", (current_user,))
+    scraps = c.fetchall()
+    for row in scraps:
+        s_id, title, s_name, ticker, s_date, analysis, m_used = row
+        with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
+            st.write(analysis.split("[TRACKING_DATA]")[0].strip())
+            st.caption(f"🧠 생산 모델: {m_used}")
+            if st.button("삭제", key=f"del_{s_id}"):
+                c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,))
+                conn.commit(); st.rerun()
