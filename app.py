@@ -125,7 +125,6 @@ def get_technical_data(code):
     except Exception:
         return None
 
-# 🛠️ 수정한 펀더멘털 파싱 함수 (우측 고정 지표 영역 크롤링으로 변경)
 @st.cache_data(ttl=600)
 def get_fundamental_data(code):
     try:
@@ -136,7 +135,6 @@ def get_fundamental_data(code):
         
         fund_data = {"per": "-", "pbr": "-", "eps": 0, "bps": 0}
         
-        # 1. 요약 박스에서 PER, PBR, EPS 추출
         per_elem = soup.find(id="_per")
         if per_elem:
             try: fund_data["per"] = float(re.search(r'[\d.]+', per_elem.get_text()).group())
@@ -152,8 +150,6 @@ def get_fundamental_data(code):
             try: fund_data["eps"] = int(re.sub(r'[^\d]', '', eps_elem.get_text()))
             except: pass
 
-        # 2. 고정 텍스트 매칭으로 BPS 직접 추출 (가장 확실한 대체 방안)
-        # 테이블의 'th' 태그 내용 중 'BPS'가 적힌 항목을 찾아 바로 옆 'td' 값을 파싱합니다.
         th_elements = soup.find_all("th")
         for th in th_elements:
             if "BPS" in th.get_text():
@@ -349,6 +345,7 @@ with tab1:
     if st.session_state.get("realtime_analysis"):
         with st.expander("분석 결과", expanded=True):
             st.write(st.session_state.realtime_analysis)
+            st.caption(f"🧠 분석 모델: {MODEL_NAME}")
 
     for news in news_list[:10]:
         with st.expander(f"{news['title']}"):
@@ -397,6 +394,7 @@ with tab2:
         clean_text = re.sub(r'\[SENTIMENT_SCORE:.*?\]', '', raw_text).strip()
         with st.expander("분석 결과", expanded=True):
             st.write(clean_text)
+            st.caption(f"🧠 분석 모델: {MODEL_NAME}")
 
     for news in eco_news_list[:current_limit]:
         with st.expander(f"{news['title']}"):
@@ -426,6 +424,7 @@ with tab3:
         if st.session_state.get(f"sector_analysis_{selected_sector}"):
             with st.expander("분석 결과", expanded=True):
                 st.write(st.session_state[f"sector_analysis_{selected_sector}"])
+                st.caption(f"🧠 분석 모델: {MODEL_NAME}")
 
         for news in sector_news[:10]:
             with st.expander(f"{news['title']}"):
@@ -500,6 +499,7 @@ with tab4:
         raw = st.session_state.today_recommendation
         with st.expander("추천 리포트", expanded=True):
             st.write(raw.split("[TRACKING_DATA]")[0].strip())
+            st.caption(f"🧠 분석 모델: {MODEL_NAME}")
 
             if "[TRACKING_DATA]" in raw:
                 block = raw.split("[TRACKING_DATA]")[1].strip().replace("```", "")
@@ -626,9 +626,11 @@ with tab5:
             with st.expander("진단 리포트", expanded=True):
                 st.info(f"단기 목표: {tp_s:,.0f} | 중기: {tp_m:,.0f} | 장기: {tp_l:,.0f} | 진입 타점: {bp:,.0f}")
                 st.write(re.sub(r'TARGET_PRICE:.*', '', report_text).strip())
+                st.caption(f"🧠 분석 모델: {model_used or MODEL_NAME}")
+                
                 if st.button("결과 저장", key=f"save_{p_id}"):
-                    c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, model_used) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                              (f"{name} 진단", "", report_text, datetime.now().strftime("%Y-%m-%d %H:%M"), name, current, tp_s, tp_m, tp_l, bp, MODEL_NAME))
+                    c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, model_used) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                              (f"{name} 진단", "", report_text, datetime.now().strftime("%Y-%m-%d %H:%M"), name, code, current, tp_s, tp_m, tp_l, bp, MODEL_NAME))
                     conn.commit(); st.success("저장 완료")
         st.divider()
 
@@ -640,7 +642,7 @@ with tab5:
 
 with tab6:
     st.subheader("스크랩북")
-    c.execute("SELECT id, title, analysis, scrap_date, stock_name, saved_price, target_price, buy_recommend_price, target_price_mid, target_price_long, model_used FROM scrapbook ORDER BY id DESC")
+    c.execute("SELECT id, title, analysis, scrap_date, stock_name, saved_price, target_price, buy_recommend_price, target_price_mid, target_price_long, model_used, ticker FROM scrapbook ORDER BY id DESC")
     scraps = c.fetchall()
 
     col_ctrl1, _ = st.columns([1, 4])
@@ -654,17 +656,46 @@ with tab6:
                     if sid.startswith("chk_"): st.session_state.pop(sid)
                 st.rerun()
 
+    tickers_to_fetch = [s[11] for s in scraps if s[11]]
+    price_map_scrap = fetch_current_prices(tickers_to_fetch)
+
     for s in scraps:
-        scrap_id, title, analysis, scrap_date = s[0], s[1], s[2], s[3]
+        scrap_id, title, analysis, scrap_date, stock_name = s[0], s[1], s[2], s[3], s[4]
         saved_price, tp_s, b_rec, tp_m, tp_l = float(s[5] or 0), float(s[6] or 0), float(s[7] or 0), float(s[8] or 0), float(s[9] or 0)
+        model_used = s[10]
+        ticker = s[11]
+
+        current_price = 0.0
+        diff, diff_pct = 0.0, 0.0
+        if ticker:
+            code = re.sub(r'[^\d]', '', ticker)
+            p_info = price_map_scrap.get(code, {})
+            current_price = p_info.get("current", 0.0)
+            diff = p_info.get("diff", 0.0)
+            diff_pct = p_info.get("diff_pct", 0.0)
         
         col_chk, col_exp = st.columns([0.05, 0.95])
         with col_chk:
             st.markdown("<br>", unsafe_allow_html=True); st.checkbox("", key=f"chk_{scrap_id}", label_visibility="collapsed")
         with col_exp:
             with st.expander(f"[{scrap_date}] {title}"):
-                cols_sc = st.columns(4)
-                cols_sc[0].metric("저장 당시가", f"{saved_price:,.0f}")
-                cols_sc[1].markdown(f"**목표 밴드**<br>단/중/장기<br>{tp_s:,.0f} / {tp_m:,.0f} / {tp_l:,.0f}", unsafe_allow_html=True)
-                cols_sc[2].metric("매수 타점", f"{b_rec:,.0f}" if b_rec > 0 else "-")
+                cols_sc = st.columns(5)
+                cols_sc[0].metric("저장 당시가", f"{saved_price:,.0f}원")
+                if current_price > 0:
+                    cols_sc[1].metric("현재가", f"{current_price:,.0f}원", delta=f"{diff:+,.0f}원 ({diff_pct:+.2f}%)")
+                else:
+                    cols_sc[1].metric("현재가", "조회 불가")
+                
+                cols_sc[2].metric("단기 목표가", f"{tp_s:,.0f}원" if tp_s > 0 else "-")
+                cols_sc[3].markdown(f"**중기/장기 목표가**<br>{tp_m:,.0f} / {tp_l:,.0f}", unsafe_allow_html=True)
+                cols_sc[4].metric("매수 타점", f"{b_rec:,.0f}원" if b_rec > 0 else "-")
+
+                if current_price > 0 and tp_s > 0:
+                    gap_pct = (tp_s - current_price) / current_price * 100
+                    if gap_pct >= 0:
+                        st.caption(f"🎯 단기 목표가까지 **+{gap_pct:.1f}%** 상승 여력")
+                    else:
+                        st.caption(f"🎯 단기 목표가 대비 **{gap_pct:.1f}%** 초과 달성")
+
                 st.write(analysis)
+                st.caption(f"🧠 분석 모델: {model_used or '정보 없음'}")
