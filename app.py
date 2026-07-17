@@ -64,38 +64,51 @@ NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
 # =======================================================
-# 데이터베이스 초기화 및 DART 고유번호 캐싱
+# 데이터베이스 초기화 및 DART 고유번호 캐싱 (누수 방지 적용)
 # =======================================================
-conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS scrapbook (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, link TEXT, summary TEXT, analysis TEXT, scrap_date TEXT)''')
-c.execute('''CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, stock_name TEXT)''')
-c.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KEY AUTOINCREMENT, calc_date TEXT, score REAL)''')
-c.execute('''CREATE TABLE IF NOT EXISTS dart_corp_codes (corp_code TEXT, corp_name TEXT, stock_code TEXT PRIMARY KEY)''')
-conn.commit()
+@st.cache_resource
+def init_db():
+    try:
+        connection = sqlite3.connect('market_analysis.db', check_same_thread=False)
+        cursor = connection.cursor()
+        cursor.execute('''CREATE TABLE IF NOT EXISTS scrapbook (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, link TEXT, summary TEXT, analysis TEXT, scrap_date TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, stock_name TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KEY AUTOINCREMENT, calc_date TEXT, score REAL)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS dart_corp_codes (corp_code TEXT, corp_name TEXT, stock_code TEXT PRIMARY KEY)''')
+        connection.commit()
 
-columns_to_add = [
-    ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
-    ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("portfolio", "report_text", "TEXT"),
-    ("portfolio", "tp_s", "REAL DEFAULT 0.0"), ("portfolio", "tp_m", "REAL DEFAULT 0.0"),
-    ("portfolio", "tp_l", "REAL DEFAULT 0.0"), ("portfolio", "bp", "REAL DEFAULT 0.0"),
-    ("scrapbook", "stock_name", "TEXT"), ("scrapbook", "ticker", "TEXT"),
-    ("scrapbook", "saved_price", "REAL DEFAULT 0.0"), ("scrapbook", "target_price", "REAL DEFAULT 0.0"),
-    ("scrapbook", "target_price_mid", "REAL DEFAULT 0.0"), ("scrapbook", "target_price_long", "REAL DEFAULT 0.0"),
-    ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0"), ("portfolio", "model_used", "TEXT"),
-    ("portfolio", "report_time", "TEXT"), ("portfolio", "ticker", "TEXT"), ("scrapbook", "model_used", "TEXT"),
-    ("portfolio", "user_id", "TEXT DEFAULT 'dongsu'"), ("scrapbook", "user_id", "TEXT DEFAULT 'dongsu'")
-]
-for table, col, dtype in columns_to_add:
-    try: c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}"); conn.commit()
-    except: pass
+        columns_to_add = [
+            ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
+            ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("portfolio", "report_text", "TEXT"),
+            ("portfolio", "tp_s", "REAL DEFAULT 0.0"), ("portfolio", "tp_m", "REAL DEFAULT 0.0"),
+            ("portfolio", "tp_l", "REAL DEFAULT 0.0"), ("portfolio", "bp", "REAL DEFAULT 0.0"),
+            ("scrapbook", "stock_name", "TEXT"), ("scrapbook", "ticker", "TEXT"),
+            ("scrapbook", "saved_price", "REAL DEFAULT 0.0"), ("scrapbook", "target_price", "REAL DEFAULT 0.0"),
+            ("scrapbook", "target_price_mid", "REAL DEFAULT 0.0"), ("scrapbook", "target_price_long", "REAL DEFAULT 0.0"),
+            ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0"), ("portfolio", "model_used", "TEXT"),
+            ("portfolio", "report_time", "TEXT"), ("portfolio", "ticker", "TEXT"), ("scrapbook", "model_used", "TEXT"),
+            ("portfolio", "user_id", "TEXT DEFAULT 'dongsu'"), ("scrapbook", "user_id", "TEXT DEFAULT 'dongsu'")
+        ]
+        for table, col, dtype in columns_to_add:
+            try: 
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}")
+                connection.commit()
+            except Exception:
+                pass # 컬럼이 이미 존재할 경우 발생하는 에러는 무시
+        return connection
+    except Exception as e:
+        print(f"[DB Init Error] {e}")
+        return None
+
+conn = init_db()
+c = conn.cursor()
 
 @st.cache_resource
 def initialize_dart_codes():
     if not DART_API_KEY: return
-    c.execute("SELECT count(*) FROM dart_corp_codes")
-    if c.fetchone()[0] == 0:
-        try:
+    try:
+        c.execute("SELECT count(*) FROM dart_corp_codes")
+        if c.fetchone()[0] == 0:
             url = f"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key={DART_API_KEY}"
             res = requests.get(url, timeout=15)
             with zipfile.ZipFile(io.BytesIO(res.content)) as z:
@@ -111,7 +124,8 @@ def initialize_dart_codes():
                             data.append((corp_code, corp_name, stock_code.strip()))
                     c.executemany("INSERT OR IGNORE INTO dart_corp_codes (corp_code, corp_name, stock_code) VALUES (?, ?, ?)", data)
                     conn.commit()
-        except: pass
+    except Exception as e:
+        print(f"[DART Init Error] {e}")
 
 initialize_dart_codes()
 
@@ -164,7 +178,9 @@ def restore_db_from_drive():
         with open(file_name, 'wb') as f:
             f.write(fh.getvalue())
         return True
-    except: return False
+    except Exception as e: 
+        print(f"[Restore DB Error] {e}")
+        return False
 
 with st.sidebar:
     st.markdown(f"**👤 접속 계정:** `{current_user}`")
@@ -238,25 +254,27 @@ def call_gemini_stream_with_fallback(prompt):
         _gemini_semaphore.release()
 
 # =======================================================
-# 크롤링 및 데이터 가공 유틸
+# 크롤링 및 데이터 가공 유틸 (예외 처리 로깅 추가)
 # =======================================================
 @st.cache_data(ttl=600)
 def get_dart_filings(stock_code):
     if not DART_API_KEY: return "DART API 키 없음"
-    c.execute("SELECT corp_code FROM dart_corp_codes WHERE stock_code = ?", (stock_code,))
-    row = c.fetchone()
-    if not row: return "DART 매핑 데이터 없음"
-    corp_code = row[0]
-    
-    bgn_de = (datetime.now() - pd.Timedelta(days=90)).strftime("%Y%m%d")
-    url = f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={corp_code}&bgn_de={bgn_de}&page_count=5"
     try:
+        c.execute("SELECT corp_code FROM dart_corp_codes WHERE stock_code = ?", (stock_code,))
+        row = c.fetchone()
+        if not row: return "DART 매핑 데이터 없음"
+        corp_code = row[0]
+        
+        bgn_de = (datetime.now() - pd.Timedelta(days=90)).strftime("%Y%m%d")
+        url = f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={corp_code}&bgn_de={bgn_de}&page_count=5"
         res = requests.get(url, timeout=5).json()
         if res.get("status") == "000":
             filings = [f"- [{item['rcept_dt']}] {item['report_nm']}" for item in res.get("list", [])]
             return "\n".join(filings)
         return "최근 3개월 주요 공시 없음"
-    except: return "DART 조회 실패"
+    except Exception as e: 
+        print(f"[DART Fetch Error - {stock_code}] {e}")
+        return "DART 조회 실패"
 
 @st.cache_data(ttl=600)
 def get_advanced_fundamental_data(code):
@@ -278,26 +296,23 @@ def get_advanced_fundamental_data(code):
                 td = th.find_next("td")
                 if td: data["industry_per"] = td.get_text().strip().replace('배', '')
         
-        # 💡 정량적 연산을 위한 기본 데이터(EPS, BPS) 네이버에서 추가 파싱
-        # cop_details 테이블 내 실제 주당순이익(EPS) 및 주당순자산(BPS) 타겟팅 추출
         cop_table = soup.find("div", class_="cop_details")
         if cop_table:
             data["quarter_trend"] = "최근 8분기 실적 변동성 데이터 존재 (재무 추세 요약 반영 필요)"
             try:
-                # 테이블 내부에서 EPS와 BPS 텍스트가 있는 행을 찾아 실제 수치를 float 파싱
                 th_list = cop_table.find_all("th")
                 for th_item in th_list:
                     text = th_item.get_text().strip()
                     if text == "EPS(원)":
                         tds = th_item.find_next_siblings("td")
-                        # 가장 최근 결산 분기 혹은 예상치 데이터 추출 후 크롤링 정제
                         valid_eps = [td.get_text().strip().replace(',', '') for td in tds if td.get_text().strip().replace(',', '').replace('-', '').isdigit()]
                         if valid_eps: data["eps"] = float(valid_eps[-1])
                     if text == "BPS(원)":
                         tds = th_item.find_next_siblings("td")
                         valid_bps = [td.get_text().strip().replace(',', '') for td in tds if td.get_text().strip().replace(',', '').replace('-', '').isdigit()]
                         if valid_bps: data["bps"] = float(valid_bps[-1])
-            except: pass
+            except Exception as inner_e: 
+                print(f"[Fundamental Parsing Error - {code}] {inner_e}")
             
         url_frgn = f"https://finance.naver.com/item/frgn.naver?code={code}"
         res_frgn = requests.get(url_frgn, headers=headers, timeout=5)
@@ -314,9 +329,11 @@ def get_advanced_fundamental_data(code):
                         fore = int(tds[6].get_text().replace(',', ''))
                         inst_sum += inst
                         fore_sum += fore
-                    except: pass
+                    except Exception: 
+                        pass
             data["supply_demand"] = f"최근 5일 누적 -> 기관: {inst_sum:+,}주 / 외국인: {fore_sum:+,}주"
-    except: pass
+    except Exception as e: 
+        print(f"[Fundamental Data Error - {code}] {e}")
     return data
 
 @st.cache_data(ttl=600)
@@ -337,7 +354,9 @@ def get_technical_data(code):
             "current": df_data[-1], "high_52": max(df_data), "low_52": min(df_data),
             "ma20": sum(df_data[-20:]) / 20, "ma60": sum(df_data[-60:]) / 60, "macd": macd.iloc[-1], "signal": signal.iloc[-1]
         }
-    except: return None
+    except Exception as e: 
+        print(f"[Technical Data Error - {code}] {e}")
+        return None
 
 @st.cache_data(ttl=600)
 def fetch_stock_news(query, display=5):
@@ -348,7 +367,9 @@ def fetch_stock_news(query, display=5):
         with urllib.request.urlopen(req, timeout=3) as response:
             res = json.loads(response.read().decode('utf-8'))
             return [{"title": BeautifulSoup(i['title'], "html.parser").get_text(), "link": i['link']} for i in res.get("items", [])]
-    except: return []
+    except Exception as e: 
+        print(f"[Stock News Fetch Error - {query}] {e}")
+        return []
 
 def parse_won(s):
     if not s: return 0.0
@@ -367,7 +388,8 @@ def search_stock_code(name):
         items = (res.get("result") or {}).get("items", [])
         stock_items = [i for i in items if i.get("typeName") in ("코스피", "코스닥")] or items
         if stock_items: return stock_items[0].get("code"), stock_items[0].get("name")
-    except: pass
+    except Exception as e: 
+        print(f"[Stock Search Error - {name}] {e}")
     return None, None
 
 def fetch_current_prices(codes):
@@ -395,7 +417,9 @@ def fetch_current_prices(codes):
                 return 0.0
             out[code] = {"current": to_f("closePrice", "nv"), "diff": to_f("compareToPreviousClosePrice", "cv"), "diff_pct": to_f("fluctuationsRatio", "cr")}
         return out
-    except: return {}
+    except Exception as e: 
+        print(f"[Current Prices Fetch Error] {e}")
+        return {}
 
 def dedupe_news(news_list):
     seen = set(); out = []
@@ -422,7 +446,9 @@ def fetch_cached_global_data():
         while not done: status, done = downloader.next_chunk()
         fh.seek(0)
         return json.loads(fh.read().decode('utf-8'))
-    except: return None
+    except Exception as e: 
+        print(f"[Cached Data Fetch Error] {e}")
+        return None
 
 def fetch_realtime_data_direct():
     if not API_GATEWAY_REALTIME_URL: return None
@@ -431,7 +457,9 @@ def fetch_realtime_data_direct():
         res = requests.post(API_GATEWAY_REALTIME_URL, json=payload, timeout=30)
         res.raise_for_status()
         return res.json()
-    except: return None
+    except Exception as e: 
+        print(f"[Realtime API Error] {e}")
+        return None
 
 # =======================================================
 # 상태 변수 선언 및 데이터 누적 병합
@@ -545,7 +573,7 @@ with tab2:
             if st.button("심층 분석", key=f"eco_an_{idx}"):
                 with st.spinner("Lite 전처리 및 Flash 3.5 의미론적 분석 진행 중..."):
                     l_sum = call_gemini_lite_summary(f"본 뉴스의 핵심적 사실을 왜곡 없이 상세히 요약하라:\n{n['title']}")
-                    flash_p = f"[뉴스 요약]\n{l_sum}\n\n이 사실이 거시 경제 및 관련 주식 섹터에 미칠 중장기 파급 효과와 거시적 변화 의의를 분석하라."
+                    flash_p = f"[뉴스 요약]\n{l_sum}\n\n이 사실이 거시 경제 및 관련 주식 섹터에 파급 효과와 거시적 변화 의의를 분석하라."
                     st.write(call_gemini_with_fallback(flash_p))
     else: 
         st.info("조회된 핵심 경제 뉴스가 없습니다.")
@@ -579,7 +607,7 @@ with tab3:
         st.info("현재 매칭된 섹터별 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 4: 종목 발굴 (💡 파이썬 단에서 100% 선행 연산 처리 구조 개조)
+# 탭 4: 종목 발굴 (💡 Top 3 종목만 강제 리포트)
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (심층 분석)")
@@ -621,8 +649,6 @@ with tab4:
                     summary_prompt = f"다음은 {name} 종목의 공시와 관련 뉴스 리스트다. 사실 위주로 통합 요약하라:\n[공시]\n{dart_info}\n[뉴스]\n{news_str}"
                     lite_summary = call_gemini_lite_summary(summary_prompt)
                     
-                    # 💡 [피드백 적용]: 파이썬 환경에서 안전하게 수치 파싱 및 정량적 퀀트 공식 하드코딩 직접 연산
-                    # AI 환각을 방지하기 위해 텍스트 지표를 Float 변환
                     try: float_per = float(fund['per'].replace(',', '')) if fund['per'] != '-' else 0.0
                     except: float_per = 0.0
                     
@@ -633,19 +659,15 @@ with tab4:
                     eps_val = fund['eps']
                     bps_val = fund['bps']
                     
-                    # 기간별 파이썬 연산 팩트 딕셔너리 구축
                     calc_result_log = ""
                     if investment_horizon == "단기 (1~3개월)":
-                        # 단기 PEG 산출 (가정치: 최근 실적 트렌드를 기반으로 한 연 성장률 추정값 15% 적용 예시)
                         eps_growth_rate = 15.0 
                         peg_val = float_per / eps_growth_rate if eps_growth_rate > 0 and float_per > 0 else 0.0
                         calc_result_log = f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 추정 이익성장률 {eps_growth_rate}%)"
                     elif investment_horizon == "중기 (3~6개월)":
-                        # 중기 상대가치 적정주가 산출 (공식: EPS * 업종 PER)
                         target_valuation_price = eps_val * float_ind_per if eps_val > 0 and float_ind_per > 0 else current_price * 1.15
                         calc_result_log = f"▶ 파이썬 연산 팩트 [중기 상대가치 적정가]: {target_valuation_price:,.0f}원 (계산식: EPS {eps_val:,}원 × 업종평균 PER {float_ind_per}배)"
                     else:
-                        # 장기 RIM 절대가치 산출 (공식: BPS + (초과이익/요구수익률k), ROE 12%, k 8% 영구적용 간이 모델)
                         expected_roe = 0.12
                         required_return = 0.08
                         if bps_val > 0:
@@ -661,31 +683,29 @@ with tab4:
                     if fund:
                         tech_data_str += f"- 펀더멘털: 종목PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']} | EPS {eps_val:,}원 | BPS {bps_val:,}원\n"
                         tech_data_str += f"- 수급동향: {fund['supply_demand']}\n"
-                    # 💡 파이썬이 완벽히 연산한 상수를 AI 프롬프트에 제공
                     tech_data_str += f"{calc_result_log}\n"
                     tech_data_str += f"- 뉴스 및 공시 요약본:\n{lite_summary}\n\n"
             
             with st.spinner("[3단계] Flash 3.5 기반 퀀트 결과 해석 및 최종 멀티 리포트 생성 중..."):
                 step3_prompt = (
                     f"당신은 감정을 철저히 배제하는 퀀트 애널리스트이자 분석 전문가입니다. 데이터 정제 엔진(Python)이 "
-                    f"수학적으로 완벽히 연산하여 본문에 주입해 준 '파이썬 연산 팩트' 지표 수치들을 절대 신뢰하고 기반으로 삼으십시오.\n\n"
+                    f"수학적으로 연산하여 본문에 주입해 준 '파이썬 연산 팩트' 지표 수치들을 절대 신뢰하고 기반으로 삼으십시오.\n\n"
                     f"[선택된 투자 기간]: {investment_horizon}\n"
-                    f"[주의사항]: 당신은 절대로 주가나 수식을 직접 사칙연산하거나 지어내지 마십시오. 오직 본문에 명시된 파이썬 계산 수치를 기반으로 논리적 해석만 전개하십시오.\n\n"
                     f"[10개 후보군 파이썬 연산 완료 데이터]\n{tech_data_str}\n\n"
                     f"=== 리포트 작성 지시 ===\n"
-                    f"1. 각 기업 정보에 제공된 '파이썬 연산 팩트'의 계산식과 결과 상수를 본문에 그대로 인용하며 정성적 해설을 전개하십시오.\n"
-                    f"2. 제공된 차트 지표(이동평균선 배열 상태, MACD 모멘텀)를 융합하여 정밀한 진입 타점을 기술적으로 설명하십시오.\n"
-                    f"3. 뉴스/공시 모멘텀이 시장에 가져올 거시적 파장과 변화 의의를 객관적으로 분석하여 최종 매력도가 높은 상위 3개 종목을 도출하십시오.\n\n"
-                    f"=== 리포트 작성 항목 (각 종목 분석은 반드시 <ANALYSIS_티커숫자> 와 </ANALYSIS_티커숫자> 태그로 감싸십시오) ===\n"
+                    f"1. 10개 후보군 중 가장 확실한 매수 매력도를 가진 **최상위 3개(Top 3) 종목만 엄선**하여 리포트를 작성하십시오.\n"
+                    f"2. 각 기업 정보에 제공된 '파이썬 연산 팩트'의 계산식과 결과를 본문에 그대로 인용하며 정성적 해설을 전개하십시오.\n"
+                    f"3. 제공된 차트 지표와 뉴스/공시 모멘텀이 시장에 가져올 파장을 객관적으로 융합 분석하십시오.\n\n"
+                    f"=== 리포트 작성 항목 (오직 Top 3 종목만 작성하며, 각 종목 분석은 반드시 <ANALYSIS_티커숫자> 와 </ANALYSIS_티커숫자> 태그로 감싸십시오) ===\n"
                     f"<ANALYSIS_티커숫자>\n"
                     f"### [종목명] (티커)\n"
                     f"- 투자 의견 및 정량적 매수 근거\n"
-                    f"- 퀀트 가치 평가 해설: (제공된 파이썬 계산식과 결과 상수를 그대로 적고, 밸류에이션 저평가 파급력 해설)\n"
-                    f"- 차트 및 기술적 지표 분석: (20/60일선 구조, MACD 수치 연계 타점 해석)\n"
-                    f"- 뉴스 및 공시 모멘텀의 시장 파급 효과 (변화 의의)\n"
+                    f"- 퀀트 가치 평가 해설: (제공된 파이썬 계산식과 결과 상수를 그대로 적고 해설)\n"
+                    f"- 차트 및 기술적 지표 분석\n"
+                    f"- 뉴스 및 공시 모멘텀의 시장 파급 효과\n"
                     f"- 목표가 및 진입 타점\n"
                     f"</ANALYSIS_티커숫자>\n\n"
-                    f"※ 반드시 마지막 줄은 아래 파싱 형식으로 출력.\n"
+                    f"※ 반드시 마지막 줄은 아래 파싱 형식으로 오직 3개의 종목 데이터만 출력하십시오.\n"
                     f"[TRACKING_DATA]\n"
                     f"종목명|티커|단기목표가|중기목표가|장기목표가|진입타점"
                 )
@@ -732,7 +752,7 @@ with tab4:
                                 st.success(f"✅ '{name}' 종목의 리포트가 내 스크랩북에 저장되었습니다!")
 
 # =======================================================
-# 탭 5: 관심종목 진단
+# 탭 5: 관심종목 진단 (파이썬 선행 연산 퀀트 공식 적용)
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
@@ -769,7 +789,7 @@ with tab5:
             if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
         with col_btn:
             if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
-                with st.spinner("데이터 수집 및 Lite 상세 요약 진행 중..."):
+                with st.spinner("파이썬 퀀트 수식 선행 계산 및 AI 진단 중..."):
                     tech = get_technical_data(code)
                     fund = get_advanced_fundamental_data(code)
                     news_raw = fetch_stock_news(name, display=5)
@@ -779,19 +799,55 @@ with tab5:
                     summary_prompt = f"다음 {name}의 뉴스와 공시 데이터를 누락 없이 상세하게 사실 위주로 통합 요약하라:\n[뉴스]\n{news_str}\n[공시]\n{dart_raw}"
                     lite_summary = call_gemini_lite_summary(summary_prompt)
 
-                    data_str = f"현재가: {current:,.0f}\n"
+                    # 💡 탭 5 진단용 파이썬 퀀트 연산 (단기/중기/장기 모두 계산하여 제공)
+                    try: float_per = float(fund['per'].replace(',', '')) if fund['per'] != '-' else 0.0
+                    except: float_per = 0.0
+                    
+                    try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
+                    except: float_ind_per = 0.0
+                    
+                    current_price = tech['current'] if tech else current
+                    eps_val = fund.get('eps', 0.0)
+                    bps_val = fund.get('bps', 0.0)
+                    
+                    # [1] 단기 PEG
+                    eps_growth_rate = 15.0 
+                    peg_val = float_per / eps_growth_rate if eps_growth_rate > 0 and float_per > 0 else 0.0
+                    
+                    # [2] 중기 상대가치
+                    target_valuation_price = eps_val * float_ind_per if eps_val > 0 and float_ind_per > 0 else current_price * 1.15
+                    
+                    # [3] 장기 RIM
+                    expected_roe = 0.12
+                    required_return = 0.08
+                    if bps_val > 0:
+                        residual_income = bps_val * (expected_roe - required_return)
+                        rim_intrinsic_value = bps_val + (residual_income / required_return)
+                    else:
+                        rim_intrinsic_value = current_price * 1.3
+                        
+                    calc_result_log = (
+                        f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 추정 이익성장률 {eps_growth_rate}%)\n"
+                        f"▶ 파이썬 연산 팩트 [중기 상대가치 적정가]: {target_valuation_price:,.0f}원 (계산식: EPS {eps_val:,}원 × 업종평균 PER {float_ind_per}배)\n"
+                        f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: {rim_intrinsic_value:,.0f}원 (계산식: 현재 주당자산 BPS {bps_val:,}원 기준 ROE 12%, 요구수익률 8% 대입)\n"
+                    )
+
+                    data_str = f"현재가: {current_price:,.0f}\n"
                     if tech: data_str += f"[차트] 52주 고/저: {tech['high_52']}/{tech['low_52']} | MACD: {tech['macd']:,.2f}\n"
-                    if fund: data_str += f"[펀더멘털] PER: {fund['per']} (업종 {fund['industry_per']}) | PBR: {fund['pbr']} | 수급: {fund['supply_demand']}\n"
+                    if fund: data_str += f"[펀더멘털] PER: {fund['per']} (업종 {fund['industry_per']}) | PBR: {fund['pbr']} | EPS: {eps_val:,}원 | BPS: {bps_val:,}원 | 수급: {fund['supply_demand']}\n"
+                    data_str += f"{calc_result_log}\n"
                     data_str += f"[정제된 상세 이슈 요약]\n{lite_summary}"
                     
-                    prompt = (f"[{name} 진단]\n[실데이터]\n{data_str}\n\n"
-                              f"당신은 퀀트 애널리스트입니다. 상기 요약 자료를 기반으로 주식시장에 미칠 거시적 변화와 파장을 종합하여 진단 리포트를 작성하십시오.\n"
+                    prompt = (f"[{name} 진단]\n[파이썬 연산 완료 데이터]\n{data_str}\n\n"
+                              f"당신은 퀀트 애널리스트입니다. 파이썬이 수학적으로 완벽히 연산한 3가지 기간별 팩트 지표(PEG, 상대가치, RIM)를 절대 신뢰하고 기반으로 진단 리포트를 작성하십시오.\n"
+                              f"(당신은 절대로 주가나 수식을 직접 사칙연산하지 마십시오.)\n\n"
+                              f"=== 진단 리포트 작성 항목 ===\n"
                               f"- 매수의견 (Buy/Hold/Sell 명시)\n"
-                              f"- 시장 파급 효과 및 주가 변화 의의 분석\n"
-                              f"- 퀀트 밸류에이션 (업종 평균과 비교 분석)\n"
-                              f"- 목표가 산출 근거\n\n"
-                              f"※ 마지막 줄은 아래 파싱 형식으로 작성.\n"
-                              f"TARGET_PRICE: 단기|중기|장기|매수추천가")
+                              f"- 단기/중기/장기 퀀트 밸류에이션 해설: (파이썬 연산 팩트를 인용하여 각 기간별 산출 근거를 서술)\n"
+                              f"- 차트 기술적 분석 및 수급 동향 해석\n"
+                              f"- 시장 파급 효과 및 주가 변화 의의 분석\n\n"
+                              f"※ 마지막 줄은 아래 파싱 형식으로 작성하십시오. (목표가는 파이썬 연산 팩트를 기반으로 숫자로만 도출)\n"
+                              f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가")
                     report = call_gemini_with_fallback(prompt)
                 
                 tp_match = re.search(r'TARGET_PRICE:\s*([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|(.*)', report)
