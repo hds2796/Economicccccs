@@ -38,7 +38,8 @@ def check_password():
             st.error("비밀번호가 일치하지 않습니다.")
     return False
 
-if not check_password(): st.stop()
+if not check_password(): 
+    st.stop()
 
 current_user = st.session_state["user_id"]
 
@@ -54,7 +55,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOIN
 c.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KEY AUTOINCREMENT, calc_date TEXT, score REAL)''')
 conn.commit()
 
-# 멀티유저 대응을 위한 user_id 컬럼 자동 추가 및 기존 데이터 마이그레이션
 columns_to_add = [
     ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
     ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("portfolio", "report_text", "TEXT"),
@@ -311,13 +311,14 @@ with col_refresh:
                         st.session_state.seen_realtime_links.add(n['link'])
                 st.rerun()
 
+# 🛠️ 수정한 안전장치: 데이터가 비어있어도 UI 전체가 멈추는 현상(st.stop)을 방지
 if not g_data:
-    st.stop()
+    st.warning("⚠️ 실시간 데이터를 호출하지 못했습니다. 상단의 '실시간 갱신' 버튼을 눌러주세요.")
 
 with col_title:
     st.caption(f"실시간: {g_data.get('updated_at', '알 수 없음')} | 캐시: {cached_data.get('updated_at', '알 수 없음')} | 사용자: {current_user}")
 
-market_data = g_data.get("market_status", {})
+market_data = g_data.get("market_status", {}) if g_data else {}
 market_data_str = ", ".join([f"{k}: {v['current']}({v['diff_pct']}%)" for k, v in market_data.items() if v.get('current', 0) > 0])
 
 target_indices = ["코스피", "코스닥", "S&P 500", "원/달러 환율"]
@@ -339,17 +340,20 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경
 
 with tab1:
     st.subheader("실시간 시사 뉴스")
-    news_list = dedupe_news(g_data.get("realtime_news", []))
+    news_list = dedupe_news(g_data.get("realtime_news", [])) if g_data else []
 
     if not news_list:
          st.write("새로 표시할 실시간 뉴스가 없습니다.")
 
     if st.button("실시간 종합 분석", use_container_width=True, key="btn_realtime"):
-        articles_str = "\n".join([f"- [발행일: {n.get('published', '알수없음')}] {n['title']}\n  요약: {n.get('summary', '')}" for n in news_list[:100]])
-        prompt = (f"지표: {market_data_str}\n\n[기사 목록]\n{articles_str}\n\n"
-                  f"위 데이터를 바탕으로 객관적이고 간결한 시장 분석 보고서를 작성하십시오. 감정적 수사나 이모지는 완전히 배제하십시오.")
-        with st.spinner("분석 중..."):
-            st.session_state.realtime_analysis = "".join(call_gemini_stream_with_fallback(prompt))
+        if not news_list:
+            st.error("분석할 뉴스 데이터가 존재하지 않습니다.")
+        else:
+            articles_str = "\n".join([f"- [발행일: {n.get('published', '알수없음')}] {n['title']}\n  요약: {n.get('summary', '')}" for n in news_list[:100]])
+            prompt = (f"지표: {market_data_str}\n\n[기사 목록]\n{articles_str}\n\n"
+                      f"위 데이터를 바탕으로 객관적이고 간결한 시장 분석 보고서를 작성하십시오. 감정적 수사나 이모지는 완전히 배제하십시오.")
+            with st.spinner("분석 중..."):
+                st.session_state.realtime_analysis = "".join(call_gemini_stream_with_fallback(prompt))
 
     if st.session_state.get("realtime_analysis"):
         with st.expander("분석 결과", expanded=True):
@@ -375,19 +379,22 @@ with tab2:
             st.metric("오늘의 심리 지수 평균", f"{today_score:.1f}점")
         st.divider()
 
-    eco_news_list = dedupe_news(cached_data.get("eco_news", []))
+    eco_news_list = dedupe_news(cached_data.get("eco_news", [])) if cached_data else []
     current_limit = st.session_state.eco_display_limit
 
     if st.button("핵심 경제 분석 (상위 50개)", use_container_width=True, key="btn_eco"):
-        articles_str = "\n".join([f"- {n['title']}" for n in eco_news_list[:100]])
-        prompt = (f"지표: {market_data_str}\n\n[기사 목록]\n{articles_str}\n\n"
-                  f"1. 거시경제 분석을 객관적이고 명확하게 서술하십시오.\n"
-                  f"2. 전체 시장의 지수 투심을 고려하여 '시장 심리 지수(0~100)'를 평가하십시오.\n"
-                  f"3. 보고서 마지막에 반드시 아래 형식으로 기재하십시오.\n[SENTIMENT_SCORE: 점수]")
-        
-        with st.spinner("분석 중..."):
-            st.session_state.eco_analysis = "".join(call_gemini_stream_with_fallback(prompt))
-            st.session_state.eco_analysis_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if not eco_news_list:
+            st.error("캐시된 경제 뉴스 데이터가 없습니다.")
+        else:
+            articles_str = "\n".join([f"- {n['title']}" for n in eco_news_list[:100]])
+            prompt = (f"지표: {market_data_str}\n\n[기사 목록]\n{articles_str}\n\n"
+                      f"1. 거시경제 분석을 객관적이고 명확하게 서술하십시오.\n"
+                      f"2. 전체 시장의 지수 투심을 고려하여 '시장 심리 지수(0~100)'를 평가하십시오.\n"
+                      f"3. 보고서 마지막에 반드시 아래 형식으로 기재하십시오.\n[SENTIMENT_SCORE: 점수]")
+            
+            with st.spinner("분석 중..."):
+                st.session_state.eco_analysis = "".join(call_gemini_stream_with_fallback(prompt))
+                st.session_state.eco_analysis_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     if st.session_state.get("eco_analysis"):
         raw_text = st.session_state.eco_analysis
@@ -416,7 +423,7 @@ with tab2:
 
 with tab3:
     st.subheader("섹터 뉴스")
-    sectors_data = cached_data.get("sectors", {})
+    sectors_data = cached_data.get("sectors", {}) if cached_data else {}
     
     if not sectors_data:
         st.info("섹터 데이터가 아직 수집되지 않았습니다.")
@@ -444,66 +451,70 @@ with tab4:
     investment_horizon = st.radio("투자기간", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
 
     if st.button("추천 종목 발굴", use_container_width=True, key="btn_recommend"):
-        rec_news = dedupe_news(g_data.get("realtime_news", []) + cached_data.get("eco_news", []))
+        rec_news = dedupe_news((g_data.get("realtime_news", []) if g_data else []) + (cached_data.get("eco_news", []) if cached_data else []))
         
-        with st.spinner("1차 종목 선별 중..."):
-            articles_str = "\n".join([f"- {n['title']}" for n in rec_news[:50]])
-            step1_prompt = (f"다음 경제 뉴스를 바탕으로 {investment_horizon} 상승 모멘텀이 뛰어난 "
-                            f"한국 주식 종목 3개를 골라 종목코드 6자리만 JSON 배열로 출력하라.\n"
-                            f"예: [\"005930\", \"000660\", \"035420\"]\n오직 JSON만 출력할 것.\n\n{articles_str}")
+        if not rec_news:
+            st.error("분석 대상 뉴스 풀이 비어있습니다. 실시간 갱신을 먼저 진행해 주세요.")
+        else:
+            with st.spinner("1차 종목 선별 중..."):
+                articles_str = "\n".join([f"- {n['title']}" for n in rec_news[:50]])
+                step1_prompt = (f"다음 경제 뉴스를 바탕으로 {investment_horizon} 상승 모멘텀이 뛰어난 "
+                                f"한국 주식 종목 3개를 골라 종목코드 6자리만 JSON 배열로 출력하라.\n"
+                                f"예: [\"005930\", \"000660\", \"035420\"]\n오직 JSON만 출력할 것.\n\n{articles_str}")
+                
+                step1_res = call_gemini_with_fallback(step1_prompt)
+                match = re.search(r'\[.*\]', step1_res, re.DOTALL)
+                selected_tickers = []
+                if match:
+                    try: selected_tickers = json.loads(match.group(0))[:3]
+                    except: pass
+                if not selected_tickers:
+                    st.error("종목 선별에 실패했습니다. 다시 시도해주세요.")
+                    st.stop()
             
-            step1_res = call_gemini_with_fallback(step1_prompt)
-            match = re.search(r'\[.*\]', step1_res, re.DOTALL)
-            selected_tickers = []
-            if match:
-                try: selected_tickers = json.loads(match.group(0))[:3]
-                except: pass
-            if not selected_tickers:
-                st.error("종목 선별에 실패했습니다. 다시 시도해주세요.")
-                st.stop()
-        
-        with st.spinner("선별 종목의 기술적/퀀트 데이터 계산 중..."):
-            tech_data_str = ""
-            for ticker in selected_tickers:
-                ticker = re.sub(r'[^\d]', '', ticker)
-                if len(ticker) != 6: continue
-                try:
-                    res = requests.get(f"https://m.stock.naver.com/api/stock/{ticker}/basic", timeout=3).json()
-                    name = res.get("stockName", ticker)
-                except: name = ticker
-                
-                tech = get_technical_data(ticker)
-                fund = get_fundamental_data(ticker)
-                tech_data_str += f"[{name} ({ticker})]\n"
-                
-                if tech:
-                    tech_data_str += f"- 현재가: {tech['current']:,.0f}\n"
-                    tech_data_str += f"- 차트: 52주 최고 {tech['high_52']:,.0f} / 최저 {tech['low_52']:,.0f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f}\n"
-                    tech_data_str += f"- MACD: {tech['macd']:,.2f} | 시그널: {tech['signal']:,.2f}\n"
-                if fund:
-                    tech_data_str += f"- 펀더멘털: PER {fund['per']} | PBR {fund['pbr']} | EPS {fund['eps']:,.0f} | BPS {fund['bps']:,.0f}\n\n"
-        
-        with st.spinner("최종 심층 분석 중..."):
-            step2_prompt = (
-                f"당신은 감정을 철저히 배제하고 숫자와 팩트로만 승부하는 퀀트 및 차트 애널리스트입니다.\n"
-                f"선택된 투자 기간: {investment_horizon}\n\n"
-                f"[추출된 실데이터]\n{tech_data_str}\n"
-                f"위 종목들의 실제 제공된 '현재가', '차트 지표', '펀더멘털 지표'를 절대적으로 신뢰하여 분석하십시오.\n\n"
-                f"아래 항목들을 누락 없이 심층적이고 풍부하게 서술하여 리포트를 작성하십시오.\n\n"
-                f"[종목명] (티커)\n"
-                f"- 매수의견: (현재가 대비 정량적 가치를 판단하여 Buy/Hold/Sell 중 명확한 투자의견 제시)\n"
-                f"- 모멘텀 분석: (관련 핵심 이슈 요약)\n"
-                f"- 기술적 분석: (이평선 위치, MACD 등 실제 숫자에 기반한 차트 추세 서술)\n"
-                f"- 퀀트 분석: (제공된 PER, EPS, PBR, BPS 수치를 활용하여 적용된 적정주가 산출 공식과 계산 과정을 구체적이고 투명하게 명시)\n"
-                f"- 목표가 산출 근거: (퀀트 밸류에이션 결과와 기술적 매물대/지지선을 어떻게 유기적으로 융합하여 단기·중기·장기 목표가를 도출했는지 각각 구체적인 수식과 숫자를 들어 상세히 서술)\n"
-                f"- 진입 타점: (기술적 지지선에 기반한 현실적인 진입 가격)\n\n"
-                f"※ 마지막 줄은 반드시 아래 파싱 형식으로만 출력. 가격은 단위 없이 숫자로만 기입합니다. 단기/중기/장기는 복합 산출된 최종 목표가 밴드입니다.\n"
-                f"[TRACKING_DATA]\n"
-                f"종목명1|티커1|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만\n"
-                f"종목명2|티커2|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만\n"
-                f"종목명3|티커3|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만"
-            )
-            st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step2_prompt))
+            with st.spinner("선별 종목의 기술적/퀀트 데이터 계산 중..."):
+                tech_data_str = ""
+                for ticker in selected_tickers:
+                    ticker = re.sub(r'[^\d]', '', ticker)
+                    if len(ticker) != 6: continue
+                    try:
+                        res = requests.get(f"https://m.stock.naver.com/api/stock/{ticker}/basic", timeout=3).json()
+                        name = res.get("stockName", ticker)
+                    except: name = ticker
+                    
+                    tech = get_technical_data(ticker)
+                    fund = get_fundamental_data(ticker)
+                    tech_data_str += f"[{name} ({ticker})]\n"
+                    
+                    if tech:
+                        tech_data_str += f"- 현재가: {tech['current']:,.0f}\n"
+                        tech_data_str += f"- 차트: 52주 최고 {tech['high_52']:,.0f} / 최저 {tech['low_52']:,.0f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f}\n"
+                        tech_data_str += f"- MACD: {tech['macd']:,.2f} | 시그널: {tech['signal']:,.2f}\n"
+                    if fund:
+                        tech_data_str += f"- 펀더멘털: PER {fund['per']} | PBR {fund['pbr']} | EPS {fund['eps']:,.0f} | BPS {fund['bps']:,.0f}\n\n"
+            
+            with st.spinner("최종 심층 분석 중..."):
+                # 🛠️ 청산 기한 프롬프트 삭제 및 정성평가 퀀트 수식 심층 서술 지시 반영
+                step2_prompt = (
+                    f"당신은 감정을 철저히 배제하고 숫자와 팩트로만 승부하는 퀀트 및 차트 애널리스트입니다.\n"
+                    f"선택된 투자 기간: {investment_horizon}\n\n"
+                    f"[추출된 실데이터]\n{tech_data_str}\n"
+                    f"위 종목들의 실제 제공된 '현재가', '차트 지표', '펀더멘털 지표'를 절대적으로 신뢰하여 분석하십시오.\n\n"
+                    f"아래 항목들을 누락 없이 심층적이고 풍부하게 서술하여 리포트를 작성하십시오.\n\n"
+                    f"[종목명] (티커)\n"
+                    f"- 매수의견: (현재가 대비 정량적 가치를 판단하여 Buy/Hold/Sell 중 명확한 투자의견 제시)\n"
+                    f"- 모멘텀 분석: (관련 핵심 이슈 요약)\n"
+                    f"- 기술적 분석: (이평선 위치, MACD 등 실제 숫자에 기반한 차트 추세 서술)\n"
+                    f"- 퀀트 분석: (제공된 PER, EPS, PBR, BPS 수치를 활용하여 적용된 적정주가 산출 공식과 계산 과정을 구체적이고 투명하게 명시)\n"
+                    f"- 목표가 산출 근거: (퀀트 밸류에이션 결과와 기술적 매물대/지지선을 어떻게 유기적으로 융합하여 단기·중기·장기 목표가를 도출했는지 각각 구체적인 수식과 숫자를 들어 상세히 서술)\n"
+                    f"- 진입 타점: (기술적 지지선에 기반한 현실적인 진입 가격)\n\n"
+                    f"※ 마지막 줄은 반드시 아래 파싱 형식으로만 출력. 가격은 단위 없이 숫자로만 기입합니다.\n"
+                    f"[TRACKING_DATA]\n"
+                    f"종목명1|티커1|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만\n"
+                    f"종목명2|티커2|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만\n"
+                    f"종목명3|티커3|단기목표가숫자만|중기목표가숫자만|장기목표가숫자만|진입타점숫자만"
+                )
+                st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step2_prompt))
 
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
@@ -560,12 +571,10 @@ with tab5:
                 final_qty = qty
             else: final_avg_p, final_qty = 0.0, 0
 
-            # 로그인한 사용자(current_user)의 ID를 명시적으로 귀속하여 저장
             c.execute("INSERT INTO portfolio (stock_name, ticker, is_owned, avg_price, quantity, user_id) VALUES (?,?,?,?,?,?)", (new_s.strip(), code or '', is_owned_flag, final_avg_p, final_qty, current_user))
             conn.commit()
             st.rerun()
 
-    # 현재 로그인한 사용자 데이터만 격리 조회
     c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time, ticker FROM portfolio WHERE user_id = ?", (current_user,))
     portfolios = c.fetchall()
     price_map_watch = fetch_current_prices([p[12] for p in portfolios if p[12]])
@@ -597,13 +606,14 @@ with tab5:
                     if fund:
                         data_str += f"[퀀트] PER: {fund['per']} | PBR: {fund['pbr']} | EPS: {fund['eps']:,.0f} | BPS: {fund['bps']:,.0f}\n"
                     
+                    # 🛠️ 청산 기한 삭제 및 매수의견, 풍부한 정량 공식 서술 유도 프롬프트 반영
                     prompt = (f"[{name} 진단]\n[실데이터]\n{data_str}\n\n"
                               f"당신은 객관적인 수치에 입각해 판단하는 애널리스트입니다. 감정적 표현과 이모지를 배제하십시오.\n\n"
                               f"아래 항목들을 분량을 축소하지 말고 상세히 서술하여 리포트를 작성하십시오.\n"
                               f"- 매수의견: (현재가 대비 정량적 밸류에이션을 근거로 Buy/Hold/Sell 명시)\n"
-                              f"- 모멘텀 분석\n"
-                              f"- 기술적 분석 (이평선, MACD 등 실제 값 사용)\n"
-                              f"- 퀀트 분석 (제공된 지표를 적용한 구체적인 주가 계산 공식과 수치 증명 명시)\n"
+                              f"- 모멘텀 분석: (관련 핵심 이슈 요약)\n"
+                              f"- 기술적 분석: (이평선, MACD 등 제공된 수치를 연동한 차트 서술)\n"
+                              f"- 퀀트 분석: (제공된 펀더멘털 지표를 적용한 구체적인 주가 계산 공식과 수치 증명 명시)\n"
                               f"- 목표가 산출 근거: (단기, 중기, 장기 가격을 도출해낸 구체적인 수식과 근거 서술)\n\n"
                               f"※ 반드시 마지막 줄에 아래 파싱 형식으로만 작성.\n"
                               f"TARGET_PRICE: 단기숫자만|중기숫자만|장기숫자만|매수추천가숫자만")
@@ -644,6 +654,7 @@ with tab5:
                 st.caption(f"🧠 분석 모델: {model_used or MODEL_NAME}")
                 
                 if st.button("결과 저장", key=f"save_{p_id}"):
+                    # 🛠️ 관심종목 스크랩 시 ticker 누락 방지 조치 완료
                     c.execute("INSERT INTO scrapbook (title, summary, analysis, scrap_date, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                               (f"{name} 진단", "", report_text, datetime.now().strftime("%Y-%m-%d %H:%M"), name, code, current, tp_s, tp_m, tp_l, bp, MODEL_NAME, current_user))
                     conn.commit(); st.success("저장 완료")
@@ -657,7 +668,6 @@ with tab5:
 
 with tab6:
     st.subheader("스크랩북")
-    # 현재 로그인한 사용자 데이터만 격리 조회
     c.execute("SELECT id, title, analysis, scrap_date, stock_name, saved_price, target_price, buy_recommend_price, target_price_mid, target_price_long, model_used, ticker FROM scrapbook WHERE user_id = ? ORDER BY id DESC", (current_user,))
     scraps = c.fetchall()
 
@@ -697,6 +707,7 @@ with tab6:
             with st.expander(f"[{scrap_date}] {title}"):
                 cols_sc = st.columns(5)
                 cols_sc[0].metric("저장 당시가", f"{saved_price:,.0f}원")
+                # 🛠️ 실시간 현재가와 목표가 대비 괴리율 표시 적용
                 if current_price > 0:
                     cols_sc[1].metric("현재가", f"{current_price:,.0f}원", delta=f"{diff:+,.0f}원 ({diff_pct:+.2f}%)")
                 else:
@@ -709,9 +720,9 @@ with tab6:
                 if current_price > 0 and tp_s > 0:
                     gap_pct = (tp_s - current_price) / current_price * 100
                     if gap_pct >= 0:
-                        st.caption(f"🎯 단기 목표가까지 **+{gap_pct:.1f}%** 상승 여력")
+                        st.caption(f"🎯 현재가 기준 단기 목표가까지 **+{gap_pct:.1f}%** 상승 공간 남아있음")
                     else:
-                        st.caption(f"🎯 단기 목표가 대비 **{gap_pct:.1f}%** 초과 달성")
+                        st.caption(f"🎯 현재가 기준 단기 목표가 대비 **{abs(gap_pct):.1f}%** 초과 달성 중")
 
                 st.write(analysis)
                 st.caption(f"🧠 분석 모델: {model_used or '정보 없음'}")
