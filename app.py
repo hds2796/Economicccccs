@@ -435,10 +435,23 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경
 # =======================================================
 # 탭 1: 실시간 브리핑 (투 트랙 파이프라인)
 # =======================================================
+# =======================================================
+# 탭 1: 실시간 브리핑 (투 트랙 파이프라인)
+# =======================================================
 with tab1:
-    st.subheader("실시간 지황 브리핑")
+    st.subheader("실시간 시황 브리핑")
+    
+    news_pool = g_data.get("realtime_news", [])
+    
+    # 💡 누락되었던 실시간 뉴스 목록 화면 출력 로직 복구
+    if news_pool:
+        with st.expander(f"📰 수집된 실시간 뉴스 ({len(news_pool)}건)", expanded=True):
+            for idx, n in enumerate(news_pool[:20]): # 최신 20개 노출
+                st.markdown(f"{idx+1}. [{n['title']}]({n['link']})")
+    else:
+        st.info("현재 수집된 실시간 뉴스가 없습니다.")
+
     if st.button("브리핑 생성", key="btn_briefing"):
-        news_pool = g_data.get("realtime_news", [])
         news_str = "\n".join([f"- {n['title']}: {n.get('description', '')}" for n in news_pool[:15]])
         
         with st.spinner("Lite 모델이 시황 뉴스를 상세히 압축 중..."):
@@ -449,7 +462,6 @@ with tab1:
             analysis_prompt = (f"지표 데이터:\n{json.dumps(market_data)}\n\n[Lite 전처리 요약본]\n{lite_summary}\n\n"
                                f"위 요약 자료와 지표를 근거로, 현재 주식시장의 흐름이 가지는 '구체적 의미'와 '향후 증시에 가져올 변화'를 철저히 객관적인 관점에서 심층 분석하여 서술하라.")
             st.write_stream(call_gemini_stream_with_fallback(analysis_prompt))
-
 # =======================================================
 # 탭 2: 핵심 경제
 # =======================================================
@@ -469,19 +481,30 @@ with tab2:
 # =======================================================
 # 탭 3: 섹터 뉴스
 # =======================================================
+# =======================================================
+# 탭 3: 섹터 뉴스
+# =======================================================
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
     sec_news = g_data.get("sector_news", {}) if g_data else {}
+    
+    # 💡 누락되었던 섹터별 뉴스 목록 화면 출력 로직 복구
     if sec_news:
         for sec, items in sec_news.items():
-            with st.expander(f"📁 {sec} 섹터 뉴스 ({len(items)})"):
-                titles = "\n".join([f"- {i['title']}" for i in items])
-                st.text(titles)
-                if st.button("섹터 종합 전망 분석", key=f"sec_btn_{sec}"):
+            with st.expander(f"📁 {sec} 섹터 뉴스 ({len(items)}건)"):
+                # 개별 뉴스 타이틀과 링크를 클릭 가능하게 나열
+                for i in items:
+                    st.markdown(f"- [{i['title']}]({i.get('link', '#')})")
+                
+                if st.button(f"{sec} 종합 전망 분석", key=f"sec_btn_{sec}"):
+                    titles = "\n".join([f"- {i['title']}" for i in items])
                     with st.spinner("Lite 섹터 통합 전처리 중..."):
                         lite_s = call_gemini_lite_summary(f"다음 {sec} 섹터 뉴스들의 핵심 트렌드와 호악재 요인을 상세히 기술하라:\n{titles}")
                     with st.spinner("Flash 3.5 주도주 변화 예측 중..."):
                         flash_p = f"[{sec} 섹터 이슈 요약]\n{lite_s}\n\n이 트렌드가 향후 {sec} 섹터 내 주도주 흐름에 가져올 변화와 주식시장에 미칠 파장을 분석하라."
+                        st.write(call_gemini_with_fallback(flash_p))
+    else:
+        st.info("현재 매칭된 섹터별 뉴스가 없습니다. (실시간 데이터 수집을 대기 중입니다)")
                         st.write(call_gemini_with_fallback(flash_p))
 
 # =======================================================
