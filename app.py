@@ -70,6 +70,7 @@ columns_to_add = [
     ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0"),
     ("portfolio", "model_used", "TEXT"),
     ("portfolio", "report_time", "TEXT"),
+    ("portfolio", "ticker", "TEXT"),
     ("scrapbook", "model_used", "TEXT")
 ]
 
@@ -219,7 +220,7 @@ def build_prompt_deep_dive(stock_name, market_str):
             f"TARGET_PRICE: 단기숫자만|중기숫자만|장기숫자만|매수추천가숫자만")
 
 def build_prompt_recommend_step3(news_list, market_str, horizon):
-    combined = "\n".join([f"- {n['title']}" for n in news_list[:15]])
+    combined = "\n".join([f"- {n['title']}\n  요약: {n.get('summary', '(요약 없음)')}" for n in news_list[:50]])
     return (f"당신은 엄격한 애널리스트입니다.\n"
             f"[시장 거시 상황]: {market_str}\n"
             f"[선택된 투자 기간]: {horizon}\n"
@@ -245,11 +246,19 @@ def build_prompt_recommend_step3(news_list, market_str, horizon):
 st.title("📊 Project2_Stock")
 
 g_data = fetch_global_data()
+
+col_title, col_refresh = st.columns([5, 1])
+with col_refresh:
+    if st.button("🔄 뉴스 새로고침", use_container_width=True):
+        fetch_global_data.clear()
+        st.rerun()
+
 if not g_data:
     st.warning("🔄 데이터를 불러오고 있습니다. 잠시만 대기해 주세요.")
     st.stop()
 
-st.caption(f"☁️ 최종 동기화 시각: {g_data.get('updated_at', '알 수 없음')}")
+with col_title:
+    st.caption(f"☁️ 최종 동기화 시각: {g_data.get('updated_at', '알 수 없음')}")
 
 market_data = g_data.get("market_status", {})
 market_data_str = ", ".join([f"{k}: {v['current']}({v['diff_pct']}%)" for k, v in market_data.items() if v.get('current', 0) > 0])
@@ -284,7 +293,8 @@ with tab1:
     news_list = g_data.get("realtime_news", [])
 
     if st.button("🤖 실시간 뉴스 기반 종합 분석", type="primary", use_container_width=True, key="btn_realtime"):
-        prompt = f"최신 뉴스 브리핑:\n[지표]: {market_data_str}\n" + "\n".join([n['title'] for n in news_list])
+        articles_str = "\n".join([f"- {n['title']}\n  요약: {n.get('summary', '(요약 없음)')}" for n in news_list])
+        prompt = f"최신 뉴스 브리핑:\n[지표]: {market_data_str}\n\n[기사 목록 ({len(news_list)}건)]\n{articles_str}"
         with st.spinner("AI가 뉴스를 분석하고 있습니다..."):
             st.session_state.realtime_analysis = "".join(call_gemini_stream_with_fallback(prompt))
             st.session_state.realtime_analysis_time = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -299,8 +309,22 @@ with tab1:
             st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
 
 with tab2:
-    st.subheader("핵심 경제 뉴스")
-    for news in g_data.get("eco_news", []):
+    st.subheader("今日 핵심 경제 뉴스")
+    eco_news_list = g_data.get("eco_news", [])
+
+    if st.button("🤖 핵심 경제 뉴스 종합 분석", type="primary", use_container_width=True, key="btn_eco"):
+        articles_str = "\n".join([f"- {n['title']}\n  요약: {n.get('summary', '(요약 없음)')}" for n in eco_news_list])
+        prompt = f"오늘의 핵심 경제 뉴스 브리핑:\n[지표]: {market_data_str}\n\n[기사 목록 ({len(eco_news_list)}건)]\n{articles_str}"
+        with st.spinner("AI가 뉴스를 분석하고 있습니다..."):
+            st.session_state.eco_analysis = "".join(call_gemini_stream_with_fallback(prompt))
+            st.session_state.eco_analysis_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if st.session_state.get("eco_analysis"):
+        with st.expander("🤖 AI 분석 결과", expanded=True):
+            st.write(st.session_state.eco_analysis)
+            st.caption(f"🧠 생성 모델: {MODEL_NAME} · {st.session_state.get('eco_analysis_time', '')}")
+
+    for news in eco_news_list:
         with st.expander(f"📰 {news['title']}"):
             st.markdown(f"[원문 읽기]({news['link']})\n\n{news['summary']}")
 
@@ -382,31 +406,61 @@ with tab4:
 with tab5:
     st.subheader("⭐️ 관심종목 진단")
     with st.form("add_stock"):
-        new_s = st.text_input("종목명 입력 (예: 삼성전자, 카카오)")
-        c1, c2 = st.columns(2)
-        avg_p = c1.text_input("평단가", value="0")
-        qty = c2.number_input("수량", min_value=0, value=0)
+        c0, c1 = st.columns(2)
+        new_s = c0.text_input("종목명 입력 (예: 삼성전자, 카카오)")
+        new_ticker = c1.text_input("종목코드 (6자리, 예: 005930)", max_chars=6, help="입력하면 현재가를 자동으로 보여줍니다.")
+
+        own_status = st.radio("보유 상태", ["👀 미보유 (관심만)", "💼 보유"], horizontal=True)
+        c2, c3 = st.columns(2)
+        avg_p = c2.text_input("평단가", value="0", disabled=(own_status.startswith("👀")))
+        qty = c3.number_input("수량", min_value=0, value=0, disabled=(own_status.startswith("👀")))
+
         if st.form_submit_button("➕ 종목 등록") and new_s:
-            try:
-                final_avg_p = float(avg_p.replace(',', ''))
-            except:
-                final_avg_p = 0.0
-            c.execute("INSERT INTO portfolio (stock_name, is_owned, avg_price, quantity) VALUES (?,?,?,?)", (new_s.strip(), 1 if final_avg_p > 0 else 0, final_avg_p, qty))
+            is_owned_flag = 1 if own_status.startswith("💼") else 0
+            if is_owned_flag:
+                try:
+                    final_avg_p = float(str(avg_p).replace(',', ''))
+                except ValueError:
+                    final_avg_p = 0.0
+                final_qty = qty
+            else:
+                final_avg_p, final_qty = 0.0, 0
+            c.execute("INSERT INTO portfolio (stock_name, ticker, is_owned, avg_price, quantity) VALUES (?,?,?,?,?)",
+                      (new_s.strip(), re.sub(r'[^\d]', '', new_ticker or ''), is_owned_flag, final_avg_p, final_qty))
             conn.commit()
             st.rerun()
 
-    c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time FROM portfolio")
+    c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time, ticker FROM portfolio")
     portfolios = c.fetchall()
 
+    # 보유 중인 티커 현재가는 한 번에 배치 조회
+    price_map_watch = fetch_current_prices([p[12] for p in portfolios if p[12]])
+
     for p in portfolios:
-        p_id, name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time = p
-        st.markdown(f"### 📌 [{name}]")
-        col_info, col_btn = st.columns([3, 1])
+        p_id, name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time, ticker = p
+        code = re.sub(r'[^\d]', '', ticker or "")
+        price_info = price_map_watch.get(code, {})
+        current = price_info.get("current", 0.0)
+        diff = price_info.get("diff", 0.0)
+        diff_pct = price_info.get("diff_pct", 0.0)
+
+        st.markdown(f"### 📌 [{name}]" + (f" `{code}`" if code else ""))
+        col_info, col_price, col_btn = st.columns([2, 2, 1])
         with col_info:
             if is_owned:
-                st.caption(f"💼 **보유** | 평단:{avg_price:,.0f} | 수량:{quantity}")
+                st.caption(f"💼 **보유** | 평단:{avg_price:,.0f}원 | 수량:{quantity}")
+                if current > 0 and avg_price > 0:
+                    ret_pct = (current - avg_price) / avg_price * 100
+                    st.caption(f"📈 평단 대비 수익률: **{ret_pct:+.1f}%**")
             else:
-                st.caption(f"👀 **관심**")
+                st.caption("👀 **관심**")
+        with col_price:
+            if current > 0:
+                st.metric("현재가", f"{current:,.0f}원", delta=f"{diff:+,.0f}원 ({diff_pct:+.2f}%)")
+            elif code:
+                st.caption("현재가 조회 실패 (종목코드 확인 필요)")
+            else:
+                st.caption("종목코드를 등록하면 현재가가 표시됩니다")
         with col_btn:
             if st.button("🔄 새로운 보고서 내기", key=f"run_{p_id}", type="primary"):
                 with st.spinner("AI가 진단하고 있습니다..."):
@@ -425,6 +479,10 @@ with tab5:
         if report_text:
             with st.expander("📝 AI 진단 리포트", expanded=True):
                 st.info(f"**단기:** {tp_s:,.0f}원  |  **중기:** {tp_m:,.0f}원  |  **장기:** {tp_l:,.0f}원  |  **💰매수추천:** {bp:,.0f}원")
+                if current > 0 and tp_s > 0:
+                    gap_pct = (tp_s - current) / current * 100
+                    label = f"목표가(단기)까지 **+{gap_pct:.1f}%** 남음" if gap_pct >= 0 else f"목표가(단기) 대비 **{gap_pct:.1f}%** 초과 달성"
+                    st.caption(f"🎯 {label}")
                 st.write(re.sub(r'TARGET_PRICE:.*', '', report_text).strip())
                 st.caption(f"🧠 생성 모델: {model_used or MODEL_NAME} · {report_time or ''}")
                 if st.button("💾 스크랩북에 저장", key=f"save_{p_id}"):
