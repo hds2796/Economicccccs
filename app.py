@@ -4,7 +4,12 @@ import sqlite3
 import re
 import threading
 import requests
-from datetime import datetime
+import pandas as pd
+import urllib.request
+import urllib.parse
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
+from bs4 import BeautifulSoup
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -32,11 +37,14 @@ if not check_password(): st.stop()
 
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 API_GATEWAY_REALTIME_URL = st.secrets.get("API_GATEWAY_REALTIME_URL", "")
+NAVER_CLIENT_ID = st.secrets.get("NAVER_CLIENT_ID", "")
+NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
 
 conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
 c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS scrapbook (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, link TEXT, summary TEXT, analysis TEXT, scrap_date TEXT)''')
 c.execute('''CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, stock_name TEXT)''')
+c.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KEY AUTOINCREMENT, calc_date TEXT, score REAL)''')
 conn.commit()
 
 columns_to_add = [
@@ -72,8 +80,7 @@ def fetch_cached_global_data():
         while not done: status, done = downloader.next_chunk()
         fh.seek(0)
         return json.loads(fh.read().decode('utf-8'))
-    except Exception as e:
-        st.error(f"❌ 캐시 데이터 로드 에러: {e}")
+    except Exception:
         return None
 
 def fetch_realtime_data_direct(seen_links):
@@ -82,13 +89,69 @@ def fetch_realtime_data_direct(seen_links):
         return None
     try:
         payload = {"seen_links": list(seen_links)}
-        # 타임아웃을 안전하게 30초로 설정
         res = requests.post(API_GATEWAY_REALTIME_URL, json=payload, timeout=30)
         res.raise_for_status()
         return res.json()
     except Exception as e:
         st.error(f"❌ 실시간 데이터 갱신 실패: {e}")
         return None
+
+# =======================================================
+# 파이썬 기반 기술적 지표 및 뉴스 캐싱 함수
+# =======================================================
+@st.cache_data(ttl=600)
+def get_technical_data(code):
+    try:
+        url = f"https://fchart.stock.naver.com/sise.nhn?symbol={code}&timeframe=day&count=250&requestType=0"
+        res = requests.get(url, timeout=5)
+        soup = BeautifulSoup(res.text, "html.parser")
+        items = soup.find_all('item')
+        if not items: return None
+        
+        df_data = [float(item['data'].split('|')[4]) for item in items]
+        if len(df_data) < 60: return None
+        
+        current = df_data[-1]
+        high_52 = max(df_data)
+        low_52 = min(df_data)
+        ma20 = sum(df_data[-20:]) / 20
+        ma60 = sum(df_data[-60:]) / 60
+        
+        df = pd.Series(df_data)
+        ema12 = df.ewm(span=12, adjust=False).mean()
+        ema26 = df.ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+        
+        return {
+            "current": current, "high_52": high_52, "low_52": low_52,
+            "ma20": ma20, "ma60": ma60, "macd": macd.iloc[-1], "signal": signal.iloc[-1]
+        }
+    except Exception:
+        return None
+
+@st.cache_data(ttl=600)
+def fetch_stock_news(query, display=5):
+    if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
+        return []
+    try:
+        url = f"https://naverapihub.apigw.ntruss.com/search/v1/news?query={urllib.parse.quote(query)}&display={display}&sort=date&format=json"
+        req = urllib.request.Request(url, headers={"X-NCP-APIGW-API-KEY-ID": NAVER_CLIENT_ID, "X-NCP-APIGW-API-KEY": NAVER_CLIENT_SECRET})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            res = json.loads(response.read().decode('utf-8'))
+            items = []
+            for i in res.get("items", []):
+                title = BeautifulSoup(i['title'], "html.parser").get_text()
+                pub_date = i.get('pubDate', '')
+                if pub_date:
+                    try:
+                        dt = parsedate_to_datetime(pub_date)
+                        pub_date = dt.astimezone(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M")
+                    except: pass
+                items.append({"title": title, "link": i['link'], "published": pub_date})
+            return items
+    except:
+        return []
 
 GEMINI_CONCURRENCY_LIMIT = 3
 _gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
@@ -169,33 +232,19 @@ def dedupe_news(news_list):
         seen.add(key); out.append(n)
     return out
 
-def build_prompt_deep_dive(stock_name, market_str):
-    return (f"[{stock_name} 진단]\n[시장 지표]\n{market_str}\n\n위 데이터를 바탕으로 객관적인 진단 리포트를 작성하십시오.\n"
-            f"1. 🏢 재무 및 펀더멘털 분석\n2. 🌐 뉴스/수급 분석\n"
-            f"※ 반드시 마지막 줄에 파싱을 위해 아래 형식으로만 적으세요. 가격은 단위 없이 순수 숫자만 적으세요.\n"
-            f"TARGET_PRICE: 단기숫자만|중기숫자만|장기숫자만|매수추천가숫자만")
-
-def build_prompt_recommend_step3(news_list, market_str, horizon):
-    combined = "\n".join([f"- [발행일: {n.get('published', '알수없음')}] {n['title']}\n  요약: {n.get('summary', '(요약 없음)')}" for n in news_list[:100]])
-    return (f"당신은 엄격한 애널리스트입니다.\n[시장 거시 상황]: {market_str}\n[선택된 투자 기간]: {horizon}\n[전달된 뉴스 목록]:\n{combined}\n\n"
-            f"※ 중요 지시사항:\n1. 50개를 엄선하여 분석.\n2. {horizon} 관점 추천 종목 3개 작성.\n\n"
-            f"### 🏆 [최종 추천 종목 3개]\n1. 🥇 추천종목: [종목명] (티커)\n- 💡 추천 사유: (핵심 모멘텀 서술)\n"
-            f"- 🎯 {horizon} 최종 목표가: [최종 가격]원\n  └ 🧮 1차 퀀트 연산: [산출 가격]원\n  └ 🧠 2차 정성 수정: (가감 논리 명시)\n- 💰 진입 타점: [진입가]원\n\n"
-            f"※ 마지막 줄은 반드시 아래 형식으로만.\n[TRACKING_DATA]\n종목명1|티커1|최종목표가숫자만|진입타점숫자만\n종목명2|티커2|최종목표가숫자만|진입타점숫자만\n종목명3|티커3|최종목표가숫자만|진입타점숫자만")
-
 st.title("📊 Project2_Stock")
 
-# 세션 상태 초기화
 if "seen_realtime_links" not in st.session_state:
     st.session_state.seen_realtime_links = set()
 if "realtime_cache" not in st.session_state:
     st.session_state.realtime_cache = None
 if "eco_display_limit" not in st.session_state:
     st.session_state.eco_display_limit = 10
+if "last_saved_eco_time" not in st.session_state:
+    st.session_state.last_saved_eco_time = ""
 
-cached_data = fetch_cached_global_data()
+cached_data = fetch_cached_global_data() or {}
 
-# ⭐️ 처음 들어갈 때 자동으로 실시간 데이터 즉시 로딩
 if st.session_state.realtime_cache is None:
     with st.spinner("AI가 가십성 뉴스를 걸러내고 시장 핵심 뉴스를 로딩 중입니다..."):
         new_data = fetch_realtime_data_direct(st.session_state.seen_realtime_links)
@@ -204,7 +253,7 @@ if st.session_state.realtime_cache is None:
             for n in new_data.get("realtime_news", []):
                 st.session_state.seen_realtime_links.add(n['link'])
 
-g_data = st.session_state.realtime_cache
+g_data = st.session_state.realtime_cache or {}
 
 col_title, col_refresh = st.columns([5, 1.2])
 with col_refresh:
@@ -213,7 +262,6 @@ with col_refresh:
             new_data = fetch_realtime_data_direct(st.session_state.seen_realtime_links)
             if new_data:
                 new_news = new_data.get("realtime_news", [])
-                
                 if not new_news:
                     st.info("💡 새로운 뉴스가 없습니다. 잠시 후 다시 시도해주세요.")
                 else:
@@ -223,7 +271,7 @@ with col_refresh:
                     st.success(f"{len(new_news)}개의 새로운 뉴스가 업데이트 되었습니다!")
                 st.rerun()
 
-if not g_data or not cached_data:
+if not g_data:
     st.stop()
 
 with col_title:
@@ -250,7 +298,7 @@ st.divider()
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📰 실시간 브리핑", "🔥 핵심 경제", "📑 섹터 뉴스", "🎯 종목 발굴", "⭐️ 관심종목", "📁 스크랩북"])
 
 with tab1:
-    st.subheader("📰 실시간 경제·시사 뉴스 분석 (AI 가십 노이즈 필터링 적용)")
+    st.subheader("📰 실시간 경제·시사 뉴스 분석 (최대 10개 표시)")
     news_list = dedupe_news(g_data.get("realtime_news", []))
 
     if not news_list:
@@ -269,27 +317,58 @@ with tab1:
             st.write(st.session_state.realtime_analysis)
             st.caption(f"🧠 생성 모델: {MODEL_NAME} · {st.session_state.get('realtime_analysis_time', '')}")
 
-    for news in news_list:
+    for news in news_list[:10]:
         with st.expander(f"🕒 {news['title']}"):
             st.markdown(f"[원문 읽기]({news['link']})\n\n**발행일**: {news.get('published', '알수없음')}\n\n{news['summary']}")
 
 with tab2:
-    st.subheader("今日 핵심 경제 뉴스 (30분 주기 AI 채점순 정렬)")
-    eco_news_list = dedupe_news(cached_data.get("eco_news", []))
+    st.subheader("今日 핵심 경제 뉴스 및 시장 심리 지수")
     
+    c.execute("SELECT calc_date, AVG(score) FROM sentiment_history GROUP BY calc_date ORDER BY calc_date ASC")
+    sentiment_data = c.fetchall()
+    
+    if sentiment_data:
+        df = pd.DataFrame(sentiment_data, columns=["날짜", "시장 심리 지수"]).set_index("날짜")
+        st.line_chart(df, height=200)
+        
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_score = next((row[1] for row in sentiment_data if row[0] == today_str), None)
+        if today_score is not None:
+            st.metric("📊 오늘의 평균 시장 심리 지수", f"{today_score:.1f}점", help="100에 가까울수록 낙관/과열, 0에 가까울수록 비관/공포를 나타냅니다.")
+        st.divider()
+
+    eco_news_list = dedupe_news(cached_data.get("eco_news", []))
     current_limit = st.session_state.eco_display_limit
 
     if st.button("🤖 핵심 경제 뉴스 종합 분석 (상위 50개 대상)", type="primary", use_container_width=True, key="btn_eco"):
         articles_str = "\n".join([f"- [발행일: {n.get('published', '알수없음')}] {n['title']}\n  요약: {n.get('summary', '(요약 없음)')}" for n in eco_news_list[:100]])
         prompt = (f"오늘의 핵심 경제 뉴스 브리핑:\n[지표]: {market_data_str}\n\n[기사 목록 ({len(eco_news_list[:100])}건)]\n{articles_str}\n\n"
-                  f"※ 중요 지시사항:\n가장 핵심적인 50개의 기사를 선별하여 깊이 있는 종합 거시경제 분석을 수행하십시오.")
-        with st.spinner("AI가 뉴스를 분석하고 있습니다..."):
+                  f"※ 중요 지시사항:\n"
+                  f"1. 가장 핵심적인 50개의 기사를 선별하여 깊이 있는 종합 거시경제 분석을 수행하십시오.\n"
+                  f"2. 전체적인 시장의 뉴스와 지표, 투심 등을 종합적으로 고려하여 '오늘의 시장 심리 지수(0~100점)'를 평가하십시오. (100에 가까울수록 낙관/탐욕, 0에 가까울수록 공포/침체)\n"
+                  f"3. 보고서의 맨 마지막 줄에 반드시 아래 파싱 형식을 지켜 점수만 숫자로 적어주십시오.\n"
+                  f"[SENTIMENT_SCORE: 점수]")
+        
+        with st.spinner("AI가 뉴스를 분석하고 시장 심리를 평가하고 있습니다..."):
             st.session_state.eco_analysis = "".join(call_gemini_stream_with_fallback(prompt))
             st.session_state.eco_analysis_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     if st.session_state.get("eco_analysis"):
+        raw_text = st.session_state.eco_analysis
+        
+        match = re.search(r'\[SENTIMENT_SCORE:\s*(\d+(?:\.\d+)?)\]', raw_text)
+        if match and st.session_state.get("last_saved_eco_time") != st.session_state.eco_analysis_time:
+            score = float(match.group(1))
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            c.execute("INSERT INTO sentiment_history (calc_date, score) VALUES (?, ?)", (today_str, score))
+            conn.commit()
+            st.session_state.last_saved_eco_time = st.session_state.eco_analysis_time
+            st.rerun()
+            
+        clean_text = re.sub(r'\[SENTIMENT_SCORE:.*?\]', '', raw_text).strip()
+        
         with st.expander("🤖 AI 분석 결과", expanded=True):
-            st.write(st.session_state.eco_analysis)
+            st.write(clean_text)
             st.caption(f"🧠 생성 모델: {MODEL_NAME} · {st.session_state.get('eco_analysis_time', '')}")
 
     for news in eco_news_list[:current_limit]:
@@ -303,9 +382,11 @@ with tab2:
 
 with tab3:
     st.subheader("📑 섹터 뉴스 (30분 주기)")
-    # ⭐️ 이제 섹터 뉴스는 실시간 통신(g_data)이 아닌, 캐시된 데이터(cached_data)에서 가져옵니다.
     sectors_data = cached_data.get("sectors", {})
-    if sectors_data:
+    
+    if not sectors_data:
+        st.info("💡 캐시된 섹터 뉴스가 없습니다. 잠시 후 스케줄러가 데이터를 수집하면 표시됩니다.")
+    else:
         selected_sector = st.selectbox("관심 섹터 선택", list(sectors_data.keys()))
         sector_news = dedupe_news(sectors_data.get(selected_sector, []))
 
@@ -331,9 +412,63 @@ with tab4:
 
     if st.button("🚀 추천 종목 발굴", type="primary", use_container_width=True, key="btn_recommend"):
         rec_news = dedupe_news(g_data.get("realtime_news", []) + cached_data.get("eco_news", []))
-        prompt = build_prompt_recommend_step3(rec_news, market_data_str, investment_horizon)
-        with st.spinner("AI가 종목을 발굴하고 있습니다..."):
-            st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(prompt))
+        
+        with st.spinner("AI가 최신 뉴스를 바탕으로 유망 종목 3개를 1차 선별 중입니다..."):
+            articles_str = "\n".join([f"- {n['title']} | {n.get('summary', '')[:50]}" for n in rec_news[:50]])
+            step1_prompt = (f"다음 경제 뉴스를 바탕으로 {investment_horizon} 상승 모멘텀이 뛰어난 "
+                            f"한국 주식 종목 3개를 골라 종목코드 6자리만 JSON 배열로 출력하라.\n"
+                            f"예: [\"005930\", \"000660\", \"035420\"]\n오직 JSON만 출력할 것.\n\n{articles_str}")
+            
+            step1_res = call_gemini_with_fallback(step1_prompt)
+            match = re.search(r'\[.*\]', step1_res, re.DOTALL)
+            selected_tickers = []
+            if match:
+                try: selected_tickers = json.loads(match.group(0))[:3]
+                except: pass
+            
+            if not selected_tickers:
+                st.error("종목 선별에 실패했습니다. 다시 시도해주세요.")
+                st.stop()
+        
+        with st.spinner("선별된 종목의 실제 차트 데이터(이평선, MACD 등)를 수학적으로 계산 중입니다..."):
+            tech_data_str = ""
+            for ticker in selected_tickers:
+                ticker = re.sub(r'[^\d]', '', ticker)
+                if len(ticker) != 6: continue
+                try:
+                    res = requests.get(f"https://m.stock.naver.com/api/stock/{ticker}/basic", timeout=3).json()
+                    name = res.get("stockName", ticker)
+                except: name = ticker
+                
+                tech = get_technical_data(ticker)
+                tech_data_str += f"[{name} ({ticker})]\n"
+                if tech:
+                    tech_data_str += f"- 정확한 현재가: {tech['current']:,.0f}원\n"
+                    tech_data_str += f"- 52주 최고: {tech['high_52']:,.0f}원 | 52주 최저: {tech['low_52']:,.0f}원\n"
+                    tech_data_str += f"- 20일 이평선: {tech['ma20']:,.0f}원 | 60일 이평선: {tech['ma60']:,.0f}원\n"
+                    tech_data_str += f"- MACD: {tech['macd']:,.2f} | 시그널: {tech['signal']:,.2f}\n\n"
+                else:
+                    tech_data_str += "- 차트 데이터 조회 실패\n\n"
+        
+        with st.spinner("지어낸 정보 없이, 계산된 기술적 지표와 뉴스를 융합하여 최종 리포트를 작성합니다..."):
+            step2_prompt = (
+                f"당신은 객관적인 수치에 입각해 판단하는 애널리스트입니다.\n"
+                f"선택된 투자 기간: {investment_horizon}\n\n"
+                f"[선별된 종목의 파이썬 계산 실제 기술적 지표]\n{tech_data_str}\n"
+                f"위 종목들의 실제 '현재가'와 차트 지표(이평선 돌파 여부, MACD 크로스, 52주 최고/최저가 대비 위치)를 절대적으로 신뢰하고 반영하여 객관적인 리포트를 작성하십시오.\n\n"
+                f"### 🏆 [최종 추천 종목 3개]\n"
+                f"1. 🥇 추천종목: [종목명] (티커)\n"
+                f"- 💡 모멘텀 분석: (관련 뉴스 기반)\n"
+                f"- 📈 기술적 분석: (20일선/60일선 대비 위치, MACD 등 제공된 수치 기반으로 정성 분석)\n"
+                f"- 🎯 {investment_horizon} 목표가: [목표가]원 (절대 지어내지 말고, 실제 현재가에서 현실적인 변동률만 적용하여 산출할 것)\n"
+                f"- 💰 진입 타점: [진입가]원\n\n"
+                f"※ 마지막 줄은 반드시 아래 파싱 형식으로만 출력하십시오. 가격은 단위 없이 숫자로만 기입합니다.\n"
+                f"[TRACKING_DATA]\n"
+                f"종목명1|티커1|목표가숫자만|진입타점숫자만\n"
+                f"종목명2|티커2|목표가숫자만|진입타점숫자만\n"
+                f"종목명3|티커3|목표가숫자만|진입타점숫자만"
+            )
+            st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step2_prompt))
             st.session_state.today_recommendation_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     if st.session_state.get('today_recommendation'):
@@ -426,9 +561,22 @@ with tab5:
             elif code: st.caption("조회 실패")
             else: st.caption("종목코드를 등록하세요")
         with col_btn:
-            if st.button("🔄 AI 진단", key=f"run_{p_id}", type="primary"):
-                with st.spinner("AI가 진단하고 있습니다..."):
-                    report = call_gemini_with_fallback(build_prompt_deep_dive(name, market_data_str))
+            if st.button("🔄 기술적/AI 진단", key=f"run_{p_id}", type="primary"):
+                with st.spinner("실제 차트 데이터를 로딩하고 객관적으로 분석 중입니다..."):
+                    tech = get_technical_data(code)
+                    tech_str = f"- 현재가: {current:,.0f}원\n"
+                    if tech:
+                        tech_str += f"- 52주 최고: {tech['high_52']:,.0f}원 | 최저: {tech['low_52']:,.0f}원\n"
+                        tech_str += f"- 20일 이평선: {tech['ma20']:,.0f}원 | 60일 이평선: {tech['ma60']:,.0f}원\n"
+                        tech_str += f"- MACD: {tech['macd']:,.2f} | 시그널: {tech['signal']:,.2f}\n"
+                    
+                    prompt = (f"[{name} 진단]\n[시장 지표]\n{market_data_str}\n\n[실제 기술적 지표]\n{tech_str}\n\n"
+                              f"위 실제 가격과 지표를 바탕으로 객관적인 진단 리포트를 작성하십시오.\n"
+                              f"1. 🏢 펀더멘털 및 모멘텀 분석\n2. 📈 차트 및 기술적 분석 (제공된 이평선, MACD, 최고/최저가 등 데이터 적극 활용)\n"
+                              f"※ 반드시 마지막 줄에 파싱을 위해 아래 형식으로만 적으세요. 가격은 단위 없이 숫자만 적으세요.\n"
+                              f"TARGET_PRICE: 단기숫자만|중기숫자만|장기숫자만|매수추천가숫자만")
+                    
+                    report = call_gemini_with_fallback(prompt)
                 tp_match = re.search(r'TARGET_PRICE:\s*([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|(.*)', report)
                 n_tp_s = parse_won(tp_match.group(1)) if tp_match else 0.0
                 n_tp_m = parse_won(tp_match.group(2)) if tp_match else 0.0
@@ -437,8 +585,32 @@ with tab5:
                 c.execute("UPDATE portfolio SET report_text=?, tp_s=?, tp_m=?, tp_l=?, bp=?, model_used=?, report_time=? WHERE id=?", (report, n_tp_s, n_tp_m, n_tp_l, n_bp, MODEL_NAME, datetime.now().strftime("%Y-%m-%d %H:%M"), p_id))
                 conn.commit(); st.rerun()
 
+        # ⭐️ 새로운 기능: UI에서 지표와 뉴스 직접 확인 
+        with st.expander(f"📊 {name} 상세 지표 및 최신 뉴스", expanded=False):
+            tech = get_technical_data(code)
+            if tech:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("20일 이평선", f"{tech['ma20']:,.0f}원")
+                c2.metric("60일 이평선", f"{tech['ma60']:,.0f}원")
+                c3.metric("52주 최고/최저", f"{tech['high_52']:,.0f}원 / {tech['low_52']:,.0f}원")
+                
+                macd_val = tech['macd']
+                sig_val = tech['signal']
+                c4.metric("MACD / 시그널", f"{macd_val:,.0f} / {sig_val:,.0f}")
+            else:
+                st.caption("차트 데이터를 불러오지 못했습니다.")
+
+            st.divider()
+            st.markdown("**📰 관련 최신 뉴스**")
+            news_list = fetch_stock_news(name, display=5)
+            if news_list:
+                for n in news_list:
+                    st.markdown(f"- [{n['title']}]({n['link']}) ({n['published']})")
+            else:
+                st.caption("최근 관련 뉴스가 없습니다.")
+
         if report_text:
-            with st.expander("📝 AI 진단 리포트", expanded=True):
+            with st.expander("📝 기술적 기반 AI 진단 리포트", expanded=True):
                 st.info(f"**단기:** {tp_s:,.0f}원  |  **중기:** {tp_m:,.0f}원  |  **장기:** {tp_l:,.0f}원  |  **💰매수:** {bp:,.0f}원")
                 st.write(re.sub(r'TARGET_PRICE:.*', '', report_text).strip())
                 st.caption(f"🧠 생성 모델: {model_used or MODEL_NAME} · {report_time or ''}")
