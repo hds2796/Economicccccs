@@ -541,10 +541,11 @@ for i, key in enumerate(["코스피", "코스닥", "S&P 500", "원/달러 환율
             st.metric(label=key, value=f"{val:,.2f}" if val else "점검중", delta=f"{diff:+.2f} ({diff_pct:+.2f}%)" if val else None)
 
 st.divider()
+# 💡 탭 7 제거 및 원복
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경제", "섹터 뉴스", "종목 발굴", "관심종목 진단", "스크랩북"])
 
 # =======================================================
-# 탭 1 ~ 3: 브리핑 및 마이크로/매크로 연동
+# 탭 1: 실시간 브리핑
 # =======================================================
 with tab1:
     st.subheader("실시간 시황 브리핑")
@@ -559,23 +560,57 @@ with tab1:
             with st.spinner("Lite 모델 압축 중..."): lite_summary = call_gemini_lite_summary(f"다음 뉴스를 요약하라:\n\n{news_str}")
             with st.spinner("Flash 모델 분석 중..."): st.write_stream(call_gemini_stream_with_fallback(f"지표:\n{json.dumps(market_data)}\n\n요약:\n{lite_summary}\n\n시장 흐름 심층 분석 서술."))
 
+# =======================================================
+# 탭 2: 핵심 경제 (💡 심리지수 시각화 및 향후 전망 섹션 통합)
+# =======================================================
 with tab2:
-    st.subheader("핵심 경제 종합 브리핑 및 심리 지수")
+    st.subheader("핵심 경제 종합 브리핑 및 시장 심리")
+    
+    # 심리 지수 추출 및 평균화 시각화
     c.execute("SELECT calc_date, score FROM sentiment_history ORDER BY calc_date ASC")
     if sentiment_rows := c.fetchall():
         df_sent = pd.DataFrame(sentiment_rows, columns=['date', 'score'])
         df_sent['date'] = pd.to_datetime(df_sent['date']).dt.strftime('%Y-%m-%d')
         df_avg = df_sent.groupby('date')['score'].mean().reset_index().set_index('date')
-        st.line_chart(df_avg['score'])
-        st.divider()
+        
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        if not df_avg.empty:
+            today_score = df_avg.loc[today_str, 'score'] if today_str in df_avg.index else df_avg.iloc[-1]['score']
+            prev_score = df_avg.iloc[-2]['score'] if len(df_avg) > 1 else today_score
+            
+            col_s1, col_s2 = st.columns([2, 8])
+            with col_s1:
+                diff = today_score - prev_score
+                st.metric("오늘의 평균 시장 심리", f"{today_score:.1f}점", f"{diff:+.1f}p" if len(df_avg) > 1 else "첫 측정")
+                st.caption("0(공포) ◀ 50(중립) ▶ 100(탐욕)\n*일간 평균치 반영")
+            with col_s2:
+                st.line_chart(df_avg['score'], height=150)
+                
+    st.divider()
 
     eco_news = cached_data.get("eco_news", [])
-    if st.button("거시경제 브리핑 생성", use_container_width=True):
+    if st.button("거시경제 종합 분석 및 전망 생성", use_container_width=True):
         if not eco_news: st.error("분석할 뉴스가 없습니다.")
         else:
-            with st.spinner("Lite 요약 중..."): lite_summary = call_gemini_lite_summary("요약하라:\n" + "\n".join([f"- {n['title']}" for n in eco_news[:50]]))
-            with st.spinner("Flash 산출 중..."):
-                full_report = "".join(call_gemini_stream_with_fallback(f"지표:\n{json.dumps(market_data)}\n\n요약:\n{lite_summary}\n\n시황을 브리핑하고 마지막 줄에 '[SENTIMENT_SCORE]: 점수' 출력."))
+            with st.spinner("Lite 요약 중..."): 
+                lite_summary = call_gemini_lite_summary("요약하라:\n" + "\n".join([f"- {n['title']}" for n in eco_news[:50]]))
+            with st.spinner("Flash 심층 분석 중..."):
+                # 💡 "앞으로 주식시장은?" 항목 추가 및 청산 기한 제약 삭제
+                prompt = (
+                    f"당신은 매크로 퀀트 전략가입니다.\n"
+                    f"[현재 시장 지표]\n{json.dumps(market_data)}\n"
+                    f"[거시 경제 요약]\n{lite_summary}\n\n"
+                    f"=== 리포트 작성 항목 ===\n"
+                    f"**📰 핵심 경제 종합 브리핑**\n"
+                    f"- (현재 경제 상황 요약)\n"
+                    f"**🔮 앞으로 주식시장은?**\n"
+                    f"- (향후 시장 전망 및 최대 하방 리스크 점검)\n"
+                    f"**🛡️ 대응 전략**\n"
+                    f"- (현재 거시 지표에 기반한 포트폴리오 관리 전략)\n"
+                    f"※ 마지막 줄에는 반드시 현재 시장 심리를 0에서 100 사이의 숫자로 평가하여 아래 형식으로 출력하십시오.\n"
+                    f"[SENTIMENT_SCORE]: 45"
+                )
+                full_report = "".join(call_gemini_stream_with_fallback(prompt))
                 if score_match := re.search(r'\[SENTIMENT_SCORE\]:\s*(\d+)', full_report):
                     c.execute("INSERT INTO sentiment_history (calc_date, score) VALUES (?, ?)", (datetime.now().strftime("%Y-%m-%d"), float(score_match.group(1))))
                     conn.commit()
@@ -583,7 +618,8 @@ with tab2:
                 st.rerun()
 
     if st.session_state.get('eco_briefing'):
-        with st.expander("📝 브리핑"): st.write(st.session_state.eco_briefing)
+        with st.expander("📝 거시경제 분석 및 전망 리포트", expanded=True): 
+            st.write(st.session_state.eco_briefing)
         
     st.subheader("핵심 경제 뉴스 목록")
     if eco_news:
@@ -595,6 +631,9 @@ with tab2:
                     st.write(call_gemini_with_fallback(f"[뉴스 요약]\n{l_sum}\n\n이 사실이 거시 경제 및 관련 주식 섹터에 파급 효과와 거시적 변화 의의를 분석하라."))
     else: st.info("조회된 핵심 경제 뉴스가 없습니다.")
 
+# =======================================================
+# 탭 3: 섹터 뉴스
+# =======================================================
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
     sec_news = g_data.get("sectors") or cached_data.get("sectors") or g_data.get("sector_news", {})
@@ -606,7 +645,7 @@ with tab3:
                 if st.button(f"분석", key=f"sec_{sec}"): st.write(call_gemini_with_fallback(f"[{sec} 요약]\n" + call_gemini_lite_summary("\n".join([i['title'] for i in items])) + "\n\n주도주 흐름 분석."))
 
 # =======================================================
-# 탭 4: 종목 발굴 (💡 리포트 접힘 상태 기본값 적용)
+# 탭 4: 종목 발굴
 # =======================================================
 def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     ticker = re.sub(r'[^\d]', '', ticker)
@@ -711,7 +750,7 @@ with tab4:
                     f"**🟢 강세 논리 (Bull Case)**\n"
                     f"**🔴 약세/위험 논리 (Bear Case)**\n"
                     f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                    f"- 목표가 도달 논증 (구체적 수치 인용 필수): 파이썬이 제공한 3대 목표가 시나리오 중 최종 선택한 단기/중기/장기 가격을 명시하십시오. 그리고 **반드시 본문에 제공된 팩트 수치(EPS, BPS, PER, 20일선, MACD 등)를 직접 인용하여** 왜 이 목표가가 타당한지 정량적/기술적으로 증명하십시오. (예: '실적이 좋아질 것'이란 모호한 표현 대신, 'BPS 15,000원과 20일선 14,000원을 지지하고 있어...'와 같이 숫자로 논증할 것)\n"
+                    f"- 목표가 도달 논증 (구체적 수치 인용 필수): 파이썬이 제공한 3대 목표가 시나리오 중 최종 선택한 단기/중기/장기 가격을 명시하십시오. 그리고 **반드시 본문에 제공된 팩트 수치(EPS, BPS, PER, 20일선, MACD 등)를 직접 인용하여** 왜 이 목표가가 타당한지 정량적/기술적으로 증명하십시오.\n"
                     f"</ANALYSIS_티커숫자>\n\n"
                     f"※ 마지막 줄은 아래 파싱 형식으로 출력 (손절가 필수)\n"
                     f"[TRACKING_DATA]\n"
@@ -755,7 +794,7 @@ with tab4:
                                 conn.commit(); st.success(f"✅ 리포트 스크랩 완료!")
 
 # =======================================================
-# 탭 5: 관심종목 진단 (💡 리포트 접힘 상태 기본값 적용)
+# 탭 5: 관심종목 진단
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
