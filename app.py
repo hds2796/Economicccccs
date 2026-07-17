@@ -254,7 +254,7 @@ def call_gemini_stream_with_fallback(prompt):
         _gemini_semaphore.release()
 
 # =======================================================
-# 크롤링 및 데이터 가공 유틸 (동적 3개년 데이터 추출 포함)
+# 크롤링 및 데이터 가공 유틸
 # =======================================================
 @st.cache_data(ttl=600)
 def get_dart_filings(stock_code):
@@ -312,7 +312,7 @@ def get_advanced_fundamental_data(code):
                                 valid_eps.append(float(val))
                         if valid_eps:
                             data["eps"] = valid_eps[-1]
-                            data["eps_history"] = valid_eps[-3:] # 최근 3개년/분기 확보
+                            data["eps_history"] = valid_eps[-3:]
                     if "BPS(원)" in text:
                         tds = th_item.find_next_siblings("td")
                         valid_bps = []
@@ -330,7 +330,7 @@ def get_advanced_fundamental_data(code):
                             if val and val.replace('.', '', 1).replace('-', '', 1).isdigit():
                                 valid_roe.append(float(val))
                         if valid_roe: 
-                            data["roe_history"] = valid_roe[-3:] # 최근 3개년/분기 확보
+                            data["roe_history"] = valid_roe[-3:]
             except Exception as inner_e: 
                 print(f"[Fundamental Parsing Error - {code}] {inner_e}")
             
@@ -568,7 +568,8 @@ with tab1:
     news_pool = g_data.get("realtime_news", [])
     
     if news_pool:
-        with st.expander(f"📰 수집된 실시간 뉴스 (최신 10건 표시 / 총 {len(news_pool)}건 누적)", expanded=True):
+        # 💡 expanded=True 제거 (기본적으로 접힌 상태)
+        with st.expander(f"📰 수집된 실시간 뉴스 (최신 10건 표시 / 총 {len(news_pool)}건 누적)"):
             for idx, n in enumerate(news_pool[:10]): 
                 st.markdown(f"{idx+1}. [{n['title']}]({n['link']})")
     else:
@@ -648,7 +649,8 @@ with tab2:
                 st.rerun()
 
     if st.session_state.get('eco_briefing'):
-        with st.expander("📝 오늘의 거시경제 종합 브리핑", expanded=True):
+        # 💡 expanded=True 제거 (기본적으로 접힌 상태)
+        with st.expander("📝 오늘의 거시경제 종합 브리핑"):
             st.write(st.session_state.eco_briefing)
 
     st.subheader("핵심 경제 뉴스 목록")
@@ -692,7 +694,7 @@ with tab3:
         st.info("현재 매칭된 섹터별 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 4: 종목 발굴 (동적 변수 연산 적용)
+# 탭 4: 종목 발굴
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (심층 분석)")
@@ -748,7 +750,6 @@ with tab4:
                     
                     calc_result_log = ""
                     if investment_horizon == "단기 (1~3개월)":
-                        # 동적 EPS 성장률 연산
                         if len(eps_history) >= 2 and eps_history[-2] > 0:
                             eps_growth_rate = ((eps_history[-1] - eps_history[-2]) / eps_history[-2]) * 100
                             eps_growth_rate = max(5.0, min(eps_growth_rate, 50.0))
@@ -763,7 +764,6 @@ with tab4:
                         calc_result_log = f"▶ 파이썬 연산 팩트 [중기 상대가치 적정가]: {target_valuation_price:,.0f}원 (계산식: EPS {eps_val:,}원 × 업종평균 PER {float_ind_per}배)"
                         
                     else:
-                        # 동적 3개년 가중평균 ROE 연산
                         if len(roe_history) == 3:
                             expected_roe = ((roe_history[2] * 3) + (roe_history[1] * 2) + (roe_history[0] * 1)) / 6 / 100
                         elif len(roe_history) > 0:
@@ -816,7 +816,8 @@ with tab4:
 
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
-        with st.expander("추천 리포트", expanded=True):
+        # 💡 expanded=True 제거 (기본적으로 접힌 상태)
+        with st.expander("추천 리포트"):
             display_text = raw.split("[TRACKING_DATA]")[0].strip()
             display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', display_text)
             st.write(display_text)
@@ -855,7 +856,7 @@ with tab4:
                                 st.success(f"✅ '{name}' 종목의 리포트가 내 스크랩북에 저장되었습니다!")
 
 # =======================================================
-# 탭 5: 관심종목 진단 (개별 삭제 및 선택 삭제 기능 추가)
+# 탭 5: 관심종목 진단
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
@@ -1012,7 +1013,8 @@ with tab5:
                     st.rerun()
 
             if report_text:
-                with st.expander("진단 리포트", expanded=True):
+                # 💡 expanded=True 제거 (기본적으로 접힌 상태)
+                with st.expander("진단 리포트"):
                     display_report = re.sub(r'TARGET_PRICE:.*', '', report_text).strip()
                     st.write(display_report)
                     st.caption(f"🧠 전처리 요약: {LITE_MODEL_NAME} | 심층 의의 종합 분석: {MODEL_NAME}")
@@ -1025,7 +1027,7 @@ with tab5:
             st.divider()
 
 # =======================================================
-# 탭 6: 스크랩북 (선택 삭제 및 개별 삭제 기능 추가)
+# 탭 6: 스크랩북
 # =======================================================
 with tab6:
     st.subheader("저장된 분석 리포트")
@@ -1063,6 +1065,7 @@ with tab6:
             with col_sel_s:
                 st.checkbox("선택", key=f"chk_t6_{s_id}", label_visibility="collapsed")
             with col_exp_s:
+                # 💡 expanded=True 제거/미적용 (기본적으로 접힌 상태)
                 with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
                     st.markdown("#### 💰 가격 지표 비교")
                     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
