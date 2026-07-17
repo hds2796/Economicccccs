@@ -568,7 +568,6 @@ with tab1:
     news_pool = g_data.get("realtime_news", [])
     
     if news_pool:
-        # 💡 expanded=True 제거 (기본적으로 접힌 상태)
         with st.expander(f"📰 수집된 실시간 뉴스 (최신 10건 표시 / 총 {len(news_pool)}건 누적)"):
             for idx, n in enumerate(news_pool[:10]): 
                 st.markdown(f"{idx+1}. [{n['title']}]({n['link']})")
@@ -649,7 +648,6 @@ with tab2:
                 st.rerun()
 
     if st.session_state.get('eco_briefing'):
-        # 💡 expanded=True 제거 (기본적으로 접힌 상태)
         with st.expander("📝 오늘의 거시경제 종합 브리핑"):
             st.write(st.session_state.eco_briefing)
 
@@ -694,7 +692,7 @@ with tab3:
         st.info("현재 매칭된 섹터별 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 4: 종목 발굴
+# 탭 4: 종목 발굴 (💡 동적 클램프 해제 및 적자 방어 로직)
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (심층 분석)")
@@ -717,7 +715,7 @@ with tab4:
                     except: pass
                 if not selected_tickers: st.stop()
             
-            with st.spinner("[2단계] 후보군 심층 데이터 크롤링 및 동적 퀀트 수식 계산 중..."):
+            with st.spinner("[2단계] 후보군 심층 데이터 크롤링 및 정직한 퀀트 수식 계산 중..."):
                 tech_data_str = ""
                 for ticker in selected_tickers:
                     ticker = re.sub(r'[^\d]', '', ticker)
@@ -749,36 +747,48 @@ with tab4:
                     roe_history = fund.get('roe_history', [])
                     
                     calc_result_log = ""
+                    # 💡 퀀트 로직 개선: 적자 시 가짜 정밀도를 버리고 플랜 B(자산/매출) 평가 유도
                     if investment_horizon == "단기 (1~3개월)":
-                        if len(eps_history) >= 2 and eps_history[-2] > 0:
-                            eps_growth_rate = ((eps_history[-1] - eps_history[-2]) / eps_history[-2]) * 100
-                            eps_growth_rate = max(5.0, min(eps_growth_rate, 50.0))
+                        if eps_val <= 0:
+                            calc_result_log = f"▶ 파이썬 연산 팩트 [단기 PEG]: 산출 불가 (적자 지속). AI는 차트 수급과 뉴스 모멘텀만으로 기술적 목표가를 산출할 것."
                         else:
-                            eps_growth_rate = 10.0
-                            
-                        peg_val = float_per / eps_growth_rate if eps_growth_rate > 0 and float_per > 0 else 0.0
-                        calc_result_log = f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 실적 데이터 기반 동적 이익성장률 {eps_growth_rate:.1f}%)"
+                            if len(eps_history) >= 2 and eps_history[-2] > 0:
+                                eps_growth_rate = ((eps_history[-1] - eps_history[-2]) / eps_history[-2]) * 100
+                            else:
+                                eps_growth_rate = 10.0 # 최소한의 정상 기업 성장률 가정
+                                
+                            if eps_growth_rate > 0 and float_per > 0:
+                                peg_val = float_per / eps_growth_rate
+                                calc_result_log = f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 실적 데이터 기반 동적 이익성장률 {eps_growth_rate:.1f}%)"
+                            else:
+                                calc_result_log = f"▶ 파이썬 연산 팩트 [단기 PEG]: 산출 불가 (역성장 우려). AI는 모멘텀 위주로 분석할 것."
                         
                     elif investment_horizon == "중기 (3~6개월)":
-                        target_valuation_price = eps_val * float_ind_per if eps_val > 0 and float_ind_per > 0 else current_price * 1.15
-                        calc_result_log = f"▶ 파이썬 연산 팩트 [중기 상대가치 적정가]: {target_valuation_price:,.0f}원 (계산식: EPS {eps_val:,}원 × 업종평균 PER {float_ind_per}배)"
+                        if eps_val <= 0:
+                            calc_result_log = f"▶ 파이썬 연산 팩트 [중기 상대가치]: 이익(PER) 기준 산출 불가. 자산(BPS {bps_val:,}원) 기준 하한선만 고려하여 AI가 모멘텀 기반으로 목표가 도출 요망."
+                        else:
+                            target_valuation_price = eps_val * float_ind_per if float_ind_per > 0 else eps_val * 10 # 업종 PER 없으면 보수적 10배
+                            calc_result_log = f"▶ 파이썬 연산 팩트 [중기 상대가치 적정가]: {target_valuation_price:,.0f}원 (계산식: EPS {eps_val:,}원 × 업종평균 PER {float_ind_per}배)"
                         
-                    else:
+                    else: # 장기
                         if len(roe_history) == 3:
                             expected_roe = ((roe_history[2] * 3) + (roe_history[1] * 2) + (roe_history[0] * 1)) / 6 / 100
                         elif len(roe_history) > 0:
                             expected_roe = roe_history[-1] / 100
                         else:
-                            expected_roe = 0.10
-                        expected_roe = max(0.05, min(expected_roe, 0.30))
+                            expected_roe = 0.05
+                            
+                        # 시총 구분이 어려우므로 기본 요구수익률 8% 유지하되, 마이너스 ROE 그대로 수용 (가짜 클램프 철거)
                         required_return = 0.08
                         
                         if bps_val > 0:
                             residual_income = bps_val * (expected_roe - required_return)
                             rim_intrinsic_value = bps_val + (residual_income / required_return)
+                            if rim_intrinsic_value < 0: 
+                                rim_intrinsic_value = 0 # 기업 가치 완전 훼손
+                            calc_result_log = f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: {rim_intrinsic_value:,.0f}원 (계산식: 주당자산 BPS {bps_val:,}원, 3개년 가중평균 ROE {expected_roe*100:.1f}%, 요구수익률 8% 대입)"
                         else:
-                            rim_intrinsic_value = current_price * 1.3
-                        calc_result_log = f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: {rim_intrinsic_value:,.0f}원 (계산식: 주당자산 BPS {bps_val:,}원, 3개년 가중평균 ROE {expected_roe*100:.1f}%, 요구수익률 8% 대입)"
+                            calc_result_log = f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: 자본 잠식으로 산출 불가. 펀더멘털 투자 부적합 판정 요망."
 
                     tech_data_str += f"[{name} ({ticker})]\n"
                     if tech:
@@ -789,26 +799,27 @@ with tab4:
                     tech_data_str += f"{calc_result_log}\n"
                     tech_data_str += f"- 뉴스 및 공시 요약본:\n{lite_summary}\n\n"
             
-            with st.spinner("[3단계] Flash 3.5 기반 퀀트 결과 해석 및 최종 멀티 리포트 생성 중..."):
+            with st.spinner("[3단계] Flash 3.5 기반 퀀트/모멘텀 유동적 최종 분석 중..."):
                 step3_prompt = (
                     f"당신은 감정을 철저히 배제하는 퀀트 애널리스트이자 분석 전문가입니다. 데이터 정제 엔진(Python)이 "
-                    f"수학적으로 연산하여 본문에 주입해 준 '파이썬 연산 팩트' 지표 수치들을 절대 신뢰하고 기반으로 삼으십시오.\n\n"
+                    f"연산하여 본문에 주입해 준 '파이썬 연산 팩트' 지표들을 바탕으로 리포트를 작성하십시오.\n\n"
                     f"[선택된 투자 기간]: {investment_horizon}\n"
-                    f"[10개 후보군 파이썬 연산 완료 데이터]\n{tech_data_str}\n\n"
+                    f"[10개 후보군 팩트 데이터]\n{tech_data_str}\n\n"
+                    f"=== ⚠️ AI 목표가 산출 핵심 지침 (중요) ===\n"
+                    f"1. 파이썬 연산 팩트에 정상적인 가격이 있다면 이를 '기본 하/상한선'으로 참고하여 차트/뉴스 가중치를 부여해 목표가를 산출하십시오.\n"
+                    f"2. 만약 파이썬 연산 팩트가 '산출 불가(적자 지속)' 등으로 나왔다면 펀더멘털 가치 평가는 포기하십시오. 대신 차트의 저항선 매물대와 뉴스의 모멘텀 파급력에 100% 가중치를 두고 '기술적/모멘텀 목표가'를 철저히 객관적으로 산출하십시오.\n\n"
                     f"=== 리포트 작성 지시 ===\n"
-                    f"1. 10개 후보군 중 가장 확실한 매수 매력도를 가진 **최상위 3개(Top 3) 종목만 엄선**하여 리포트를 작성하십시오. (절대 4개 이상의 리포트를 출력하지 마십시오)\n"
-                    f"2. 각 기업 정보에 제공된 '파이썬 연산 팩트'의 계산식과 결과를 본문에 그대로 인용하며 정성적 해설을 전개하십시오.\n"
-                    f"3. 제공된 차트 지표와 뉴스/공시 모멘텀이 시장에 가져올 파장을 객관적으로 융합 분석하십시오.\n\n"
-                    f"=== 리포트 작성 항목 (오직 Top 3 종목만 작성하며, 각 종목 분석은 반드시 <ANALYSIS_티커숫자> 와 </ANALYSIS_티커숫자> 태그로 감싸십시오) ===\n"
+                    f"1. 10개 후보군 중 가장 확실한 매수 매력도(또는 강한 모멘텀)를 가진 **최상위 3개(Top 3) 종목만 엄선**하여 리포트를 작성하십시오.\n"
+                    f"2. 각 종목 분석은 반드시 <ANALYSIS_티커숫자> 와 </ANALYSIS_티커숫자> 태그로 감싸십시오.\n"
                     f"<ANALYSIS_티커숫자>\n"
                     f"### [종목명] (티커)\n"
                     f"- 투자 의견 및 정량적 매수 근거\n"
-                    f"- 퀀트 가치 평가 해설: (제공된 파이썬 계산식과 결과 상수를 그대로 적고 해설)\n"
+                    f"- 가치/모멘텀 평가 해설: (퀀트가 가능하면 퀀트를 인용하고, 산출 불가 시 기술적/모멘텀 평가임을 명시)\n"
                     f"- 차트 및 기술적 지표 분석\n"
                     f"- 뉴스 및 공시 모멘텀의 시장 파급 효과\n"
                     f"- 목표가 및 진입 타점\n"
                     f"</ANALYSIS_티커숫자>\n\n"
-                    f"※ 반드시 마지막 줄은 아래 파싱 형식으로 오직 3개의 종목 데이터만 출력하십시오.\n"
+                    f"※ 반드시 마지막 줄은 아래 파싱 형식으로 오직 3개의 종목 데이터만 출력하십시오. (목표가는 AI가 최종 조정한 수치로 입력)\n"
                     f"[TRACKING_DATA]\n"
                     f"종목명|티커|단기목표가|중기목표가|장기목표가|진입타점"
                 )
@@ -816,7 +827,6 @@ with tab4:
 
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
-        # 💡 expanded=True 제거 (기본적으로 접힌 상태)
         with st.expander("추천 리포트"):
             display_text = raw.split("[TRACKING_DATA]")[0].strip()
             display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', display_text)
@@ -856,7 +866,7 @@ with tab4:
                                 st.success(f"✅ '{name}' 종목의 리포트가 내 스크랩북에 저장되었습니다!")
 
 # =======================================================
-# 탭 5: 관심종목 진단
+# 탭 5: 관심종목 진단 (💡 퀀트 예외 분기 및 AI 가중치 시프트 완벽 반영)
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
@@ -923,7 +933,7 @@ with tab5:
                 if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
             with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
-                    with st.spinner("파이썬 동적 퀀트 수식 선행 계산 및 AI 종합 진단 중..."):
+                    with st.spinner("파이썬 정직한 퀀트 수식 계산 및 AI 종합 진단 중..."):
                         tech = get_technical_data(code)
                         fund = get_advanced_fundamental_data(code)
                         news_raw = fetch_stock_news(name, display=5)
@@ -945,35 +955,45 @@ with tab5:
                         eps_history = fund.get('eps_history', [])
                         roe_history = fund.get('roe_history', [])
                         
-                        if len(eps_history) >= 2 and eps_history[-2] > 0:
-                            eps_growth_rate = ((eps_history[-1] - eps_history[-2]) / eps_history[-2]) * 100
-                            eps_growth_rate = max(5.0, min(eps_growth_rate, 50.0))
-                        else:
-                            eps_growth_rate = 10.0
-                            
-                        peg_val = float_per / eps_growth_rate if eps_growth_rate > 0 and float_per > 0 else 0.0
-                        target_valuation_price = eps_val * float_ind_per if eps_val > 0 and float_ind_per > 0 else current_price * 1.15
+                        calc_result_log = ""
                         
+                        # [1] 단기 PEG
+                        if eps_val <= 0:
+                            calc_result_log += f"▶ 파이썬 연산 팩트 [단기 PEG]: 산출 불가 (적자 지속).\n"
+                        else:
+                            if len(eps_history) >= 2 and eps_history[-2] > 0:
+                                eps_growth_rate = ((eps_history[-1] - eps_history[-2]) / eps_history[-2]) * 100
+                            else:
+                                eps_growth_rate = 10.0
+                            if eps_growth_rate > 0 and float_per > 0:
+                                peg_val = float_per / eps_growth_rate
+                                calc_result_log += f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 이익성장률 {eps_growth_rate:.1f}%)\n"
+                            else:
+                                calc_result_log += f"▶ 파이썬 연산 팩트 [단기 PEG]: 산출 불가 (역성장 우려).\n"
+                        
+                        # [2] 중기 상대가치
+                        if eps_val <= 0:
+                            calc_result_log += f"▶ 파이썬 연산 팩트 [중기 상대가치]: 이익 기준 산출 불가. 자산(BPS {bps_val:,}원) 하한선 참고 바람.\n"
+                        else:
+                            target_valuation_price = eps_val * float_ind_per if float_ind_per > 0 else eps_val * 10
+                            calc_result_log += f"▶ 파이썬 연산 팩트 [중기 상대가치 적정가]: {target_valuation_price:,.0f}원 (계산식: EPS {eps_val:,}원 × 업종평균 PER {float_ind_per}배)\n"
+                            
+                        # [3] 장기 RIM
                         if len(roe_history) == 3:
                             expected_roe = ((roe_history[2] * 3) + (roe_history[1] * 2) + (roe_history[0] * 1)) / 6 / 100
                         elif len(roe_history) > 0:
                             expected_roe = roe_history[-1] / 100
                         else:
-                            expected_roe = 0.10
-                        expected_roe = max(0.05, min(expected_roe, 0.30))
+                            expected_roe = 0.05
+                            
                         required_return = 0.08
-                        
                         if bps_val > 0:
                             residual_income = bps_val * (expected_roe - required_return)
                             rim_intrinsic_value = bps_val + (residual_income / required_return)
+                            if rim_intrinsic_value < 0: rim_intrinsic_value = 0
+                            calc_result_log += f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: {rim_intrinsic_value:,.0f}원 (계산식: BPS {bps_val:,}원, 3개년 평균 ROE {expected_roe*100:.1f}%, 요구수익률 8% 대입)\n"
                         else:
-                            rim_intrinsic_value = current_price * 1.3
-                            
-                        calc_result_log = (
-                            f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 실적 동적 이익성장률 {eps_growth_rate:.1f}%)\n"
-                            f"▶ 파이썬 연산 팩트 [중기 상대가치 적정가]: {target_valuation_price:,.0f}원 (계산식: EPS {eps_val:,}원 × 업종평균 PER {float_ind_per}배)\n"
-                            f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: {rim_intrinsic_value:,.0f}원 (계산식: 주당자산 BPS {bps_val:,}원, 3개년 가중평균 ROE {expected_roe*100:.1f}%, 요구수익률 8% 대입)\n"
-                        )
+                            calc_result_log += f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: 자본 잠식으로 산출 불가.\n"
 
                         data_str = f"현재가: {current_price:,.0f}\n"
                         
@@ -987,15 +1007,17 @@ with tab5:
                         data_str += f"[정제된 상세 이슈 요약]\n{lite_summary}"
                         
                         prompt = (f"[{name} 진단]\n[파이썬 연산 완료 데이터]\n{data_str}\n\n"
-                                  f"당신은 퀀트 애널리스트입니다. 파이썬이 선행 연산한 3가지 기간별 팩트 지표(PEG, 상대가치, RIM)를 '기본 밸류에이션 하/상한선'으로 참고하되, 여기에 차트의 기술적 흐름(MACD 등)과 뉴스/공시의 모멘텀 파급력을 '종합적으로 가중 반영'하여 최종 목표가를 산출하십시오.\n"
-                                  f"(당신은 절대로 주가나 수식을 직접 사칙연산하지 마십시오. 파이썬 퀀트 수치를 바탕으로 제반 요소를 고려해 정성적 조정을 거친 현실적인 단기/중기/장기 목표가를 도출하십시오.)\n\n"
+                                  f"당신은 퀀트 애널리스트입니다. 파이썬이 연산한 기간별 팩트 지표를 바탕으로 최종 목표가를 산출하십시오.\n"
+                                  f"=== ⚠️ AI 목표가 산출 핵심 지침 ===\n"
+                                  f"1. 파이썬 팩트 지표에 정상적인 가격이 있다면 이를 '기본 가치 밴드'로 참고하여 차트/뉴스 가중치를 부여해 목표가를 도출하십시오.\n"
+                                  f"2. 만약 특정 기간의 파이썬 연산 팩트가 '산출 불가(적자)'로 나왔다면, 해당 종목의 펀더멘털 가치는 무시하십시오. 이 경우 철저하게 차트 기술적 흐름(저항선)과 뉴스의 모멘텀 파급력에 100% 가중치를 두고 '기술적 목표가'를 제시하십시오.\n\n"
                                   f"=== 진단 리포트 작성 항목 ===\n"
                                   f"- 매수의견 (Buy/Hold/Sell 명시)\n"
-                                  f"  * 주의: 데이터에 [내 계좌 보유 정보]가 있다면, 현재 수익률과 종합 밸류에이션을 고려하여 '추가매수(Buy)', '보유 유지(Hold)', '익절/손절(Sell)' 중 하나를 객관적으로 제시할 것.\n"
-                                  f"- 단기/중기/장기 목표가 산출 논리: (파이썬 퀀트 팩트 + 차트 + 뉴스 모멘텀을 어떻게 종합하여 목표가를 최종 조정했는지 상세히 서술)\n"
+                                  f"  * 데이터에 [내 계좌 보유 정보]가 있다면, 현재 수익률과 기술적/기본적 가치를 종합하여 '추가매수(Buy)', '보유 유지(Hold)', '익절/손절(Sell)' 중 하나를 객관적으로 제시할 것.\n"
+                                  f"- 단기/중기/장기 목표가 산출 논리: (퀀트가 가능하면 퀀트 인용, 불가 시 기술적/모멘텀 평가임을 명시하여 상세히 서술)\n"
                                   f"- 차트 기술적 분석 및 수급 동향 해석\n"
                                   f"- 시장 파급 효과 및 주가 변화 의의 분석\n\n"
-                                  f"※ 마지막 줄은 아래 파싱 형식으로 작성하십시오. (목표가는 모든 요소를 종합한 최종 조정 숫자로 도출)\n"
+                                  f"※ 마지막 줄은 아래 파싱 형식으로 작성하십시오.\n"
                                   f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가")
                         report = call_gemini_with_fallback(prompt)
                     
@@ -1013,7 +1035,6 @@ with tab5:
                     st.rerun()
 
             if report_text:
-                # 💡 expanded=True 제거 (기본적으로 접힌 상태)
                 with st.expander("진단 리포트"):
                     display_report = re.sub(r'TARGET_PRICE:.*', '', report_text).strip()
                     st.write(display_report)
@@ -1065,7 +1086,6 @@ with tab6:
             with col_sel_s:
                 st.checkbox("선택", key=f"chk_t6_{s_id}", label_visibility="collapsed")
             with col_exp_s:
-                # 💡 expanded=True 제거/미적용 (기본적으로 접힌 상태)
                 with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
                     st.markdown("#### 💰 가격 지표 비교")
                     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
