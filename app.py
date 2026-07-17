@@ -380,7 +380,6 @@ def fetch_current_prices(codes):
         return out
     except: return {}
 
-# 💡 수정 1: 제목을 절대적 기준으로 중복 제거
 def dedupe_news(news_list):
     seen = set(); out = []
     for n in news_list or []:
@@ -563,7 +562,7 @@ with tab3:
         st.info("현재 매칭된 섹터별 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 4: 종목 발굴 (💡 개별 스크랩 및 목표가 산출 엄격 통제)
+# 탭 4: 종목 발굴 (💡 기간 분기형 퀀트 공식 & 통합 멀티 분석)
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (심층 분석)")
@@ -607,31 +606,51 @@ with tab4:
                     
                     tech_data_str += f"[{name} ({ticker})]\n"
                     if tech:
-                        tech_data_str += f"- 차트: 현재가 {tech['current']:,.0f} | 20일선 {tech['ma20']:,.0f} | MACD {tech['macd']:,.2f}\n"
+                        tech_data_str += f"- 차트 지표: 현재가 {tech['current']:,.0f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | Signal {tech['signal']:,.2f}\n"
                     if fund:
                         tech_data_str += f"- 펀더멘털: 종목PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']} | 실적트렌드: {fund['quarter_trend']}\n"
                         tech_data_str += f"- 수급동향: {fund['supply_demand']}\n"
-                    tech_data_str += f"- Lite 정제 이슈 자료:\n{lite_summary}\n\n"
+                    tech_data_str += f"- 뉴스 및 공시 요약본:\n{lite_summary}\n\n"
             
-            with st.spinner("[3단계] Flash 3.5 기반 퀀트 심층 분석 및 시장 변화 분석 중..."):
-                # 💡 수정: 스크랩을 위한 <ANALYSIS> 태그 강제 및 목표가 공식 명시 지시
+            with st.spinner("[3단계] Flash 3.5 기간별 퀀트 모델링 및 기술/뉴스 통합 분석 진행 중..."):
+                # 💡 투자 기간별 동적 퀀트 공식 지시문 생성
+                if investment_horizon == "단기 (1~3개월)":
+                    quant_instruction = (
+                        "★ 단기 전략 공식: PEG (Price Earnings to Growth Ratio) 분석\n"
+                        "- 제공된 실적 트렌드와 PER을 기반으로 PEG를 도출하십시오. (공식: PER / EPS 기대 성장률)\n"
+                        "- PEG가 1 미만인지 검증하여 이익 성장 속도 대비 저평가 여부를 계산식과 숫자로 증명하십시오."
+                    )
+                elif investment_horizon == "중기 (3~6개월)":
+                    quant_instruction = (
+                        "★ 중기 전략 공식: Target PER 및 상대 가치 평가\n"
+                        "- 종목 PER과 업종 평균 PER을 엄격히 비교 대조하십시오. (공식: 적정가 = Forward EPS × 업종 평균 PER)\n"
+                        "- 실제 수치를 대입하여 동종 업계 경쟁사 대비 할인율과 유효 괴리율을 숫자로 도출하십시오."
+                    )
+                else:
+                    quant_instruction = (
+                        "★ 장기 전략 공식: RIM (Residual Income Model, 잔여이익모델) 절대가치 평가\n"
+                        "- BPS(자기자본)와 실적 트렌드(ROE)를 활용하여 기업의 절대적 내재가치를 추정하십시오. (공식: 내재가치 = 현재 자기자본 + 미래 잔여이익의 현재가치)\n"
+                        "- 요구수익률 및 주당 초과이익에 대입한 숫자를 본문에 명확히 명시하십시오."
+                    )
+
                 step3_prompt = (
-                    f"당신은 감정을 배제하는 철저한 퀀트 애널리스트입니다. 제공된 10개 후보군의 상세 데이터와 수급, 재무, 공시 요약본을 토대로 "
-                    f"업종 PER 대비 저평가 여부를 비교 검증하여 확실히 매수 매력도가 높은 상위 3개 종목만 엄선하십시오.\n\n"
-                    f"[10개 후보군 심층 데이터]\n{tech_data_str}\n\n"
-                    f"=== 분석 지시 ===\n"
-                    f"1. 지표가 부실하거나 고평가된 종목은 배제하고, 확실한 'Buy' 종목만 리포트하십시오.\n"
-                    f"2. 각 추천 종목이 속한 섹터 및 해당 기업의 모멘텀이 향후 주식시장에 어떤 변화를 가져올지 구체적 의의를 반드시 분석 내용에 녹여내십시오.\n"
-                    f"3. 목표가 산출 시 어떠한 공식을 적용했으며 어떤 숫자를 대입했는지 반드시 명확하게 작성하십시오.\n\n"
-                    f"=== 리포트 작성 항목 (각 종목의 분석 내용은 반드시 <ANALYSIS_티커숫자> 와 </ANALYSIS_티커숫자> 태그로 감싸서 구획을 명확히 분리할 것) ===\n"
+                    f"당신은 감정을 철저히 배제하는 퀀트 애널리스트이자 기술적 분석가입니다. 아래 제공된 10개 후보군의 상세 계량 지표(재무, 차트, 수급)와 "
+                    f"뉴스/공시 요약본을 연계 분석하여 확실히 매력적인 상위 3개 종목을 엄선하십시오.\n\n"
+                    f"[선택된 투자 기간]: {investment_horizon}\n"
+                    f"{quant_instruction}\n\n"
+                    f"[10개 후보군 통합 분석 데이터]\n{tech_data_str}\n\n"
+                    f"=== 필수 분석 및 결합 지시 ===\n"
+                    f"1. 지정된 퀀트 공식을 반드시 사용하고, 공식명과 대입한 구체적 숫자를 절대 얼버무리지 말고 명확히 리포트하십시오.\n"
+                    f"2. 퀀트 분석에만 치우치지 말고, 제공된 차트 지표(현재가 위치, 20/60일선 정배열 여부, MACD 골든/데드크로스)의 기술적 타점을 융합하십시오.\n"
+                    f"3. 뉴스 및 공시에서 포착된 핵심 호악재 모멘텀이 향후 해당 섹터 및 전체 주식시장에 가져올 변화의 의의를 연계하여 설명하십시오.\n\n"
+                    f"=== 리포트 작성 항목 (각 종목 분석은 반드시 <ANALYSIS_티커숫자> 와 </ANALYSIS_티커숫자> 태그로 감싸십시오) ===\n"
                     f"<ANALYSIS_티커숫자>\n"
                     f"### [종목명] (티커)\n"
-                    f"- 매수의견: 반드시 'Buy' 의견인 정량적 근거 명시\n"
-                    f"- 수급 및 공시 분석\n"
-                    f"- 퀀트 밸류에이션: 업종 평균 PER/PBR과 철저히 비교 분석\n"
-                    f"- 시장 파급 효과 및 변화 의의: (해당 모멘텀이 시장에 가져올 변화 분석)\n"
-                    f"- 목표가 산출 공식 및 근거: (예: '예상 EPS 5,000원 × 타겟 PER 10배 = 50,000원'과 같이 계산식과 대입 숫자를 명확히 기재)\n"
-                    f"- 진입 타점\n"
+                    f"- 투자 의견 및 정량적 매수 근거\n"
+                    f"- 퀀트 가치 평가: (지정된 공식을 활용한 명확한 계산 과정 및 숫자 기재)\n"
+                    f"- 차트 및 기술적 지표 분석: (20/60일선 이동평균선 상태, MACD 모멘텀 연계 타점)\n"
+                    f"- 뉴스 및 공시 모멘텀의 시장 파급 효과 (변화 의의)\n"
+                    f"- 목표가 및 진입 타점\n"
                     f"</ANALYSIS_티커숫자>\n\n"
                     f"※ 반드시 마지막 줄은 아래 파싱 형식으로 출력.\n"
                     f"[TRACKING_DATA]\n"
@@ -642,7 +661,6 @@ with tab4:
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
         with st.expander("추천 리포트", expanded=True):
-            # 화면 출력 시에는 보기 흉한 태그(<ANALYSIS_...>)를 정규식으로 지우고 깔끔하게 보여줌
             display_text = raw.split("[TRACKING_DATA]")[0].strip()
             display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', display_text)
             st.write(display_text)
@@ -672,14 +690,12 @@ with tab4:
                             c_bp.metric("진입 타점", f"{bp:,.0f}")
                             
                             if st.button("스크랩", key=f"rec_s_{tick}", use_container_width=True):
-                                # 💡 전체 텍스트(raw)가 아닌, 해당 티커의 내용만 정규식으로 정확히 뽑아냄
                                 match = re.search(f"<ANALYSIS_{code}>(.*?)</ANALYSIS_{code}>", raw, re.DOTALL)
                                 specific_analysis = match.group(1).strip() if match else display_text
                                 
                                 c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                                           (f"{name} 퀀트 심층분석", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, bp, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user))
                                 conn.commit()
-                                # 명확한 종목 이름 명시 알림
                                 st.success(f"✅ '{name}' 종목의 리포트가 내 스크랩북에 저장되었습니다!")
 
 # =======================================================
