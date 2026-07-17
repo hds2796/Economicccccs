@@ -109,7 +109,7 @@ def initialize_dart_codes():
                         stock_code = lst.findtext('stock_code')
                         if stock_code and stock_code.strip():
                             data.append((corp_code, corp_name, stock_code.strip()))
-                    c.execDirectmany("INSERT OR IGNORE INTO dart_corp_codes (corp_code, corp_name, stock_code) VALUES (?, ?, ?)", data)
+                    c.executemany("INSERT OR IGNORE INTO dart_corp_codes (corp_code, corp_name, stock_code) VALUES (?, ?, ?)", data)
                     conn.commit()
         except: pass
 
@@ -200,10 +200,8 @@ def call_gemini_with_fallback(prompt, model=MODEL_NAME):
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         try:
-            # 1차 시도: 지정된 모델 (기본값 gemini-3.5-flash)
             return client.models.generate_content(model=model, contents=prompt).text
         except Exception as e1:
-            # 2차 시도 (Fallback): 기본 분석 모델이 실패했을 경우 gemini-3-preview로 재시도
             if model == MODEL_NAME:
                 try:
                     return client.models.generate_content(model="gemini-3-preview", contents=prompt).text
@@ -225,12 +223,10 @@ def call_gemini_stream_with_fallback(prompt):
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         try:
-            # 1차 시도: 3.5-flash 모델로 스트리밍 시도
             response = client.models.generate_content_stream(model=MODEL_NAME, contents=prompt)
             for chunk in response:
                 if chunk.text: yield chunk.text
         except Exception as e1:
-            # 2차 시도 (Fallback): 실패 시 3-preview 모델로 재시도
             try:
                 fallback_response = client.models.generate_content_stream(model="gemini-3-preview", contents=prompt)
                 yield f"\n[안내] 3.5-flash 서버 응답 지연으로 인해 3-preview 모델로 우회하여 분석을 진행합니다.\n\n"
@@ -384,10 +380,10 @@ def fetch_current_prices(codes):
         return out
     except: return {}
 
+# 💡 수정 1: 제목을 절대적 기준으로 중복 제거
 def dedupe_news(news_list):
     seen = set(); out = []
     for n in news_list or []:
-        # 링크(link) 대신 제목(title)을 절대적인 고유 키(Key)로 사용하여 필터링
         key = n.get("title", "").strip()
         if not key or key in seen: continue
         seen.add(key); out.append(n)
@@ -422,7 +418,7 @@ def fetch_realtime_data_direct():
     except: return None
 
 # =======================================================
-# 상태 변수 선언 및 데이터 누적 병합 (람다 키 명칭 'sectors' 반영)
+# 상태 변수 선언 및 데이터 누적 병합
 # =======================================================
 cached_data = fetch_cached_global_data() or {}
 
@@ -430,7 +426,6 @@ if "realtime_cache" not in st.session_state:
     st.session_state.realtime_cache = {
         "market_status": cached_data.get("market_status", {}),
         "realtime_news": cached_data.get("realtime_news", []),
-        # 💡 람다가 보내주는 키 값인 'sectors'와 캐시 결합 연동 안전 장치 추가
         "sectors": cached_data.get("sectors") or cached_data.get("sector_news", {}),
         "updated_at": cached_data.get("updated_at", "대기 중")
     }
@@ -444,7 +439,6 @@ def merge_realtime_data(new_data):
     
     merged_news = dedupe_news(new_data.get("realtime_news", []) + old_data.get("realtime_news", []))
     
-    # 💡 키값 불일치 해결: 'sectors'와 'sector_news' 명칭을 모두 통합 처리
     old_sector = old_data.get("sectors") or old_data.get("sector_news", {})
     new_sector = new_data.get("sectors") or new_data.get("sector_news", {})
     
@@ -541,7 +535,7 @@ with tab2:
         st.info("조회된 핵심 경제 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 3: 섹터 뉴스 (💡 람다 'sectors' 데이터 연동 완전 정상화)
+# 탭 3: 섹터 뉴스
 # =======================================================
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
@@ -569,7 +563,7 @@ with tab3:
         st.info("현재 매칭된 섹터별 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 4: 종목 발굴
+# 탭 4: 종목 발굴 (💡 개별 스크랩 및 목표가 산출 엄격 통제)
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (심층 분석)")
@@ -620,22 +614,26 @@ with tab4:
                     tech_data_str += f"- Lite 정제 이슈 자료:\n{lite_summary}\n\n"
             
             with st.spinner("[3단계] Flash 3.5 기반 퀀트 심층 분석 및 시장 변화 분석 중..."):
+                # 💡 수정: 스크랩을 위한 <ANALYSIS> 태그 강제 및 목표가 공식 명시 지시
                 step3_prompt = (
                     f"당신은 감정을 배제하는 철저한 퀀트 애널리스트입니다. 제공된 10개 후보군의 상세 데이터와 수급, 재무, 공시 요약본을 토대로 "
                     f"업종 PER 대비 저평가 여부를 비교 검증하여 확실히 매수 매력도가 높은 상위 3개 종목만 엄선하십시오.\n\n"
                     f"[10개 후보군 심층 데이터]\n{tech_data_str}\n\n"
                     f"=== 분석 지시 ===\n"
                     f"1. 지표가 부실하거나 고평가된 종목은 배제하고, 확실한 'Buy' 종목만 리포트하십시오.\n"
-                    f"2. 각 추천 종목이 속한 섹터 및 해당 기업의 모멘텀이 향후 주식시장에 어떤 변화를 가져올지 구체적 의의를 반드시 분석 내용에 녹여내십시오.\n\n"
-                    f"=== 리포트 작성 항목 ===\n"
-                    f"[종목명] (티커)\n"
+                    f"2. 각 추천 종목이 속한 섹터 및 해당 기업의 모멘텀이 향후 주식시장에 어떤 변화를 가져올지 구체적 의의를 반드시 분석 내용에 녹여내십시오.\n"
+                    f"3. 목표가 산출 시 어떠한 공식을 적용했으며 어떤 숫자를 대입했는지 반드시 명확하게 작성하십시오.\n\n"
+                    f"=== 리포트 작성 항목 (각 종목의 분석 내용은 반드시 <ANALYSIS_티커숫자> 와 </ANALYSIS_티커숫자> 태그로 감싸서 구획을 명확히 분리할 것) ===\n"
+                    f"<ANALYSIS_티커숫자>\n"
+                    f"### [종목명] (티커)\n"
                     f"- 매수의견: 반드시 'Buy' 의견인 정량적 근거 명시\n"
                     f"- 수급 및 공시 분석\n"
                     f"- 퀀트 밸류에이션: 업종 평균 PER/PBR과 철저히 비교 분석\n"
                     f"- 시장 파급 효과 및 변화 의의: (해당 모멘텀이 시장에 가져올 변화 분석)\n"
-                    f"- 목표가 산출 근거\n"
-                    f"- 진입 타점\n\n"
-                    f"※ 반드시 아래 파싱 형식으로 출력.\n"
+                    f"- 목표가 산출 공식 및 근거: (예: '예상 EPS 5,000원 × 타겟 PER 10배 = 50,000원'과 같이 계산식과 대입 숫자를 명확히 기재)\n"
+                    f"- 진입 타점\n"
+                    f"</ANALYSIS_티커숫자>\n\n"
+                    f"※ 반드시 마지막 줄은 아래 파싱 형식으로 출력.\n"
                     f"[TRACKING_DATA]\n"
                     f"종목명|티커|단기목표가|중기목표가|장기목표가|진입타점"
                 )
@@ -644,8 +642,12 @@ with tab4:
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
         with st.expander("추천 리포트", expanded=True):
-            st.write(raw.split("[TRACKING_DATA]")[0].strip())
+            # 화면 출력 시에는 보기 흉한 태그(<ANALYSIS_...>)를 정규식으로 지우고 깔끔하게 보여줌
+            display_text = raw.split("[TRACKING_DATA]")[0].strip()
+            display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', display_text)
+            st.write(display_text)
             st.caption(f"🧠 전처리: {LITE_MODEL_NAME} | 최종 분석: {MODEL_NAME}")
+            
             if "[TRACKING_DATA]" in raw:
                 block = raw.split("[TRACKING_DATA]")[1].strip().replace("```", "")
                 parsed_rows = []
@@ -656,6 +658,7 @@ with tab4:
                         parsed_rows.append((data[0].strip(), data[1].strip(), parse_won(data[2]), parse_won(data[3]), parse_won(data[4]), parse_won(data[5])))
                 price_map = fetch_current_prices([r[1] for r in parsed_rows])
                 cols_rec = st.columns(3)
+                
                 for idx, (name, tick, tp_s, tp_m, tp_l, bp) in enumerate(parsed_rows):
                     code = re.sub(r'[^\d]', '', tick)
                     price_info = price_map.get(code, {})
@@ -667,10 +670,17 @@ with tab4:
                             c_tp, c_bp = st.columns(2)
                             c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}<br>장: {tp_l:,.0f}", unsafe_allow_html=True)
                             c_bp.metric("진입 타점", f"{bp:,.0f}")
+                            
                             if st.button("스크랩", key=f"rec_s_{tick}", use_container_width=True):
+                                # 💡 전체 텍스트(raw)가 아닌, 해당 티커의 내용만 정규식으로 정확히 뽑아냄
+                                match = re.search(f"<ANALYSIS_{code}>(.*?)</ANALYSIS_{code}>", raw, re.DOTALL)
+                                specific_analysis = match.group(1).strip() if match else display_text
+                                
                                 c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                                          (f"{name} 심층분석", raw, name, tick, current, tp_s, tp_m, tp_l, bp, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user))
-                                conn.commit(); st.success("저장 완료")
+                                          (f"{name} 퀀트 심층분석", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, bp, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user))
+                                conn.commit()
+                                # 명확한 종목 이름 명시 알림
+                                st.success(f"✅ '{name}' 종목의 리포트가 내 스크랩북에 저장되었습니다!")
 
 # =======================================================
 # 탭 5: 관심종목 진단
@@ -750,12 +760,11 @@ with tab5:
         st.divider()
 
 # =======================================================
-# 탭 6: 스크랩북 (가격 비교 및 목표가 대비 현재가 분석 추가)
+# 탭 6: 스크랩북
 # =======================================================
 with tab6:
     st.subheader("저장된 분석 리포트")
     
-    # DB에서 스크랩된 모든 데이터 가져오기
     c.execute("""
         SELECT id, title, stock_name, ticker, scrap_date, analysis, model_used, 
                saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price 
@@ -766,7 +775,6 @@ with tab6:
     scraps = c.fetchall()
     
     if scraps:
-        # 실시간 현재가를 한 번에 조회하기 위해 티커 리스트 추출
         tickers = [row[3] for row in scraps if row[3]]
         price_map_scrap = fetch_current_prices(tickers)
         
@@ -774,12 +782,10 @@ with tab6:
             s_id, title, s_name, ticker, s_date, analysis, m_used, saved_p, tp_s, tp_m, tp_l, bp = row
             code = re.sub(r'[^\d]', '', ticker or "")
             
-            # 실시간 현재가 맵핑
             price_info = price_map_scrap.get(code, {})
             current_p = price_info.get("current", 0.0)
             
             with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
-                # 📊 핵심 가격 지표 계판 (Metrics Grid)
                 st.markdown("#### 💰 가격 지표 비교")
                 m_col1, m_col2, m_col3, m_col4 = st.columns(4)
                 
@@ -795,12 +801,10 @@ with tab6:
                     
                 m_col4.markdown(f"**목표가 밴드**<br>단기: {tp_s:,.0f}원<br>중기: {tp_m:,.0f}원<br>장기: {tp_l:,.0f}원", unsafe_allow_html=True)
                 
-                # 📈 목표가 대비 현재가 진행률 분석
                 if current_p > 0 and tp_s > 0:
                     st.markdown("---")
                     st.markdown("#### 🎯 목표가 대비 현재가 현황")
                     
-                    # 단기, 중기, 장기 대비 현재가의 위치 계산
                     pct_s = (current_p / tp_s) * 100
                     pct_m = (current_p / tp_m) * 100 if tp_m else 0.0
                     pct_l = (current_p / tp_l) * 100 if tp_l else 0.0
@@ -812,7 +816,6 @@ with tab6:
                 
                 st.markdown("---")
                 st.markdown("#### 📝 상세 분석 리포트")
-                # 리포트 본문 출력 (데이터 포맷 태그 제외)
                 st.write(analysis.split("[TRACKING_DATA]")[0].strip())
                 st.caption(f"🧠 생산 모델: {m_used}")
                 
