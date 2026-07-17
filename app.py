@@ -181,7 +181,7 @@ with st.sidebar:
     if st.button("☁️ 구글 드라이브 백업", use_container_width=True):
         with st.spinner("클라우드 백업 중..."):
             if backup_db_to_drive(): st.success("✅ 백업 완료")
-    if st.button("🔄 드라이브에서 복구", use_container_width=True):
+ if st.button("🔄 드라이브에서 복구", use_container_width=True):
         with st.spinner("데이터 복구 중..."):
             if restore_db_from_drive():
                 st.success("✅ 복구 완료! 새로고침 진행합니다.")
