@@ -23,7 +23,7 @@ from google import genai
 MODEL_NAME = "gemini-3.5-flash"
 LITE_MODEL_NAME = "gemini-3.1-flash-lite"
 
-# 💡 사이드바 기본 열림 설정 적용
+# 💡 사이드바 및 UI 초기 구조 최적화
 st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 
 # =======================================================
@@ -450,7 +450,7 @@ def fetch_realtime_data_direct():
     except: return None
 
 # =======================================================
-# 상태 변수 선언 및 누적
+# 상태 변수 선언 및 상단 레이아웃 제어
 # =======================================================
 cached_data = fetch_cached_global_data() or {}
 if "realtime_cache" not in st.session_state: 
@@ -475,22 +475,18 @@ if not st.session_state.realtime_cache.get("realtime_news"):
 
 g_data = st.session_state.realtime_cache
 
-# 💡 UI 픽스 1: K 슬라이더 메인 노출 (직관성 강화)
-st.markdown("### 📊 실시간 시장 지표")
-col_title, col_k1, col_k2, col_refresh = st.columns([2, 1.5, 3.5, 1.2])
+# 💡 UI 고도화: 메인 최상단에 K 슬라이더 전진 배치 (상시 노출)
+st.markdown("### 📊 실시간 시장 및 시스템 계수 관리")
+col_title, col_k1, col_k2, col_refresh = st.columns([2, 1.8, 3.2, 1.2])
 with col_refresh:
     if st.button("실시간 갱신", use_container_width=True):
         with st.spinner("갱신 중..."):
             if new_data := fetch_realtime_data_direct(): merge_realtime_data(new_data)
             st.rerun()
 
-with col_title: 
-    st.caption(f"누적: {g_data.get('updated_at', '알 수 없음')}")
-
-with col_k1:
-    k_factor = st.slider("⚙️ 손절 계수(K) 조절", min_value=1.0, max_value=3.5, value=2.0, step=0.1, help="시장 변동성에 따른 손절폭(k) 조절")
-with col_k2:
-    st.caption("1.5(타이트한 방어) ◀ `2.0(표준)` ▶ 2.5(추세 스윙)")
+with col_title: st.caption(f"동기화 시점: {g_data.get('updated_at', '알 수 없음')}")
+with col_k1: k_factor = st.slider("⚙️ 리스크 관리 계수 (k)", min_value=1.0, max_value=3.5, value=2.0, step=0.1, help="표준편차 배수 설정")
+with col_k2: st.caption("1.0~1.5 (보수적 손절/단기 대응) ◀ `2.0 (표준 노이즈 차단)` ▶ 2.5~3.5 (추세 매매/버티기)")
 
 market_data = g_data.get("market_status", {})
 cols = st.columns(4)
@@ -505,7 +501,7 @@ st.divider()
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경제", "섹터 뉴스", "종목 발굴", "관심종목 진단", "스크랩북"])
 
 # =======================================================
-# 탭 1 ~ 3
+# 탭 1 ~ 3: 브리핑 및 마이크로/매크로 연동
 # =======================================================
 with tab1:
     st.subheader("실시간 시황 브리핑")
@@ -554,8 +550,7 @@ with tab2:
                 with st.spinner("Lite 전처리 및 Flash 3.5 의미론적 분석 진행 중..."):
                     l_sum = call_gemini_lite_summary(f"본 뉴스의 핵심적 사실을 왜곡 없이 상세히 요약하라:\n{n['title']}")
                     st.write(call_gemini_with_fallback(f"[뉴스 요약]\n{l_sum}\n\n이 사실이 거시 경제 및 관련 주식 섹터에 파급 효과와 거시적 변화 의의를 분석하라."))
-    else: 
-        st.info("조회된 핵심 경제 뉴스가 없습니다. 람다 연동을 확인하세요.")
+    else: st.info("조회된 핵심 경제 뉴스가 없습니다.")
 
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
@@ -568,7 +563,7 @@ with tab3:
                 if st.button(f"분석", key=f"sec_{sec}"): st.write(call_gemini_with_fallback(f"[{sec} 요약]\n" + call_gemini_lite_summary("\n".join([i['title'] for i in items])) + "\n\n주도주 흐름 분석."))
 
 # =======================================================
-# 탭 4: 종목 발굴
+# 탭 4: 종목 발굴 (💡 피드백 적용: 3대 시나리오 밴드 선행 연산 탑재)
 # =======================================================
 def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     ticker = re.sub(r'[^\d]', '', ticker)
@@ -588,16 +583,47 @@ def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     daily_vol = tech['daily_volatility'] if tech else 0.0
     eps_val = fund.get('eps', 0.0)
     bps_val = fund.get('bps', 0.0)
+    roe_history = fund.get('roe_history', [])
     
+    try: float_per = float(fund['per'].replace(',', '')) if fund['per'] != '-' else 0.0
+    except: float_per = 0.0
+    try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
+    except: float_ind_per = 0.0
+    
+    # 기계적 손절가 계산
     sl_s = current_price * (1 - user_k * daily_vol * np.sqrt(20)) if daily_vol > 0 else 0.0
     sl_m = current_price * (1 - user_k * daily_vol * np.sqrt(60)) if daily_vol > 0 else 0.0
     sl_l = current_price * (1 - user_k * daily_vol * np.sqrt(250)) if daily_vol > 0 else 0.0
 
-    calc_result_log = (f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n")
+    # 💡 정량적 목표가 밴드 선행 연산 구조 주입
+    if eps_val <= 0:
+        fund_target_log = (
+            f"   - [보수적 시나리오] BPS 자산가치 기준: {bps_val:,.0f}원\n" if bps_val > 0 else f"   - [보수적 시나리오] BPS 자산가치 기준: {current_price * 0.8:,.0f}원\n"
+            "   - [중립적 시나리오] 적자 기업으로 이익 기반 퀀트 밴드 산출 불가 (차트/모멘텀 기준 기술적 밴드로 대체 요망)\n"
+            "   - [공격적 시나리오] 적자 기업으로 이익 기반 퀀트 밴드 산출 불가 (차트/모멘텀 기준 기술적 밴드로 대체 요망)\n"
+        )
+    else:
+        conservative_tp = bps_val if bps_val > 0 else current_price * 0.9
+        base_tp = eps_val * float_ind_per if float_ind_per > 0 else eps_val * 10
+        required_return = 0.08
+        expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
+        rim_tp = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
+        aggressive_tp = max(base_tp, rim_tp)
+        
+        fund_target_log = (
+            f"   - [보수적 시나리오] BPS 자산가치 기준: {conservative_tp:,.0f}원\n"
+            f"   - [중립적 시나리오] 업종평균 PER 기준: {base_tp:,.0f}원\n"
+            f"   - [공격적 시나리오] RIM 초과이익 기준: {aggressive_tp:,.0f}원\n"
+        )
+
+    calc_result_log = (
+        f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
+        f"▶ 파이썬 선행연산 목표가 밴드:\n{fund_target_log}"
+    )
 
     tech_data_str = f"[{name} ({ticker})]\n"
     if tech: tech_data_str += f"- 차트: 현재가 {tech['current']:,.0f} | 20일선 {tech['ma20']:,.0f} | MACD {tech['macd']:,.2f}\n"
-    if fund: tech_data_str += f"- 재무: EPS {eps_val:,}원 | BPS {bps_val:,}원\n"
+    if fund: tech_data_str += f"- 재무 비율: PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']}\n"
     tech_data_str += f"{calc_result_log}\n- 요약본:\n{lite_summary}\n\n"
     return tech_data_str
 
@@ -619,31 +645,32 @@ with tab4:
                     except: pass
                 if not selected_tickers: st.stop()
             
-            with st.spinner("[2단계] 10개 후보군 동시 병렬 크롤링 및 리스크(k) 산출 중..."):
+            with st.spinner("[2단계] 10개 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
                 tech_data_str = ""
                 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                     futures = [executor.submit(process_single_ticker_for_tab4, t, investment_horizon, k_factor) for t in selected_tickers]
                     for future in concurrent.futures.as_completed(futures):
                         tech_data_str += future.result()
             
-            with st.spinner("[3단계] Flash 3.5 기반 핵심 아이디어 도출 및 리포트 작성 중..."):
+            with st.spinner("[3단계] Flash 3.5 기반 밴드 매칭 및 최종 리포트 도출 중..."):
                 step3_prompt = (
                     f"당신은 리스크 관리를 최우선으로 하는 퀀트 애널리스트입니다.\n"
                     f"[10개 후보군 팩트 데이터]\n{tech_data_str}\n\n"
-                    f"=== ⚠️ AI 분석 핵심 지침 ===\n"
+                    f"=== ⚠️ AI 분석 및 목표가 선택 지침 (환각 금지) ===\n"
                     f"1. 가장 매력적인 **Top 3 종목만 엄선**하십시오.\n"
-                    f"2. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 굳이 이 종목을 지금 사야 하는가?'**에 대한 압도적이고 결정적인 핵심 투자 아이디어(Conviction Pitch)를 최상단에 강제 선언하십시오.\n"
-                    f"3. 편향을 제거하기 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리 작성하여 자가 검열하십시오.\n"
-                    f"4. 파이썬이 연산한 '단기/중기/장기 손절가' 데이터를 신뢰하여 대응 전략을 제시하십시오.\n\n"
+                    f"2. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 굳이 이 종목을 지금 사야 하는가?'**에 대한 핵심 투자 아이디어(Why Buy?)를 최상단에 선언하십시오.\n"
+                    f"3. **절대 주가나 목표가를 직접 사칙연산하여 임의의 값을 창조하지 마십시오.** 파이썬이 계산해 준 세 가지 시나리오 밴드 가격([보수적/중립적/공격적]) 중 현재 차트 매물대 저항선에 비추어 가장 합리적인 시나리오를 매칭/선택하여 단기, 중기, 장기 칸을 채우십시오.\n"
+                    f"4. 편향을 제거하기 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리 작성하여 자가 검열하십시오.\n"
+                    f"5. 파이썬이 연산한 '단기/중기/장기 손절가' 데이터를 그대로 신뢰하여 대응 전략을 제시하십시오.\n\n"
                     f"=== 리포트 작성 항목 ===\n"
                     f"<ANALYSIS_티커숫자>\n"
                     f"### [종목명] (티커)\n"
                     f"**🎯 핵심 투자 아이디어 (Why Buy?)**\n"
-                    f"- (가장 강력하고 결정적인 이유 1~2줄)\n"
+                    f"- (가장 강력하고 결정적인 이유 1~2줄 명시)\n"
                     f"**🟢 강세 논리 (Bull Case)**\n"
                     f"**🔴 약세/위험 논리 (Bear Case)**\n"
-                    f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                    f"- 목표가 설정 근거: 단기/중기/장기 목표가를 각각 얼마로 책정했는지 명시하고 차트/퀀트 근거를 상세히 설명할 것.\n"
+                    f"**⚖️ 최종 판단 및 목표가 선택 논리**\n"
+                    f"- 파이썬이 제공한 3가지 시나리오 목표가 중 어떤 가격을 각각 최종 단기/중기/장기 목표가로 '선택'했는지 그 수치적 매칭 관계를 적고, 차트 저항선 돌파 여부와 연계하여 구체적으로 설명하십시오.\n"
                     f"</ANALYSIS_티커숫자>\n\n"
                     f"※ 마지막 줄은 아래 파싱 형식으로 출력 (손절가 필수)\n"
                     f"[TRACKING_DATA]\n"
@@ -687,7 +714,7 @@ with tab4:
                                 conn.commit(); st.success(f"✅ 리포트 스크랩 완료!")
 
 # =======================================================
-# 탭 5: 관심종목 진단 (💡 목표가 UI 복구 및 프롬프트 명확화)
+# 탭 5: 관심종목 진단 (💡 피드백 적용: 3대 목표가 시나리오 밴드 완벽 연동 및 화면 출력 복구)
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
@@ -744,7 +771,7 @@ with tab5:
                 if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
             with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
-                    with st.spinner("파이썬 연산 및 핵심 아이디어 도출 중..."):
+                    with st.spinner("파이썬 타임프레임 손절가 및 3대 목표가 밴드 연산 중..."):
                         tech = get_technical_data(code)
                         fund = get_advanced_fundamental_data(code)
                         news_raw = fetch_stock_news(name, display=5)
@@ -755,32 +782,64 @@ with tab5:
                         current_price = tech['current'] if tech else current
                         daily_vol = tech['daily_volatility'] if tech else 0.0
                         eps_val = fund.get('eps', 0.0)
+                        bps_val = fund.get('bps', 0.0)
+                        roe_history = fund.get('roe_history', [])
                         
+                        try: float_per = float(fund['per'].replace(',', '')) if fund['per'] != '-' else 0.0
+                        except: float_per = 0.0
+                        try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
+                        except: float_ind_per = 0.0
+                        
+                        # 손절가 계산 동기화
                         calc_sl_s = current_price * (1 - k_factor * daily_vol * np.sqrt(20)) if daily_vol > 0 else 0.0
                         calc_sl_m = current_price * (1 - k_factor * daily_vol * np.sqrt(60)) if daily_vol > 0 else 0.0
                         calc_sl_l = current_price * (1 - k_factor * daily_vol * np.sqrt(250)) if daily_vol > 0 else 0.0
 
-                        calc_result_log = f"▶ 리스크 분석 팩트: 일간 변동성 {daily_vol*100:.2f}% 기준 (k={k_factor:.1f})\n   - 단기 손절가: {calc_sl_s:,.0f}원 | 중기 손절가: {calc_sl_m:,.0f}원 | 장기 손절가: {calc_sl_l:,.0f}원\n"
-                        if eps_val <= 0: calc_result_log += f"▶ 펀더멘털 팩트: 적자 지속. 정량적 가치평가 배제.\n"
+                        # 💡 관심종목 진단에도 목표가 3대 시나리오 수학적 선행 계산 완벽 이식
+                        if eps_val <= 0:
+                            fund_target_log = (
+                                f"   - [보수적 시나리오] BPS 자산가치 기준: {bps_val:,.0f}원\n" if bps_val > 0 else f"   - [보수적 시나리오] BPS 자산가치 기준: {current_price * 0.8:,.0f}원\n"
+                                "   - [중립적 시나리오] 적자 기업으로 이익 기반 퀀트 밴드 산출 불가 (기술적 저항선 대체 요망)\n"
+                                "   - [공격적 시나리오] 적자 기업으로 이익 기반 퀀트 밴드 산출 불가 (기술적 저항선 대체 요망)\n"
+                            )
+                        else:
+                            conservative_tp = bps_val if bps_val > 0 else current_price * 0.9
+                            base_tp = eps_val * float_ind_per if float_ind_per > 0 else eps_val * 10
+                            required_return = 0.08
+                            expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
+                            rim_tp = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
+                            aggressive_tp = max(base_tp, rim_tp)
+                            
+                            fund_target_log = (
+                                f"   - [보수적 시나리오] BPS 자산가치 기준: {conservative_tp:,.0f}원\n"
+                                f"   - [중립적 시나리오] 업종평균 PER 기준: {base_tp:,.0f}원\n"
+                                f"   - [공격적 시나리오] RIM 초과이익 기준: {aggressive_tp:,.0f}원\n"
+                            )
+
+                        calc_result_log = (
+                            f"▶ 리스크 분석 팩트: 일간 변동성 {daily_vol*100:.2f}% 기준 (k={k_factor:.1f})\n"
+                            f"   - 단기 손절가: {calc_sl_s:,.0f}원 | 중기 손절가: {calc_sl_m:,.0f}원 | 장기 손절가: {calc_sl_l:,.0f}원\n"
+                            f"▶ 파이썬 선행연산 목표가 밴드:\n{fund_target_log}"
+                        )
 
                         data_str = f"현재가: {current_price:,.0f}\n"
                         if is_owned and avg_price > 0: data_str += f"[내 계좌 정보] 평단가: {avg_price:,.0f} | 현재 수익률: {((current_price - avg_price) / avg_price * 100):+.1f}%\n"
                         if tech: data_str += f"[차트] MACD: {tech['macd']:,.2f}\n"
                         data_str += f"{calc_result_log}\n[요약]\n{lite_summary}"
                         
-                        # 💡 목표가 설정 이유 상세 작성 프롬프트 개선
                         prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_str}\n\n"
                                   f"당신은 리스크 관리에 철저한 애널리스트입니다.\n"
                                   f"1. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 이 종목을 지금 매수/보유/매도해야 하는가?'**에 대한 핵심 논리를 최상단에 선언하십시오.\n"
-                                  f"2. 낙관적 편향 제거를 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리하여 자가 검열하십시오.\n"
-                                  f"3. 내 계좌 정보가 있다면 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
+                                  f"2. **절대 가격이나 수식을 직접 계산하여 사칙연산 오류를 내지 마십시오.** 파이썬이 선행 연산하여 제공한 3가지 목표가 시나리오 밴드 가격 중 현재 차트 지지/저항선과 결합하여 가장 실현 타당한 가치 가격을 '선택'하십시오.\n"
+                                  f"3. 낙관적 편향 제거를 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리하여 자가 검열하십시오.\n"
+                                  f"4. 내 계좌 정보가 있다면 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
                                   f"=== 작성 항목 ===\n"
                                   f"**🎯 핵심 아이디어 (Why Buy/Hold/Sell?)**\n"
-                                  f"- (가장 강력하고 결정적인 이유 1~2줄)\n"
+                                  f"- (현재 시점에서 이 종목을 매수/보유/매도해야 하는 가장 강력하고 결정적인 한 가지 이유)\n"
                                   f"**🟢 강세 논리 (Bull Case)**\n"
                                   f"**🔴 약세/위험 논리 (Bear Case)**\n"
                                   f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                                  f"- 목표가 산출 논리: 단기/중기/장기 목표가를 명확히 얼마로 설정했는지 적고, 왜 그 가격을 도출했는지 구체적인 근거를 서술할 것.\n"
+                                  f"- 목표가 설정 근거: 파이썬이 제시한 3가지 시나리오 목표가 중 어떤 가격을 각각 최종 단기/중기/장기 목표가로 '선택'했는지 수치적 연계성을 명시하고, 왜 그 시나리오가 모멘텀상 방어 가능한지 상세히 서술하십시오.\n"
                                   f"※ 마지막 줄은 아래 파싱 형식으로 출력\n"
                                   f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가|단기손절가|중기손절가|장기손절가")
                         report = call_gemini_with_fallback(prompt)
@@ -803,15 +862,15 @@ with tab5:
                     conn.commit(); st.rerun()
 
             if report_text:
-                # 💡 목표가 UI가 화면에 제대로 출력되도록 복구
+                # 💡 UI 렌더링 수정: AI가 선택 완료한 구체적 수치 지표가 화면 하단에 무조건 나타나도록 명시적 복구
                 with st.expander("진단 리포트", expanded=True):
                     st.write(re.sub(r'TARGET_PRICE:.*', '', report_text).strip())
                     st.divider()
                     col_tgt, col_sl = st.columns(2)
                     with col_tgt:
-                        st.markdown(f"**🎯 AI 설정 목표가 밴드**\n* 단기: {tp_s:,.0f}원\n* 중기: {tp_m:,.0f}원\n* 장기: {tp_l:,.0f}원")
+                        st.markdown(f"**🎯 AI 최종 채택 목표가 밴드**\n* **단기 목표가:** {tp_s:,.0f}원\n* **중기 목표가:** {tp_m:,.0f}원\n* **장기 목표가:** {tp_l:,.0f}원")
                     with col_sl:
-                        st.markdown(f"**🔴 파이썬 연산 손절 라인**\n* 단기: {sl_s:,.0f}원\n* 중기: {sl_m:,.0f}원\n* 장기: {sl_l:,.0f}원")
+                        st.markdown(f"**🔴 파이썬 연산 리스크 규격 (k={k_factor:.1f})**\n* **단기 손절선:** {sl_s:,.0f}원\n* **중기 손절선:** {sl_m:,.0f}원\n* **장기 손절선:** {sl_l:,.0f}원")
                     
                     if st.button("스크랩북에 저장하여 가격 추적하기", key=f"scrap_t5_{p_id}", use_container_width=True):
                         c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -905,9 +964,9 @@ with tab6:
                         st.progress(min(int(pct_s), 100), text=f"단기 목표가 대비 진행률: **{pct_s:.1f}%**")
                         
                         if min_low > 0 and min_low <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 현재 반등했더라도 시스템 룰에 따른 리뷰가 필요합니다.")
+                            st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 리스크 관리 상태를 점검하십시오.")
                         elif current_p <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 손절을 고려하십시오.")
+                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 규칙 청산을 고려하십시오.")
                     
                     clean_analysis = re.sub(r'TARGET_PRICE:.*', '', analysis.split("[TRACKING_DATA]")[0].strip()).strip()
                     st.markdown("---")
