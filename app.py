@@ -855,13 +855,12 @@ with tab4:
                                 st.success(f"✅ '{name}' 종목의 리포트가 내 스크랩북에 저장되었습니다!")
 
 # =======================================================
-# 탭 5: 관심종목 진단 (입력폼 완벽 초기화 적용)
+# 탭 5: 관심종목 진단 (개별 삭제 및 선택 삭제 기능 추가)
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
     own_status = st.radio("상태", ["미보유", "보유"], horizontal=True, key="add_own_status")
     
-    # 💡 세션 상태를 활용한 완벽한 폼 초기화 로직 구현
     if "input_stock_name" not in st.session_state: st.session_state["input_stock_name"] = ""
     if "input_avg_price" not in st.session_state: st.session_state["input_avg_price"] = "0"
     if "input_quantity" not in st.session_state: st.session_state["input_quantity"] = 0
@@ -877,138 +876,156 @@ with tab5:
             is_owned_flag = 1 if own_status == "보유" else 0
             final_avg_p = float(str(avg_p).replace(',', '')) if is_owned_flag else 0.0
             
-            # DB에 정상 저장
             c.execute("INSERT INTO portfolio (stock_name, ticker, is_owned, avg_price, quantity, user_id) VALUES (?,?,?,?,?,?)", 
                       (new_s.strip(), code or '', is_owned_flag, final_avg_p, qty if is_owned_flag else 0, current_user))
             conn.commit()
             
-            # 💡 성공 시 세션 상태에 저장된 입력값들을 강제로 비움
             st.session_state["input_stock_name"] = ""
             st.session_state["input_avg_price"] = "0"
             st.session_state["input_quantity"] = 0
             
-            st.success(f"✅ '{new_s.strip()}' 종목이 관심종목에 등록되었습니다.")
+            st.success(f"'{new_s.strip()}' 종목이 관심종목에 등록되었습니다.")
             st.rerun()
 
     c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time, ticker FROM portfolio WHERE user_id = ?", (current_user,))
     portfolios = c.fetchall()
-    price_map_watch = fetch_current_prices([p[12] for p in portfolios if p[12]])
-
-    for p in portfolios:
-        p_id, name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time, ticker = p
-        code = re.sub(r'[^\d]', '', ticker or "")
-        price_info = price_map_watch.get(code, {})
-        current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
-
-        st.markdown(f"### {name} `{code}`")
-        col_info, col_price, col_btn = st.columns([2, 2, 1])
-        with col_info:
-            if is_owned:
-                st.caption(f"보유 | 평단: {avg_price:,.0f} | 수량: {quantity}")
-                if current > 0 and avg_price > 0: st.caption(f"수익률: {((current - avg_price) / avg_price * 100):+.1f}%")
-        with col_price:
-            if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
-        with col_btn:
-            if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
-                with st.spinner("파이썬 동적 퀀트 수식 선행 계산 및 AI 종합 진단 중..."):
-                    tech = get_technical_data(code)
-                    fund = get_advanced_fundamental_data(code)
-                    news_raw = fetch_stock_news(name, display=5)
-                    dart_raw = get_dart_filings(code)
-                    
-                    news_str = "\n".join([n['title'] for n in news_raw])
-                    summary_prompt = f"다음 {name}의 뉴스와 공시 데이터를 누락 없이 상세하게 사실 위주로 통합 요약하라:\n[뉴스]\n{news_str}\n[공시]\n{dart_raw}"
-                    lite_summary = call_gemini_lite_summary(summary_prompt)
-
-                    try: float_per = float(fund['per'].replace(',', '')) if fund['per'] != '-' else 0.0
-                    except: float_per = 0.0
-                    
-                    try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
-                    except: float_ind_per = 0.0
-                    
-                    current_price = tech['current'] if tech else current
-                    eps_val = fund.get('eps', 0.0)
-                    bps_val = fund.get('bps', 0.0)
-                    eps_history = fund.get('eps_history', [])
-                    roe_history = fund.get('roe_history', [])
-                    
-                    if len(eps_history) >= 2 and eps_history[-2] > 0:
-                        eps_growth_rate = ((eps_history[-1] - eps_history[-2]) / eps_history[-2]) * 100
-                        eps_growth_rate = max(5.0, min(eps_growth_rate, 50.0))
-                    else:
-                        eps_growth_rate = 10.0
-                        
-                    peg_val = float_per / eps_growth_rate if eps_growth_rate > 0 and float_per > 0 else 0.0
-                    target_valuation_price = eps_val * float_ind_per if eps_val > 0 and float_ind_per > 0 else current_price * 1.15
-                    
-                    if len(roe_history) == 3:
-                        expected_roe = ((roe_history[2] * 3) + (roe_history[1] * 2) + (roe_history[0] * 1)) / 6 / 100
-                    elif len(roe_history) > 0:
-                        expected_roe = roe_history[-1] / 100
-                    else:
-                        expected_roe = 0.10
-                    expected_roe = max(0.05, min(expected_roe, 0.30))
-                    required_return = 0.08
-                    
-                    if bps_val > 0:
-                        residual_income = bps_val * (expected_roe - required_return)
-                        rim_intrinsic_value = bps_val + (residual_income / required_return)
-                    else:
-                        rim_intrinsic_value = current_price * 1.3
-                        
-                    calc_result_log = (
-                        f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 실적 동적 이익성장률 {eps_growth_rate:.1f}%)\n"
-                        f"▶ 파이썬 연산 팩트 [중기 상대가치 적정가]: {target_valuation_price:,.0f}원 (계산식: EPS {eps_val:,}원 × 업종평균 PER {float_ind_per}배)\n"
-                        f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: {rim_intrinsic_value:,.0f}원 (계산식: 주당자산 BPS {bps_val:,}원, 3개년 가중평균 ROE {expected_roe*100:.1f}%, 요구수익률 8% 대입)\n"
-                    )
-
-                    data_str = f"현재가: {current_price:,.0f}\n"
-                    
-                    if is_owned and avg_price > 0:
-                        current_yield = ((current_price - avg_price) / avg_price) * 100
-                        data_str += f"[내 계좌 보유 정보] 평단가: {avg_price:,.0f}원 | 수량: {quantity}주 | 현재 수익률: {current_yield:+.1f}%\n"
-
-                    if tech: data_str += f"[차트] 52주 고/저: {tech['high_52']}/{tech['low_52']} | MACD: {tech['macd']:,.2f}\n"
-                    if fund: data_str += f"[펀더멘털] PER: {fund['per']} (업종 {fund['industry_per']}) | PBR: {fund['pbr']} | EPS: {eps_val:,}원 | BPS: {bps_val:,}원 | 수급: {fund['supply_demand']}\n"
-                    data_str += f"{calc_result_log}\n"
-                    data_str += f"[정제된 상세 이슈 요약]\n{lite_summary}"
-                    
-                    prompt = (f"[{name} 진단]\n[파이썬 연산 완료 데이터]\n{data_str}\n\n"
-                              f"당신은 퀀트 애널리스트입니다. 파이썬이 선행 연산한 3가지 기간별 팩트 지표(PEG, 상대가치, RIM)를 '기본 밸류에이션 하/상한선'으로 참고하되, 여기에 차트의 기술적 흐름(MACD 등)과 뉴스/공시의 모멘텀 파급력을 '종합적으로 가중 반영'하여 최종 목표가를 산출하십시오.\n"
-                              f"(당신은 절대로 주가나 수식을 직접 사칙연산하지 마십시오. 파이썬 퀀트 수치를 바탕으로 제반 요소를 고려해 정성적 조정을 거친 현실적인 단기/중기/장기 목표가를 도출하십시오.)\n\n"
-                              f"=== 진단 리포트 작성 항목 ===\n"
-                              f"- 매수의견 (Buy/Hold/Sell 명시)\n"
-                              f"  * 주의: 데이터에 [내 계좌 보유 정보]가 있다면, 현재 수익률과 종합 밸류에이션을 고려하여 '추가매수(Buy)', '보유 유지(Hold)', '익절/손절(Sell)' 중 하나를 객관적으로 제시할 것.\n"
-                              f"- 단기/중기/장기 목표가 산출 논리: (파이썬 퀀트 팩트 + 차트 + 뉴스 모멘텀을 어떻게 종합하여 목표가를 최종 조정했는지 상세히 서술)\n"
-                              f"- 차트 기술적 분석 및 수급 동향 해석\n"
-                              f"- 시장 파급 효과 및 주가 변화 의의 분석\n\n"
-                              f"※ 마지막 줄은 아래 파싱 형식으로 작성하십시오. (목표가는 모든 요소를 종합한 최종 조정 숫자로 도출)\n"
-                              f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가")
-                    report = call_gemini_with_fallback(prompt)
-                
-                tp_match = re.search(r'TARGET_PRICE:\s*([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|(.*)', report)
-                n_tp_s = parse_won(tp_match.group(1)) if tp_match else 0.0
-                n_tp_m = parse_won(tp_match.group(2)) if tp_match else 0.0
-                n_tp_l = parse_won(tp_match.group(3)) if tp_match else 0.0
-                n_bp = parse_won(tp_match.group(4)) if tp_match else 0.0
-                c.execute("UPDATE portfolio SET report_text=?, tp_s=?, tp_m=?, tp_l=?, bp=?, model_used=?, report_time=? WHERE id=?", (report, n_tp_s, n_tp_m, n_tp_l, n_bp, MODEL_NAME, datetime.now().strftime("%Y-%m-%d %H:%M"), p_id))
-                conn.commit(); st.rerun()
-
-        if report_text:
-            with st.expander("진단 리포트", expanded=True):
-                display_report = re.sub(r'TARGET_PRICE:.*', '', report_text).strip()
-                st.write(display_report)
-                st.caption(f"🧠 전처리 요약: {LITE_MODEL_NAME} | 심층 의의 종합 분석: {MODEL_NAME}")
-                
-                if st.button("스크랩북에 저장하여 가격 추적하기", key=f"scrap_t5_{p_id}", use_container_width=True):
-                    c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                              (f"{name} 관심종목 진단", report_text, name, ticker, current, tp_s, tp_m, tp_l, bp, datetime.now().strftime("%Y-%m-%d %H:%M"), model_used, current_user))
-                    conn.commit()
-                    st.success(f"✅ '{name}' 종목의 진단 리포트가 스크랩북에 저장되었습니다! (가격 추적 가능)")
+    
+    if portfolios:
         st.divider()
+        col_bulk, _ = st.columns([2, 8])
+        with col_bulk:
+            if st.button("🗑️ 선택 항목 삭제", key="bulk_del_t5", use_container_width=True):
+                to_del = [p[0] for p in portfolios if st.session_state.get(f"chk_t5_{p[0]}", False)]
+                if to_del:
+                    c.execute(f"DELETE FROM portfolio WHERE id IN ({','.join(['?']*len(to_del))})", to_del)
+                    conn.commit()
+                    st.rerun()
+
+        price_map_watch = fetch_current_prices([p[12] for p in portfolios if p[12]])
+
+        for p in portfolios:
+            p_id, name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, model_used, report_time, ticker = p
+            code = re.sub(r'[^\d]', '', ticker or "")
+            price_info = price_map_watch.get(code, {})
+            current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
+
+            st.markdown(f"### {name} `{code}`")
+            col_sel, col_info, col_price, col_btn, col_del = st.columns([0.5, 3.5, 3, 1.5, 1.5])
+            
+            with col_sel:
+                st.checkbox("선택", key=f"chk_t5_{p_id}", label_visibility="collapsed")
+            with col_info:
+                if is_owned:
+                    st.caption(f"보유 | 평단: {avg_price:,.0f} | 수량: {quantity}")
+                    if current > 0 and avg_price > 0: st.caption(f"수익률: {((current - avg_price) / avg_price * 100):+.1f}%")
+            with col_price:
+                if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
+            with col_btn:
+                if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
+                    with st.spinner("파이썬 동적 퀀트 수식 선행 계산 및 AI 종합 진단 중..."):
+                        tech = get_technical_data(code)
+                        fund = get_advanced_fundamental_data(code)
+                        news_raw = fetch_stock_news(name, display=5)
+                        dart_raw = get_dart_filings(code)
+                        
+                        news_str = "\n".join([n['title'] for n in news_raw])
+                        summary_prompt = f"다음 {name}의 뉴스와 공시 데이터를 누락 없이 상세하게 사실 위주로 통합 요약하라:\n[뉴스]\n{news_str}\n[공시]\n{dart_raw}"
+                        lite_summary = call_gemini_lite_summary(summary_prompt)
+
+                        try: float_per = float(fund['per'].replace(',', '')) if fund['per'] != '-' else 0.0
+                        except: float_per = 0.0
+                        
+                        try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
+                        except: float_ind_per = 0.0
+                        
+                        current_price = tech['current'] if tech else current
+                        eps_val = fund.get('eps', 0.0)
+                        bps_val = fund.get('bps', 0.0)
+                        eps_history = fund.get('eps_history', [])
+                        roe_history = fund.get('roe_history', [])
+                        
+                        if len(eps_history) >= 2 and eps_history[-2] > 0:
+                            eps_growth_rate = ((eps_history[-1] - eps_history[-2]) / eps_history[-2]) * 100
+                            eps_growth_rate = max(5.0, min(eps_growth_rate, 50.0))
+                        else:
+                            eps_growth_rate = 10.0
+                            
+                        peg_val = float_per / eps_growth_rate if eps_growth_rate > 0 and float_per > 0 else 0.0
+                        target_valuation_price = eps_val * float_ind_per if eps_val > 0 and float_ind_per > 0 else current_price * 1.15
+                        
+                        if len(roe_history) == 3:
+                            expected_roe = ((roe_history[2] * 3) + (roe_history[1] * 2) + (roe_history[0] * 1)) / 6 / 100
+                        elif len(roe_history) > 0:
+                            expected_roe = roe_history[-1] / 100
+                        else:
+                            expected_roe = 0.10
+                        expected_roe = max(0.05, min(expected_roe, 0.30))
+                        required_return = 0.08
+                        
+                        if bps_val > 0:
+                            residual_income = bps_val * (expected_roe - required_return)
+                            rim_intrinsic_value = bps_val + (residual_income / required_return)
+                        else:
+                            rim_intrinsic_value = current_price * 1.3
+                            
+                        calc_result_log = (
+                            f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 실적 동적 이익성장률 {eps_growth_rate:.1f}%)\n"
+                            f"▶ 파이썬 연산 팩트 [중기 상대가치 적정가]: {target_valuation_price:,.0f}원 (계산식: EPS {eps_val:,}원 × 업종평균 PER {float_ind_per}배)\n"
+                            f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: {rim_intrinsic_value:,.0f}원 (계산식: 주당자산 BPS {bps_val:,}원, 3개년 가중평균 ROE {expected_roe*100:.1f}%, 요구수익률 8% 대입)\n"
+                        )
+
+                        data_str = f"현재가: {current_price:,.0f}\n"
+                        
+                        if is_owned and avg_price > 0:
+                            current_yield = ((current_price - avg_price) / avg_price) * 100
+                            data_str += f"[내 계좌 보유 정보] 평단가: {avg_price:,.0f}원 | 수량: {quantity}주 | 현재 수익률: {current_yield:+.1f}%\n"
+
+                        if tech: data_str += f"[차트] 52주 고/저: {tech['high_52']}/{tech['low_52']} | MACD: {tech['macd']:,.2f}\n"
+                        if fund: data_str += f"[펀더멘털] PER: {fund['per']} (업종 {fund['industry_per']}) | PBR: {fund['pbr']} | EPS: {eps_val:,}원 | BPS: {bps_val:,}원 | 수급: {fund['supply_demand']}\n"
+                        data_str += f"{calc_result_log}\n"
+                        data_str += f"[정제된 상세 이슈 요약]\n{lite_summary}"
+                        
+                        prompt = (f"[{name} 진단]\n[파이썬 연산 완료 데이터]\n{data_str}\n\n"
+                                  f"당신은 퀀트 애널리스트입니다. 파이썬이 선행 연산한 3가지 기간별 팩트 지표(PEG, 상대가치, RIM)를 '기본 밸류에이션 하/상한선'으로 참고하되, 여기에 차트의 기술적 흐름(MACD 등)과 뉴스/공시의 모멘텀 파급력을 '종합적으로 가중 반영'하여 최종 목표가를 산출하십시오.\n"
+                                  f"(당신은 절대로 주가나 수식을 직접 사칙연산하지 마십시오. 파이썬 퀀트 수치를 바탕으로 제반 요소를 고려해 정성적 조정을 거친 현실적인 단기/중기/장기 목표가를 도출하십시오.)\n\n"
+                                  f"=== 진단 리포트 작성 항목 ===\n"
+                                  f"- 매수의견 (Buy/Hold/Sell 명시)\n"
+                                  f"  * 주의: 데이터에 [내 계좌 보유 정보]가 있다면, 현재 수익률과 종합 밸류에이션을 고려하여 '추가매수(Buy)', '보유 유지(Hold)', '익절/손절(Sell)' 중 하나를 객관적으로 제시할 것.\n"
+                                  f"- 단기/중기/장기 목표가 산출 논리: (파이썬 퀀트 팩트 + 차트 + 뉴스 모멘텀을 어떻게 종합하여 목표가를 최종 조정했는지 상세히 서술)\n"
+                                  f"- 차트 기술적 분석 및 수급 동향 해석\n"
+                                  f"- 시장 파급 효과 및 주가 변화 의의 분석\n\n"
+                                  f"※ 마지막 줄은 아래 파싱 형식으로 작성하십시오. (목표가는 모든 요소를 종합한 최종 조정 숫자로 도출)\n"
+                                  f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가")
+                        report = call_gemini_with_fallback(prompt)
+                    
+                    tp_match = re.search(r'TARGET_PRICE:\s*([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|(.*)', report)
+                    n_tp_s = parse_won(tp_match.group(1)) if tp_match else 0.0
+                    n_tp_m = parse_won(tp_match.group(2)) if tp_match else 0.0
+                    n_tp_l = parse_won(tp_match.group(3)) if tp_match else 0.0
+                    n_bp = parse_won(tp_match.group(4)) if tp_match else 0.0
+                    c.execute("UPDATE portfolio SET report_text=?, tp_s=?, tp_m=?, tp_l=?, bp=?, model_used=?, report_time=? WHERE id=?", (report, n_tp_s, n_tp_m, n_tp_l, n_bp, MODEL_NAME, datetime.now().strftime("%Y-%m-%d %H:%M"), p_id))
+                    conn.commit(); st.rerun()
+            with col_del:
+                if st.button("개별 삭제", key=f"del_t5_{p_id}", use_container_width=True):
+                    c.execute("DELETE FROM portfolio WHERE id=?", (p_id,))
+                    conn.commit()
+                    st.rerun()
+
+            if report_text:
+                with st.expander("진단 리포트", expanded=True):
+                    display_report = re.sub(r'TARGET_PRICE:.*', '', report_text).strip()
+                    st.write(display_report)
+                    st.caption(f"🧠 전처리 요약: {LITE_MODEL_NAME} | 심층 의의 종합 분석: {MODEL_NAME}")
+                    
+                    if st.button("스크랩북에 저장하여 가격 추적하기", key=f"scrap_t5_{p_id}", use_container_width=True):
+                        c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                                  (f"{name} 관심종목 진단", report_text, name, ticker, current, tp_s, tp_m, tp_l, bp, datetime.now().strftime("%Y-%m-%d %H:%M"), model_used, current_user))
+                        conn.commit()
+                        st.success(f"'{name}' 종목의 진단 리포트가 스크랩북에 저장되었습니다.")
+            st.divider()
 
 # =======================================================
-# 탭 6: 스크랩북
+# 탭 6: 스크랩북 (선택 삭제 및 개별 삭제 기능 추가)
 # =======================================================
 with tab6:
     st.subheader("저장된 분석 리포트")
@@ -1023,6 +1040,15 @@ with tab6:
     scraps = c.fetchall()
     
     if scraps:
+        col_bulk_scrap, _ = st.columns([2, 8])
+        with col_bulk_scrap:
+            if st.button("🗑️ 선택 항목 삭제", key="bulk_del_t6", use_container_width=True):
+                to_del = [s[0] for s in scraps if st.session_state.get(f"chk_t6_{s[0]}", False)]
+                if to_del:
+                    c.execute(f"DELETE FROM scrapbook WHERE id IN ({','.join(['?']*len(to_del))})", to_del)
+                    conn.commit()
+                    st.rerun()
+                    
         tickers = [row[3] for row in scraps if row[3]]
         price_map_scrap = fetch_current_prices(tickers)
         
@@ -1033,47 +1059,51 @@ with tab6:
             price_info = price_map_scrap.get(code, {})
             current_p = price_info.get("current", 0.0)
             
-            with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
-                st.markdown("#### 💰 가격 지표 비교")
-                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-                
-                m_col1.metric("매수 추천가", f"{bp:,.0f}원" if bp else "정보 없음")
-                m_col2.metric("저장 당시 주가", f"{saved_p:,.0f}원" if saved_p else "정보 없음")
-                
-                if current_p > 0:
-                    diff = current_p - saved_p if saved_p else 0.0
-                    diff_pct = (diff / saved_p * 100) if saved_p else 0.0
-                    m_col3.metric("실시간 현재가", f"{current_p:,.0f}원", delta=f"{diff:+,.0f}원 ({diff_pct:+.2f}%)")
-                else:
-                    m_col3.metric("실시간 현재가", "조회 실패")
+            col_sel_s, col_exp_s = st.columns([0.5, 9.5])
+            with col_sel_s:
+                st.checkbox("선택", key=f"chk_t6_{s_id}", label_visibility="collapsed")
+            with col_exp_s:
+                with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
+                    st.markdown("#### 💰 가격 지표 비교")
+                    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
                     
-                m_col4.markdown(f"**목표가 밴드**<br>단기: {tp_s:,.0f}원<br>중기: {tp_m:,.0f}원<br>장기: {tp_l:,.0f}원", unsafe_allow_html=True)
-                
-                if current_p > 0 and tp_s > 0:
+                    m_col1.metric("매수 추천가", f"{bp:,.0f}원" if bp else "정보 없음")
+                    m_col2.metric("저장 당시 주가", f"{saved_p:,.0f}원" if saved_p else "정보 없음")
+                    
+                    if current_p > 0:
+                        diff = current_p - saved_p if saved_p else 0.0
+                        diff_pct = (diff / saved_p * 100) if saved_p else 0.0
+                        m_col3.metric("실시간 현재가", f"{current_p:,.0f}원", delta=f"{diff:+,.0f}원 ({diff_pct:+.2f}%)")
+                    else:
+                        m_col3.metric("실시간 현재가", "조회 실패")
+                        
+                    m_col4.markdown(f"**목표가 밴드**<br>단기: {tp_s:,.0f}원<br>중기: {tp_m:,.0f}원<br>장기: {tp_l:,.0f}원", unsafe_allow_html=True)
+                    
+                    if current_p > 0 and tp_s > 0:
+                        st.markdown("---")
+                        st.markdown("#### 🎯 목표가 대비 현재가 현황")
+                        
+                        pct_s = (current_p / tp_s) * 100
+                        pct_m = (current_p / tp_m) * 100 if tp_m else 0.0
+                        pct_l = (current_p / tp_l) * 100 if tp_l else 0.0
+                        
+                        p_col1, p_col2, p_col3 = st.columns(3)
+                        p_col1.progress(min(int(pct_s), 100), text=f"단기 목표가 대비: **{pct_s:.1f}%**")
+                        if tp_m: p_col2.progress(min(int(pct_m), 100), text=f"중기 목표가 대비: **{pct_m:.1f}%**")
+                        if tp_l: p_col3.progress(min(int(pct_l), 100), text=f"장기 목표가 대비: **{pct_l:.1f}%**")
+                    
                     st.markdown("---")
-                    st.markdown("#### 🎯 목표가 대비 현재가 현황")
+                    st.markdown("#### 📝 상세 분석 리포트")
                     
-                    pct_s = (current_p / tp_s) * 100
-                    pct_m = (current_p / tp_m) * 100 if tp_m else 0.0
-                    pct_l = (current_p / tp_l) * 100 if tp_l else 0.0
+                    clean_analysis = analysis.split("[TRACKING_DATA]")[0].strip()
+                    clean_analysis = re.sub(r'TARGET_PRICE:.*', '', clean_analysis).strip()
                     
-                    p_col1, p_col2, p_col3 = st.columns(3)
-                    p_col1.progress(min(int(pct_s), 100), text=f"단기 목표가 대비: **{pct_s:.1f}%**")
-                    if tp_m: p_col2.progress(min(int(pct_m), 100), text=f"중기 목표가 대비: **{pct_m:.1f}%**")
-                    if tp_l: p_col3.progress(min(int(pct_l), 100), text=f"장기 목표가 대비: **{pct_l:.1f}%**")
-                
-                st.markdown("---")
-                st.markdown("#### 📝 상세 분석 리포트")
-                
-                clean_analysis = analysis.split("[TRACKING_DATA]")[0].strip()
-                clean_analysis = re.sub(r'TARGET_PRICE:.*', '', clean_analysis).strip()
-                
-                st.write(clean_analysis)
-                st.caption(f"🧠 생산 모델: {m_used}")
-                
-                if st.button("삭제", key=f"del_{s_id}", use_container_width=True):
-                    c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,))
-                    conn.commit()
-                    st.rerun()
+                    st.write(clean_analysis)
+                    st.caption(f"🧠 생산 모델: {m_used}")
+                    
+                    if st.button("개별 삭제", key=f"del_t6_{s_id}", use_container_width=True):
+                        c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,))
+                        conn.commit()
+                        st.rerun()
     else:
         st.info("저장된 분석 리포트가 없습니다.")
