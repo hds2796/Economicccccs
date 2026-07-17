@@ -125,7 +125,7 @@ def get_technical_data(code):
     except Exception:
         return None
 
-# 🛠️ 수정한 네이버 금융 PC 기반 펀더멘털 수집기
+# 🛠️ 수정한 네이버 금융 PC 기반 펀더멘털 수집기 (기업실적분석 표 직접 파싱)
 @st.cache_data(ttl=600)
 def get_fundamental_data(code):
     try:
@@ -134,26 +134,46 @@ def get_fundamental_data(code):
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, "html.parser")
         
-        def parse_text_by_id(element_id):
-            element = soup.find(id=element_id)
-            if element:
-                txt = re.sub(r'[^\d.-]', '', element.get_text())
-                try: return float(txt) if '.' in txt else int(txt)
-                except: return 0
-            return 0
-
-        per = parse_text_by_id("_per")
-        pbr = parse_text_by_id("_pbr")
-        eps = parse_text_by_id("_eps")
-        bps = parse_text_by_id("_bps")
+        fund_data = {"per": "-", "pbr": "-", "eps": 0, "bps": 0}
         
-        # 크롤링 실패 대비 보완 (0으로 긁혔을 경우 기본값 매칭)
-        if per == 0:
-            per_elem = soup.find("em", id="_per")
-            if per_elem: per = float(re.sub(r'[^\d.]', '', per_elem.get_text()) or 0)
-
-        return {"per": per if per else "-", "pbr": pbr if pbr else "-", "eps": eps if eps else 0, "bps": bps if bps else 0}
-    except:
+        # 1. 기업실적분석(cop_details) 테이블에서 최신 값 파싱 (가장 정확한 방법)
+        cop_table = soup.find("div", class_="cop_details")
+        if cop_table:
+            trs = cop_table.find_all("tr")
+            for tr in trs:
+                th = tr.find("th")
+                if th:
+                    th_text = th.get_text().strip()
+                    key = None
+                    if "PER" in th_text: key = "per"
+                    elif "PBR" in th_text: key = "pbr"
+                    elif "EPS" in th_text: key = "eps"
+                    elif "BPS" in th_text: key = "bps"
+                    
+                    if key:
+                        tds = tr.find_all("td")
+                        # 최신 연도/분기가 표의 우측에 있으므로 역순으로 탐색
+                        for td in reversed(tds):
+                            txt = td.get_text().strip().replace(",", "")
+                            # 빈칸이나 '-' 가 아닌 유효한 숫자 찾기
+                            if txt and txt != "-" and re.search(r'\d', txt):
+                                val = float(re.search(r'[\d.]+', txt).group())
+                                fund_data[key] = val
+                                break
+                                
+        # 2. cop_table에서 못 찾았을 경우 우측 상단 투자정보 요약 박스에서 2차 시도 (대비책)
+        if fund_data["per"] == "-":
+            per_elem = soup.find(id="_per")
+            if per_elem: fund_data["per"] = float(re.search(r'[\d.]+', per_elem.get_text()).group())
+        if fund_data["pbr"] == "-":
+            pbr_elem = soup.find(id="_pbr")
+            if pbr_elem: fund_data["pbr"] = float(re.search(r'[\d.]+', pbr_elem.get_text()).group())
+        if fund_data["eps"] == 0:
+            eps_elem = soup.find(id="_eps")
+            if eps_elem: fund_data["eps"] = float(re.search(r'[\d.]+', eps_elem.get_text().replace(',', '')).group())
+            
+        return fund_data
+    except Exception:
         return {"per": "-", "pbr": "-", "eps": 0, "bps": 0}
 
 @st.cache_data(ttl=600)
@@ -257,6 +277,8 @@ def dedupe_news(news_list):
         if not key or key in seen: continue
         seen.add(key); out.append(n)
     return out
+
+st.title("Project2_Stock")
 
 if "seen_realtime_links" not in st.session_state:
     st.session_state.seen_realtime_links = set()
