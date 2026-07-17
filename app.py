@@ -125,18 +125,36 @@ def get_technical_data(code):
     except Exception:
         return None
 
+# 🛠️ 수정한 네이버 금융 PC 기반 펀더멘털 수집기
 @st.cache_data(ttl=600)
 def get_fundamental_data(code):
     try:
-        res = requests.get(f"https://m.stock.naver.com/api/stock/{code}/basic", timeout=5).json()
-        return {
-            "per": res.get("per", 0.0),
-            "pbr": res.get("pbr", 0.0),
-            "eps": res.get("eps", 0),
-            "bps": res.get("bps", 0)
-        }
+        url = f"https://finance.naver.com/item/main.naver?code={code}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
+        res = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        def parse_text_by_id(element_id):
+            element = soup.find(id=element_id)
+            if element:
+                txt = re.sub(r'[^\d.-]', '', element.get_text())
+                try: return float(txt) if '.' in txt else int(txt)
+                except: return 0
+            return 0
+
+        per = parse_text_by_id("_per")
+        pbr = parse_text_by_id("_pbr")
+        eps = parse_text_by_id("_eps")
+        bps = parse_text_by_id("_bps")
+        
+        # 크롤링 실패 대비 보완 (0으로 긁혔을 경우 기본값 매칭)
+        if per == 0:
+            per_elem = soup.find("em", id="_per")
+            if per_elem: per = float(re.sub(r'[^\d.]', '', per_elem.get_text()) or 0)
+
+        return {"per": per if per else "-", "pbr": pbr if pbr else "-", "eps": eps if eps else 0, "bps": bps if bps else 0}
     except:
-        return None
+        return {"per": "-", "pbr": "-", "eps": 0, "bps": 0}
 
 @st.cache_data(ttl=600)
 def fetch_stock_news(query, display=5):
@@ -239,8 +257,6 @@ def dedupe_news(news_list):
         if not key or key in seen: continue
         seen.add(key); out.append(n)
     return out
-
-st.title("Project2_Stock")
 
 if "seen_realtime_links" not in st.session_state:
     st.session_state.seen_realtime_links = set()
@@ -584,7 +600,7 @@ with tab5:
                 c2.metric("52주 최고/최저", f"{tech['high_52']:,.0f} / {tech['low_52']:,.0f}")
             if fund:
                 c3.metric("PER / PBR", f"{fund['per']} / {fund['pbr']}")
-                c4.metric("EPS / BPS", f"{fund['eps']:,.0f} / {fund['bps']:,.0f}")
+                c4.metric("EPS / BPS", f"{fund['eps'] if isinstance(fund['eps'], str) else f'{fund['eps']:,.0f}'} / {fund['bps'] if isinstance(fund['bps'], str) else f'{fund['bps']:,.0f}'}")
 
             st.markdown("---")
             news_list = fetch_stock_news(name, display=5)
