@@ -261,6 +261,7 @@ def get_dart_filings(stock_code):
     except: return "DART 조회 실패"
 
 @st.cache_data(ttl=600)
+@st.cache_data(ttl=600)
 def get_advanced_fundamental_data(code):
     data = {"per": "-", "pbr": "-", "eps": 0, "bps": 0, "industry_per": "-", "quarter_trend": "정보 없음", "supply_demand": "정보 없음", "eps_history": [], "roe_history": []}
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -269,16 +270,36 @@ def get_advanced_fundamental_data(code):
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, "html.parser")
         
+        # 1. 상단 투자정보 확정 고유 ID 요소 우선 파싱 (결측치 방어선)
         per_elem = soup.find(id="_per")
-        if per_elem: data["per"] = per_elem.get_text()
+        if per_elem: data["per"] = per_elem.get_text().strip()
+            
         pbr_elem = soup.find(id="_pbr")
-        if pbr_elem: data["pbr"] = pbr_elem.get_text()
+        if pbr_elem: data["pbr"] = pbr_elem.get_text().strip()
+            
+        eps_elem = soup.find(id="_eps")
+        if eps_elem:
+            try:
+                val = eps_elem.get_text().strip().replace(',', '')
+                if val and val.replace('.', '', 1).replace('-', '', 1).isdigit():
+                    data["eps"] = float(val)
+            except: pass
+
+        bps_elem = soup.find(id="_bps")
+        if bps_elem:
+            try:
+                val = bps_elem.get_text().strip().replace(',', '')
+                if val and val.replace('.', '', 1).replace('-', '', 1).isdigit():
+                    data["bps"] = float(val)
+            except: pass
         
+        # 업종 PER 수집
         for th in soup.find_all("th"):
             if "동일업종 PER" in th.get_text():
                 td = th.find_next("td")
                 if td: data["industry_per"] = td.get_text().strip().replace('배', '')
         
+        # 2. 하단 상세 테이블 파싱 (추이 분석용 백업)
         cop_table = soup.find("div", class_="cop_details")
         if cop_table:
             data["quarter_trend"] = "최근 실적 수집 완료"
@@ -287,15 +308,21 @@ def get_advanced_fundamental_data(code):
                     text = th_item.get_text().strip()
                     if "EPS(원)" in text:
                         valid_eps = [float(v) for td in th_item.find_next_siblings("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
-                        if valid_eps: data["eps"], data["eps_history"] = valid_eps[-1], valid_eps[-3:]
+                        if valid_eps:
+                            # 상단 메인 요소가 누락되었을 때만 하단 테이블 데이터로 보완
+                            if data["eps"] == 0:
+                                data["eps"] = valid_eps[-1]
+                            data["eps_history"] = valid_eps[-3:]
                     if "BPS(원)" in text:
                         valid_bps = [float(v) for td in th_item.find_next_siblings("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
-                        if valid_bps: data["bps"] = valid_bps[-1]
+                        if valid_bps and data["bps"] == 0: 
+                            data["bps"] = valid_bps[-1]
                     if "ROE" in text:
                         valid_roe = [float(v) for td in th_item.find_next_siblings("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
                         if valid_roe: data["roe_history"] = valid_roe[-3:]
             except: pass
             
+        # 수급 데이터 수집
         url_frgn = f"https://finance.naver.com/item/frgn.naver?code={code}"
         res_frgn = requests.get(url_frgn, headers=headers, timeout=5)
         soup_frgn = BeautifulSoup(res_frgn.text, "html.parser")
