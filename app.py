@@ -74,7 +74,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KE
 c.execute('''CREATE TABLE IF NOT EXISTS dart_corp_codes (corp_code TEXT, corp_name TEXT, stock_code TEXT PRIMARY KEY)''')
 conn.commit()
 
-# 테이블 스키마 자동 업데이트
 columns_to_add = [
     ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
     ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("portfolio", "report_text", "TEXT"),
@@ -392,18 +391,46 @@ def fetch_realtime_data_direct(seen_links):
         return res.json()
     except: return None
 
-if "seen_realtime_links" not in st.session_state: st.session_state.seen_realtime_links = set()
-if "realtime_cache" not in st.session_state: st.session_state.realtime_cache = None
+# =======================================================
+# 상태 변수 선언 및 누적 머지 기능 구현
+# =======================================================
+if "seen_realtime_links" not in st.session_state: 
+    st.session_state.seen_realtime_links = set()
+if "realtime_cache" not in st.session_state: 
+    st.session_state.realtime_cache = {"market_status": {}, "realtime_news": [], "sector_news": {}, "updated_at": "대기 중"}
+
+def merge_realtime_data(new_data):
+    if not new_data: return
+    old_data = st.session_state.realtime_cache
+    
+    old_market = old_data.get("market_status", {})
+    old_market.update(new_data.get("market_status", {}))
+    
+    merged_news = dedupe_news(old_data.get("realtime_news", []) + new_data.get("realtime_news", []))
+    
+    old_sector = old_data.get("sector_news", {})
+    new_sector = new_data.get("sector_news", {})
+    for sec, items in new_sector.items():
+        old_sector[sec] = dedupe_news(old_sector.get(sec, []) + items)
+        
+    st.session_state.realtime_cache = {
+        "market_status": old_market,
+        "realtime_news": merged_news,
+        "sector_news": old_sector,
+        "updated_at": new_data.get("updated_at", old_data.get("updated_at", "알 수 없음"))
+    }
 
 cached_data = fetch_cached_global_data() or {}
-if st.session_state.realtime_cache is None:
+
+if not st.session_state.realtime_cache.get("realtime_news"):
     with st.spinner("데이터 로딩 중..."):
         new_data = fetch_realtime_data_direct(st.session_state.seen_realtime_links)
         if new_data:
-            st.session_state.realtime_cache = new_data
-            for n in new_data.get("realtime_news", []): st.session_state.seen_realtime_links.add(n['link'])
+            merge_realtime_data(new_data)
+            for n in new_data.get("realtime_news", []): 
+                st.session_state.seen_realtime_links.add(n['link'])
 
-g_data = st.session_state.realtime_cache or {}
+g_data = st.session_state.realtime_cache
 
 col_title, col_refresh = st.columns([5, 1.2])
 with col_refresh:
@@ -411,14 +438,15 @@ with col_refresh:
         with st.spinner("갱신 중..."):
             new_data = fetch_realtime_data_direct(st.session_state.seen_realtime_links)
             if new_data:
-                st.session_state.realtime_cache = new_data
-                for n in new_data.get("realtime_news", []): st.session_state.seen_realtime_links.add(n['link'])
+                merge_realtime_data(new_data)
+                for n in new_data.get("realtime_news", []): 
+                    st.session_state.seen_realtime_links.add(n['link'])
                 st.rerun()
 
 with col_title:
-    st.caption(f"실시간: {g_data.get('updated_at', '알 수 없음')} | 캐시: {cached_data.get('updated_at', '알 수 없음')}")
+    st.caption(f"실시간(누적): {g_data.get('updated_at', '알 수 없음')} | 캐시: {cached_data.get('updated_at', '알 수 없음')}")
 
-market_data = g_data.get("market_status", {}) if g_data else {}
+market_data = g_data.get("market_status", {})
 target_indices = ["코스피", "코스닥", "S&P 500", "원/달러 환율"]
 cols = st.columns(4)
 for i, key in enumerate(target_indices):
@@ -433,38 +461,36 @@ st.divider()
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경제", "섹터 뉴스", "종목 발굴", "관심종목 진단", "스크랩북"])
 
 # =======================================================
-# 탭 1: 실시간 브리핑 (투 트랙 파이프라인)
-# =======================================================
-# =======================================================
-# 탭 1: 실시간 브리핑 (투 트랙 파이프라인)
+# 탭 1: 실시간 브리핑 (UI 10개 제한 / 분석 전체 데이터 활용)
 # =======================================================
 with tab1:
     st.subheader("실시간 시황 브리핑")
-    
     news_pool = g_data.get("realtime_news", [])
     
-    # 💡 누락되었던 실시간 뉴스 목록 화면 출력 로직 복구
     if news_pool:
-        with st.expander(f"📰 수집된 실시간 뉴스 ({len(news_pool)}건)", expanded=True):
-            for idx, n in enumerate(news_pool[:20]): # 최신 20개 노출
+        with st.expander(f"📰 수집된 실시간 뉴스 (최신 10건 표시 / 총 {len(news_pool)}건 수집됨)", expanded=True):
+            for idx, n in enumerate(news_pool[:10]): 
                 st.markdown(f"{idx+1}. [{n['title']}]({n['link']})")
     else:
         st.info("현재 수집된 실시간 뉴스가 없습니다.")
 
     if st.button("브리핑 생성", key="btn_briefing"):
-        news_str = "\n".join([f"- {n['title']}: {n.get('description', '')}" for n in news_pool[:15]])
-        
-        with st.spinner("Lite 모델이 시황 뉴스를 상세히 압축 중..."):
-            summary_prompt = f"다음 실시간 속보 뉴스를 읽고, 누락 없이 중요한 시장 호악재 요소를 상세히 통합 요약하라. 분량 제한 없이 정보 가치를 보존하라:\n\n{news_str}"
-            lite_summary = call_gemini_lite_summary(summary_prompt)
+        if not news_pool:
+            st.error("분석할 뉴스가 없습니다.")
+        else:
+            news_str = "\n".join([f"- {n['title']}: {n.get('description', '')}" for n in news_pool[:50]])
             
-        with st.spinner("Flash 3.5 모델이 시장 변화 및 의의를 분석 중..."):
-            analysis_prompt = (f"지표 데이터:\n{json.dumps(market_data)}\n\n[Lite 전처리 요약본]\n{lite_summary}\n\n"
-                               f"위 요약 자료와 지표를 근거로, 현재 주식시장의 흐름이 가지는 '구체적 의미'와 '향후 증시에 가져올 변화'를 철저히 객관적인 관점에서 심층 분석하여 서술하라.")
-            st.write_stream(call_gemini_stream_with_fallback(analysis_prompt))
+            with st.spinner("Lite 모델이 시황 뉴스를 상세히 압축 중..."):
+                summary_prompt = f"다음 실시간 속보 뉴스를 읽고, 누락 없이 중요한 시장 호악재 요소를 상세히 통합 요약하라. 분량 제한 없이 정보 가치를 보존하라:\n\n{news_str}"
+                lite_summary = call_gemini_lite_summary(summary_prompt)
+                
+            with st.spinner("Flash 3.5 모델이 시장 변화 및 의의를 분석 중..."):
+                analysis_prompt = (f"지표 데이터:\n{json.dumps(market_data)}\n\n[Lite 전처리 요약본]\n{lite_summary}\n\n"
+                                   f"위 요약 자료와 지표를 근거로, 현재 주식시장의 흐름이 가지는 '구체적 의미'와 '향후 증시에 가져올 변화'를 철저히 객관적인 관점에서 심층 분석하여 서술하라.")
+                st.write_stream(call_gemini_stream_with_fallback(analysis_prompt))
 
 # =======================================================
-# 탭 2: 핵심 경제
+# 탭 2: 핵심 경제 (투 트랙 최적화)
 # =======================================================
 with tab2:
     st.subheader("핵심 경제 뉴스 요약")
@@ -481,16 +507,17 @@ with tab2:
         st.info("조회된 핵심 경제 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 3: 섹터 뉴스
+# 탭 3: 섹터 뉴스 (상시 렌더링 유지)
 # =======================================================
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
-    
-    # 💡 수정: g_data(실시간)에 없으면 cached_data(구글 드라이브 백업본)에서 찾도록 범위 확대
-    sec_news = g_data.get("sector_news") or cached_data.get("sector_news", {})
+    sec_news = g_data.get("sector_news", {})
+    if not sec_news:
+        sec_news = cached_data.get("sector_news", {})
     
     if sec_news:
         for sec, items in sec_news.items():
+            if not items: continue
             with st.expander(f"📁 {sec} 섹터 뉴스 ({len(items)}건)"):
                 for i in items:
                     st.markdown(f"- [{i['title']}]({i.get('link', '#')})")
@@ -503,10 +530,10 @@ with tab3:
                         flash_p = f"[{sec} 섹터 이슈 요약]\n{lite_s}\n\n이 트렌드가 향후 {sec} 섹터 내 주도주 흐름에 가져올 변화와 주식시장에 미칠 파장을 분석하라."
                         st.write(call_gemini_with_fallback(flash_p))
     else:
-        st.info("현재 매칭된 섹터별 뉴스가 없습니다. (실시간 및 캐시 데이터를 모두 확인했습니다)")
+        st.info("현재 매칭된 섹터별 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 4: 종목 발굴 (투 트랙 최적화 & 상세 요약)
+# 탭 4: 종목 발굴 (상세 요약 및 10개 필터링)
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (심층 분석)")
@@ -545,7 +572,6 @@ with tab4:
                     news_raw = fetch_stock_news(name, display=4)
                     news_str = "\n".join([n['title'] for n in news_raw])
                     
-                    # 💡 길이 제한을 두지 않고 상세히 수집 및 통합
                     summary_prompt = f"다음은 {name} 종목의 공시와 관련 뉴스 리스트다. 누락 없이 호악재 및 경영 흐름을 상세히 요약하라:\n[공시]\n{dart_info}\n[뉴스]\n{news_str}"
                     lite_summary = call_gemini_lite_summary(summary_prompt)
                     
@@ -655,7 +681,6 @@ with tab5:
                     dart_raw = get_dart_filings(code)
                     
                     news_str = "\n".join([n['title'] for n in news_raw])
-                    # 💡 제한 없이 상세히 통합 요약 진행
                     summary_prompt = f"다음 {name}의 뉴스와 공시 데이터를 누락 없이 상세하게 사실 위주로 통합 요약하라:\n[뉴스]\n{news_str}\n[공시]\n{dart_raw}"
                     lite_summary = call_gemini_lite_summary(summary_prompt)
 
