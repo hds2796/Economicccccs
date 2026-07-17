@@ -750,17 +750,75 @@ with tab5:
         st.divider()
 
 # =======================================================
-# 탭 6: 스크랩북
+# 탭 6: 스크랩북 (가격 비교 및 목표가 대비 현재가 분석 추가)
 # =======================================================
 with tab6:
     st.subheader("저장된 분석 리포트")
-    c.execute("SELECT id, title, stock_name, ticker, scrap_date, analysis, model_used FROM scrapbook WHERE user_id = ? ORDER BY id DESC", (current_user,))
+    
+    # DB에서 스크랩된 모든 데이터 가져오기
+    c.execute("""
+        SELECT id, title, stock_name, ticker, scrap_date, analysis, model_used, 
+               saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price 
+        FROM scrapbook 
+        WHERE user_id = ? 
+        ORDER BY id DESC
+    """, (current_user,))
     scraps = c.fetchall()
-    for row in scraps:
-        s_id, title, s_name, ticker, s_date, analysis, m_used = row
-        with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
-            st.write(analysis.split("[TRACKING_DATA]")[0].strip())
-            st.caption(f"🧠 생산 모델: {m_used}")
-            if st.button("삭제", key=f"del_{s_id}"):
-                c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,))
-                conn.commit(); st.rerun()
+    
+    if scraps:
+        # 실시간 현재가를 한 번에 조회하기 위해 티커 리스트 추출
+        tickers = [row[3] for row in scraps if row[3]]
+        price_map_scrap = fetch_current_prices(tickers)
+        
+        for row in scraps:
+            s_id, title, s_name, ticker, s_date, analysis, m_used, saved_p, tp_s, tp_m, tp_l, bp = row
+            code = re.sub(r'[^\d]', '', ticker or "")
+            
+            # 실시간 현재가 맵핑
+            price_info = price_map_scrap.get(code, {})
+            current_p = price_info.get("current", 0.0)
+            
+            with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
+                # 📊 핵심 가격 지표 계판 (Metrics Grid)
+                st.markdown("#### 💰 가격 지표 비교")
+                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                
+                m_col1.metric("매수 추천가", f"{bp:,.0f}원" if bp else "정보 없음")
+                m_col2.metric("저장 당시 주가", f"{saved_p:,.0f}원" if saved_p else "정보 없음")
+                
+                if current_p > 0:
+                    diff = current_p - saved_p if saved_p else 0.0
+                    diff_pct = (diff / saved_p * 100) if saved_p else 0.0
+                    m_col3.metric("실시간 현재가", f"{current_p:,.0f}원", delta=f"{diff:+,.0f}원 ({diff_pct:+.2f}%)")
+                else:
+                    m_col3.metric("실시간 현재가", "조회 실패")
+                    
+                m_col4.markdown(f"**목표가 밴드**<br>단기: {tp_s:,.0f}원<br>중기: {tp_m:,.0f}원<br>장기: {tp_l:,.0f}원", unsafe_allow_html=True)
+                
+                # 📈 목표가 대비 현재가 진행률 분석
+                if current_p > 0 and tp_s > 0:
+                    st.markdown("---")
+                    st.markdown("#### 🎯 목표가 대비 현재가 현황")
+                    
+                    # 단기, 중기, 장기 대비 현재가의 위치 계산
+                    pct_s = (current_p / tp_s) * 100
+                    pct_m = (current_p / tp_m) * 100 if tp_m else 0.0
+                    pct_l = (current_p / tp_l) * 100 if tp_l else 0.0
+                    
+                    p_col1, p_col2, p_col3 = st.columns(3)
+                    p_col1.progress(min(int(pct_s), 100), text=f"단기 목표가 대비: **{pct_s:.1f}%**")
+                    if tp_m: p_col2.progress(min(int(pct_m), 100), text=f"중기 목표가 대비: **{pct_m:.1f}%**")
+                    if tp_l: p_col3.progress(min(int(pct_l), 100), text=f"장기 목표가 대비: **{pct_l:.1f}%**")
+                
+                st.markdown("---")
+                st.markdown("#### 📝 상세 분석 리포트")
+                # 리포트 본문 출력 (데이터 포맷 태그 제외)
+                st.write(analysis.split("[TRACKING_DATA]")[0].strip())
+                st.caption(f"🧠 생산 모델: {m_used}")
+                
+                if st.button("삭제", key=f"del_{s_id}", use_container_width=True):
+                    c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,))
+                    conn.commit()
+                    st.rerun()
+    else:
+        st.info("저장된 분석 리포트가 없습니다.")
