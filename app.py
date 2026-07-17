@@ -212,7 +212,7 @@ def call_gemini_with_fallback(prompt, model=MODEL_NAME):
         except Exception as e1:
             if model == MODEL_NAME:
                 try:
-                    return client.models.generate_content(model="gemini-3-preview", contents=prompt).text
+                    return client.models.generate_content(model="gemini-3-flash-preview", contents=prompt).text
                 except Exception as e2:
                     return f"최종 호출 실패 (Flash 및 Preview 모두 에러): {e2}"
             else:
@@ -235,7 +235,7 @@ def call_gemini_stream_with_fallback(prompt):
                 if chunk.text: yield chunk.text
         except Exception:
             try:
-                fallback_response = client.models.generate_content_stream(model="gemini-3-preview", contents=prompt)
+                fallback_response = client.models.generate_content_stream(model="gemini-3-flash-preview", contents=prompt)
                 yield f"\n[안내] 3.5-flash 서버 응답 지연으로 인해 3-preview 모델로 우회하여 분석을 진행합니다.\n\n"
                 for chunk in fallback_response:
                     if chunk.text: yield chunk.text
