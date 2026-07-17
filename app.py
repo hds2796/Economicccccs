@@ -105,7 +105,13 @@ def init_db():
         return None
 
 conn = init_db()
-c = conn.cursor()
+try:
+    c = conn.cursor()
+except sqlite3.ProgrammingError:
+    # 💡 닫힌 DB 연결(좀비 캐시) 에러 감지 시 즉각 강제 초기화 및 재연결
+    init_db.clear()
+    conn = init_db()
+    c = conn.cursor()
 
 @st.cache_resource
 def initialize_dart_codes():
