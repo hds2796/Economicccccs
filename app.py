@@ -818,10 +818,23 @@ with tab5:
                         calc_sl_l = current_price * (1 - k_factor * daily_vol * np.sqrt(250)) if daily_vol > 0 else 0.0
 
                         if eps_val <= 0:
-                            fund_target_log = (
-                                f"   - [보수적 시나리오] BPS 자산가치 기준: {bps_val:,.0f}원\n" if bps_val > 0 else f"   - [보수적 시나리오] BPS 자산가치 기준: {current_price * 0.8:,.0f}원\n"
-                                "   - [중립적 시나리오] 적자 기업으로 이익 기반 퀀트 밴드 산출 불가 (기술적 저항선 대체 요망)\n"
-                                "   - [공격적 시나리오] 적자 기업으로 이익 기반 퀀트 밴드 산출 불가 (기술적 저항선 대체 요망)\n"
+    # 1. 보수적 시나리오: BPS 자산가치 기준 (PBR 1.0 청산가치 방어선)
+    # BPS마저 없다면 현재가의 90% 수준으로 보수적 방어선 구축
+    conservative_tp = bps_val if bps_val > 0 else current_price * 0.9
+    
+    # 2. 중립적 시나리오: 중기(60일) 기술적 상방 변동성 밴드 돌파 가격
+    # 매도세와 노이즈를 뚫어내는 핵심 저항선 추정치로 활용
+    neutral_tp = current_price * (1 + user_k * daily_vol * np.sqrt(60)) if daily_vol > 0 else current_price * 1.2
+    
+    # 3. 공격적 시나리오: 장기(250일) 추세 전환 및 대형 모멘텀 상방 밴드 가격
+    # 턴어라운드 성공 시 열리는 장기 매물대 상단 목표치로 활용
+    aggressive_tp = current_price * (1 + user_k * daily_vol * np.sqrt(250)) if daily_vol > 0 else current_price * 1.5
+
+    fund_target_log = (
+        f"   - [보수적 시나리오] BPS 청산가치 방어선: {conservative_tp:,.0f}원\n"
+        f"   - [중립적 시나리오] 60일 기술적 상방 변동성 밴드: {neutral_tp:,.0f}원\n"
+        f"   - [공격적 시나리오] 250일 장기 추세 돌파 밴드: {aggressive_tp:,.0f}원\n"
+    )
                             )
                         else:
                             conservative_tp = bps_val if bps_val > 0 else current_price * 0.9
