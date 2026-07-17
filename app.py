@@ -77,6 +77,9 @@ def init_db():
         cursor.execute('''CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, stock_name TEXT)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KEY AUTOINCREMENT, calc_date TEXT, score REAL)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS dart_corp_codes (corp_code TEXT, corp_name TEXT, stock_code TEXT PRIMARY KEY)''')
+        
+        # 💡 K값 상태 유지를 위한 설정 테이블 추가
+        cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, k_factor REAL)''')
         connection.commit()
 
         columns_to_add = [
@@ -108,7 +111,6 @@ conn = init_db()
 try:
     c = conn.cursor()
 except sqlite3.ProgrammingError:
-    # 💡 닫힌 DB 연결(좀비 캐시) 에러 감지 시 즉각 강제 초기화 및 재연결
     init_db.clear()
     conn = init_db()
     c = conn.cursor()
@@ -180,19 +182,39 @@ def restore_db_from_drive():
         return True
     except: return False
 
+# =======================================================
+# 사이드바 제어 (K값 저장 및 백업/복구 통합)
+# =======================================================
 with st.sidebar:
     st.markdown(f"**👤 접속 계정:** `{current_user}`")
+    st.divider()
+    
+    # DB에서 현재 유저의 K값 불러오기 (기본값 2.0)
+    c.execute("SELECT k_factor FROM user_settings WHERE user_id = ?", (current_user,))
+    row = c.fetchone()
+    saved_k = row[0] if row else 2.0
+    
+    st.subheader("⚙️ 시스템 설정")
+    k_factor = st.slider("리스크 관리 계수 (k)", min_value=1.0, max_value=3.5, value=saved_k, step=0.1, help="값이 변경되면 즉시 DB에 자동 저장되어 백업 시 함께 보관됩니다.")
+    
+    # 슬라이더 값이 변경되면 DB 업데이트
+    if k_factor != saved_k:
+        c.execute("INSERT OR REPLACE INTO user_settings (user_id, k_factor) VALUES (?, ?)", (current_user, k_factor))
+        conn.commit()
+
     st.divider()
     st.subheader("💾 데이터베이스 관리")
     if st.button("☁️ 구글 드라이브 백업", use_container_width=True):
         with st.spinner("클라우드 백업 중..."):
-            if backup_db_to_drive(): st.success("✅ 백업 완료")
-if st.button("🔄 드라이브에서 복구", use_container_width=True):
+            if backup_db_to_drive(): st.success("✅ DB 및 K값 백업 완료")
+            
+    if st.button("🔄 드라이브에서 복구", use_container_width=True):
         with st.spinner("데이터 복구 중..."):
             if restore_db_from_drive():
-                init_db.clear()  # 💡 추가: 메모리에 남은 닫힌 DB 캐시를 강제 삭제
+                init_db.clear()
                 st.success("✅ 복구 완료! 새로고침 진행합니다.")
                 st.rerun()
+
 # =======================================================
 # 투 트랙 API 호출 (동시성 제어)
 # =======================================================
@@ -275,7 +297,6 @@ def get_advanced_fundamental_data(code):
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # 1. 상단 투자정보 확정 고유 ID 요소 우선 파싱 (결측치 방어선)
         per_elem = soup.find(id="_per")
         if per_elem: data["per"] = per_elem.get_text().strip()
             
@@ -298,13 +319,11 @@ def get_advanced_fundamental_data(code):
                     data["bps"] = float(val)
             except: pass
         
-        # 업종 PER 수집
         for th in soup.find_all("th"):
             if "동일업종 PER" in th.get_text():
                 td = th.find_next("td")
                 if td: data["industry_per"] = td.get_text().strip().replace('배', '')
         
-        # 2. 하단 상세 테이블 파싱 (추이 분석용 백업)
         cop_table = soup.find("div", class_="cop_details")
         if cop_table:
             data["quarter_trend"] = "최근 실적 수집 완료"
@@ -314,7 +333,6 @@ def get_advanced_fundamental_data(code):
                     if "EPS(원)" in text:
                         valid_eps = [float(v) for td in th_item.find_next_siblings("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
                         if valid_eps:
-                            # 상단 메인 요소가 누락되었을 때만 하단 테이블 데이터로 보완
                             if data["eps"] == 0:
                                 data["eps"] = valid_eps[-1]
                             data["eps_history"] = valid_eps[-3:]
@@ -327,7 +345,6 @@ def get_advanced_fundamental_data(code):
                         if valid_roe: data["roe_history"] = valid_roe[-3:]
             except: pass
             
-        # 수급 데이터 수집
         url_frgn = f"https://finance.naver.com/item/frgn.naver?code={code}"
         res_frgn = requests.get(url_frgn, headers=headers, timeout=5)
         soup_frgn = BeautifulSoup(res_frgn.text, "html.parser")
@@ -506,17 +523,16 @@ if not st.session_state.realtime_cache.get("realtime_news"):
 
 g_data = st.session_state.realtime_cache
 
-st.markdown("### 📊 실시간 시장 및 시스템 계수 관리")
-col_title, col_k1, col_k2, col_refresh = st.columns([2, 1.8, 3.2, 1.2])
+st.markdown("### 📊 실시간 시장 상태")
+col_title, col_refresh = st.columns([5, 1.2])
 with col_refresh:
     if st.button("실시간 갱신", use_container_width=True):
         with st.spinner("갱신 중..."):
             if new_data := fetch_realtime_data_direct(): merge_realtime_data(new_data)
             st.rerun()
 
-with col_title: st.caption(f"동기화 시점: {g_data.get('updated_at', '알 수 없음')}")
-with col_k1: k_factor = st.slider("⚙️ 리스크 관리 계수 (k)", min_value=1.0, max_value=3.5, value=2.0, step=0.1, help="표준편차 배수 설정")
-with col_k2: st.caption("1.0~1.5 (보수적 방어) ◀ `2.0 (표준)` ▶ 2.5~3.5 (추세 매매)")
+with col_title: 
+    st.caption(f"동기화 시점: {g_data.get('updated_at', '알 수 없음')}")
 
 market_data = g_data.get("market_status", {})
 cols = st.columns(4)
@@ -593,7 +609,7 @@ with tab3:
                 if st.button(f"분석", key=f"sec_{sec}"): st.write(call_gemini_with_fallback(f"[{sec} 요약]\n" + call_gemini_lite_summary("\n".join([i['title'] for i in items])) + "\n\n주도주 흐름 분석."))
 
 # =======================================================
-# 탭 4: 종목 발굴 (💡 수치 기반 타당성 증명 강제)
+# 탭 4: 종목 발굴
 # =======================================================
 def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     ticker = re.sub(r'[^\d]', '', ticker)
@@ -742,7 +758,7 @@ with tab4:
                                 conn.commit(); st.success(f"✅ 리포트 스크랩 완료!")
 
 # =======================================================
-# 탭 5: 관심종목 진단 (💡 수치 기반 타당성 증명 강제)
+# 탭 5: 관심종목 진단
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
@@ -823,16 +839,8 @@ with tab5:
                         calc_sl_l = current_price * (1 - k_factor * daily_vol * np.sqrt(250)) if daily_vol > 0 else 0.0
 
                         if eps_val <= 0:
-                            # 1. 보수적 시나리오: BPS 자산가치 기준 (PBR 1.0 청산가치 방어선)
-                            # BPS마저 없다면 현재가의 90% 수준으로 보수적 방어선 구축
                             conservative_tp = bps_val if bps_val > 0 else current_price * 0.9
-                            
-                            # 2. 중립적 시나리오: 중기(60일) 기술적 상방 변동성 밴드 돌파 가격
-                            # 매도세와 노이즈를 뚫어내는 핵심 저항선 추정치로 활용
                             neutral_tp = current_price * (1 + k_factor * daily_vol * np.sqrt(60)) if daily_vol > 0 else current_price * 1.2
-                            
-                            # 3. 공격적 시나리오: 장기(250일) 추세 전환 및 대형 모멘텀 상방 밴드 가격
-                            # 턴어라운드 성공 시 열리는 장기 매물대 상단 목표치로 활용
                             aggressive_tp = current_price * (1 + k_factor * daily_vol * np.sqrt(250)) if daily_vol > 0 else current_price * 1.5
 
                             fund_target_log = (
