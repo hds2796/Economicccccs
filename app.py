@@ -193,7 +193,7 @@ with st.sidebar:
                 st.rerun()
 
 # =======================================================
-# 투 트랙 API 호출
+# 투 트랙 API 호출 (동시성 제어)
 # =======================================================
 GEMINI_CONCURRENCY_LIMIT = 3
 _gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
@@ -206,6 +206,26 @@ def call_gemini_lite_summary(prompt):
         return client.models.generate_content(model=LITE_MODEL_NAME, contents=prompt).text
     except Exception as e: return f"요약 실패: {e}"
     finally: _gemini_semaphore.release()
+
+def call_gemini_with_fallback(prompt, model=MODEL_NAME):
+    acquired = _gemini_semaphore.acquire(timeout=25)
+    if not acquired: return "API 호출 대기 시간 초과"
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        try:
+            return client.models.generate_content(model=model, contents=prompt).text
+        except Exception as e1:
+            if model == MODEL_NAME:
+                try:
+                    return client.models.generate_content(model="gemini-3-preview", contents=prompt).text
+                except Exception as e2:
+                    return f"최종 호출 실패 (Flash 및 Preview 모두 에러): {e2}"
+            else:
+                return f"호출 실패: {e1}"
+    except Exception as e:
+        return f"호출 실패: {e}"
+    finally:
+        _gemini_semaphore.release()
 
 def call_gemini_stream_with_fallback(prompt):
     acquired = _gemini_semaphore.acquire(timeout=25)
@@ -481,7 +501,7 @@ st.divider()
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경제", "섹터 뉴스", "종목 발굴", "관심종목 진단", "스크랩북"])
 
 # =======================================================
-# 탭 1 ~ 3: 생략 (기존과 동일)
+# 탭 1: 실시간 브리핑
 # =======================================================
 with tab1:
     st.subheader("실시간 시황 브리핑")
@@ -496,6 +516,9 @@ with tab1:
             with st.spinner("Lite 모델 압축 중..."): lite_summary = call_gemini_lite_summary(f"다음 뉴스를 요약하라:\n\n{news_str}")
             with st.spinner("Flash 3.5 모델 분석 중..."): st.write_stream(call_gemini_stream_with_fallback(f"지표:\n{json.dumps(market_data)}\n\n요약:\n{lite_summary}\n\n시장 흐름 심층 분석 서술."))
 
+# =======================================================
+# 탭 2: 핵심 경제 (개별 분석 UI 복구)
+# =======================================================
 with tab2:
     st.subheader("핵심 경제 종합 브리핑 및 심리 지수")
     c.execute("SELECT calc_date, score FROM sentiment_history ORDER BY calc_date ASC")
@@ -521,7 +544,21 @@ with tab2:
 
     if st.session_state.get('eco_briefing'):
         with st.expander("📝 브리핑"): st.write(st.session_state.eco_briefing)
+        
+    st.subheader("핵심 경제 뉴스 목록")
+    if eco_news:
+        for idx, n in enumerate(eco_news[:10]):
+            st.markdown(f"**[{idx+1}] {n['title']}**")
+            if st.button("개별 심층 분석", key=f"eco_an_{idx}"):
+                with st.spinner("Lite 전처리 및 Flash 3.5 의미론적 분석 진행 중..."):
+                    l_sum = call_gemini_lite_summary(f"본 뉴스의 핵심적 사실을 왜곡 없이 상세히 요약하라:\n{n['title']}")
+                    st.write(call_gemini_with_fallback(f"[뉴스 요약]\n{l_sum}\n\n이 사실이 거시 경제 및 관련 주식 섹터에 파급 효과와 거시적 변화 의의를 분석하라."))
+    else: 
+        st.info("조회된 핵심 경제 뉴스가 없습니다. 람다 연동을 확인하세요.")
 
+# =======================================================
+# 탭 3: 섹터 뉴스
+# =======================================================
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
     sec_news = g_data.get("sectors") or cached_data.get("sectors") or g_data.get("sector_news", {})
@@ -533,7 +570,7 @@ with tab3:
                 if st.button(f"분석", key=f"sec_{sec}"): st.write(call_gemini_with_fallback(f"[{sec} 요약]\n" + call_gemini_lite_summary("\n".join([i['title'] for i in items])) + "\n\n주도주 흐름 분석."))
 
 # =======================================================
-# 탭 4: 종목 발굴 (💡 핵심 투자 아이디어(Why Buy?) 강제)
+# 탭 4: 종목 발굴
 # =======================================================
 def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     ticker = re.sub(r'[^\d]', '', ticker)
@@ -558,9 +595,7 @@ def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     sl_m = current_price * (1 - user_k * daily_vol * np.sqrt(60)) if daily_vol > 0 else 0.0
     sl_l = current_price * (1 - user_k * daily_vol * np.sqrt(250)) if daily_vol > 0 else 0.0
 
-    calc_result_log = (
-        f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
-    )
+    calc_result_log = (f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n")
 
     tech_data_str = f"[{name} ({ticker})]\n"
     if tech: tech_data_str += f"- 차트: 현재가 {tech['current']:,.0f} | 20일선 {tech['ma20']:,.0f} | MACD {tech['macd']:,.2f}\n"
@@ -599,14 +634,14 @@ with tab4:
                     f"[10개 후보군 팩트 데이터]\n{tech_data_str}\n\n"
                     f"=== ⚠️ AI 분석 핵심 지침 ===\n"
                     f"1. 가장 매력적인 **Top 3 종목만 엄선**하십시오.\n"
-                    f"2. 기계적인 장/단점 나열에 앞서, **'왜 수많은 주식 중 굳이 이 종목을 지금 사야 하는가?'**에 대한 압도적이고 결정적인 핵심 투자 아이디어(Conviction Pitch)를 최상단에 강제 선언하십시오.\n"
+                    f"2. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 굳이 이 종목을 지금 사야 하는가?'**에 대한 압도적이고 결정적인 핵심 투자 아이디어(Conviction Pitch)를 최상단에 강제 선언하십시오.\n"
                     f"3. 편향을 제거하기 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리 작성하여 자가 검열하십시오.\n"
                     f"4. 파이썬이 연산한 '단기/중기/장기 손절가' 데이터를 신뢰하여 대응 전략을 제시하십시오.\n\n"
                     f"=== 리포트 작성 항목 ===\n"
                     f"<ANALYSIS_티커숫자>\n"
                     f"### [종목명] (티커)\n"
                     f"**🎯 핵심 투자 아이디어 (Why Buy?)**\n"
-                    f"- (수많은 종목 중 굳이 이 종목을 지금 매수해야 하는 가장 강력하고 결정적인 이유 1~2줄)\n"
+                    f"- (가장 강력하고 결정적인 이유 1~2줄)\n"
                     f"**🟢 강세 논리 (Bull Case)**\n"
                     f"**🔴 약세/위험 논리 (Bear Case)**\n"
                     f"**⚖️ 최종 판단 및 리스크 평가**\n"
@@ -653,7 +688,7 @@ with tab4:
                                 conn.commit(); st.success(f"✅ 리포트 스크랩 완료!")
 
 # =======================================================
-# 탭 5: 관심종목 진단 (💡 핵심 투자 아이디어(Why Buy/Sell?) 강제)
+# 탭 5: 관심종목 진단
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
@@ -741,7 +776,7 @@ with tab5:
                                   f"3. 내 계좌 정보가 있다면 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
                                   f"=== 작성 항목 ===\n"
                                   f"**🎯 핵심 아이디어 (Why Buy/Hold/Sell?)**\n"
-                                  f"- (현재 시점에서 이 종목을 매수/보유/매도해야 하는 가장 강력하고 결정적인 한 가지 이유)\n"
+                                  f"- (가장 강력하고 결정적인 이유 1~2줄)\n"
                                   f"**🟢 강세 논리 (Bull Case)**\n"
                                   f"**🔴 약세/위험 논리 (Bear Case)**\n"
                                   f"**⚖️ 최종 판단 및 리스크 평가**\n"
@@ -778,7 +813,7 @@ with tab5:
             st.divider()
 
 # =======================================================
-# 탭 6: 스크랩북
+# 탭 6: 스크랩북 (과거 데이터 기반 완벽한 적중률 추적)
 # =======================================================
 with tab6:
     st.subheader("저장된 분석 리포트 및 모델 검증")
