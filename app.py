@@ -76,14 +76,14 @@ def fetch_cached_global_data():
         st.error(f"❌ 캐시 데이터 로드 에러: {e}")
         return None
 
-# POST 방식으로 변경. 이미 본 링크 리스트를 서버로 보냅니다.
 def fetch_realtime_data_direct(seen_links):
     if not API_GATEWAY_REALTIME_URL:
         st.error("❌ secrets.toml에 API_GATEWAY_REALTIME_URL이 설정되지 않았습니다.")
         return None
     try:
         payload = {"seen_links": list(seen_links)}
-        res = requests.post(API_GATEWAY_REALTIME_URL, json=payload, timeout=20)
+        # 타임아웃을 안전하게 30초로 설정
+        res = requests.post(API_GATEWAY_REALTIME_URL, json=payload, timeout=30)
         res.raise_for_status()
         return res.json()
     except Exception as e:
@@ -208,18 +208,15 @@ g_data = st.session_state.realtime_cache
 
 col_title, col_refresh = st.columns([5, 1.2])
 with col_refresh:
-    # ⭐️ 새로고침 버튼 (이미 본 기사는 제외하고 새로운 것만 요청)
     if st.button("🔄 실시간 뉴스 새로고침", use_container_width=True):
         with st.spinner("새로운 뉴스를 탐색 중입니다..."):
             new_data = fetch_realtime_data_direct(st.session_state.seen_realtime_links)
             if new_data:
                 new_news = new_data.get("realtime_news", [])
                 
-                # 새로 뜬 뉴스가 없는 경우 알림
                 if not new_news:
                     st.info("💡 새로운 뉴스가 없습니다. 잠시 후 다시 시도해주세요.")
                 else:
-                    # 새로운 뉴스로 교체 및 본 링크 목록 업데이트
                     st.session_state.realtime_cache = new_data
                     for n in new_news:
                         st.session_state.seen_realtime_links.add(n['link'])
@@ -305,8 +302,9 @@ with tab2:
             st.rerun()
 
 with tab3:
-    st.subheader("📑 섹터 뉴스 (실시간 갱신)")
-    sectors_data = g_data.get("sectors", {})
+    st.subheader("📑 섹터 뉴스 (30분 주기)")
+    # ⭐️ 이제 섹터 뉴스는 실시간 통신(g_data)이 아닌, 캐시된 데이터(cached_data)에서 가져옵니다.
+    sectors_data = cached_data.get("sectors", {})
     if sectors_data:
         selected_sector = st.selectbox("관심 섹터 선택", list(sectors_data.keys()))
         sector_news = dedupe_news(sectors_data.get(selected_sector, []))
