@@ -485,7 +485,9 @@ with tab2:
 # =======================================================
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
-    sec_news = g_data.get("sector_news", {}) if g_data else {}
+    
+    # 💡 수정: g_data(실시간)에 없으면 cached_data(구글 드라이브 백업본)에서 찾도록 범위 확대
+    sec_news = g_data.get("sector_news") or cached_data.get("sector_news", {})
     
     if sec_news:
         for sec, items in sec_news.items():
@@ -501,7 +503,7 @@ with tab3:
                         flash_p = f"[{sec} 섹터 이슈 요약]\n{lite_s}\n\n이 트렌드가 향후 {sec} 섹터 내 주도주 흐름에 가져올 변화와 주식시장에 미칠 파장을 분석하라."
                         st.write(call_gemini_with_fallback(flash_p))
     else:
-        st.info("현재 매칭된 섹터별 뉴스가 없습니다. (실시간 데이터 수집을 대기 중입니다)")
+        st.info("현재 매칭된 섹터별 뉴스가 없습니다. (실시간 및 캐시 데이터를 모두 확인했습니다)")
 
 # =======================================================
 # 탭 4: 종목 발굴 (투 트랙 최적화 & 상세 요약)
