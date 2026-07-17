@@ -78,7 +78,6 @@ def init_db():
         cursor.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KEY AUTOINCREMENT, calc_date TEXT, score REAL)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS dart_corp_codes (corp_code TEXT, corp_name TEXT, stock_code TEXT PRIMARY KEY)''')
         
-        # 💡 K값 상태 유지를 위한 설정 테이블 추가
         cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, k_factor REAL)''')
         connection.commit()
 
@@ -189,7 +188,6 @@ with st.sidebar:
     st.markdown(f"**👤 접속 계정:** `{current_user}`")
     st.divider()
     
-    # DB에서 현재 유저의 K값 불러오기 (기본값 2.0)
     c.execute("SELECT k_factor FROM user_settings WHERE user_id = ?", (current_user,))
     row = c.fetchone()
     saved_k = row[0] if row else 2.0
@@ -197,7 +195,6 @@ with st.sidebar:
     st.subheader("⚙️ 시스템 설정")
     k_factor = st.slider("리스크 관리 계수 (k)", min_value=1.0, max_value=3.5, value=saved_k, step=0.1, help="값이 변경되면 즉시 DB에 자동 저장되어 백업 시 함께 보관됩니다.")
     
-    # 슬라이더 값이 변경되면 DB 업데이트
     if k_factor != saved_k:
         c.execute("INSERT OR REPLACE INTO user_settings (user_id, k_factor) VALUES (?, ?)", (current_user, k_factor))
         conn.commit()
@@ -560,7 +557,7 @@ with tab1:
         else:
             news_str = "\n".join([f"- {n['title']}: {n.get('description', '')}" for n in news_pool[:50]])
             with st.spinner("Lite 모델 압축 중..."): lite_summary = call_gemini_lite_summary(f"다음 뉴스를 요약하라:\n\n{news_str}")
-            with st.spinner("Flash 3.5 모델 분석 중..."): st.write_stream(call_gemini_stream_with_fallback(f"지표:\n{json.dumps(market_data)}\n\n요약:\n{lite_summary}\n\n시장 흐름 심층 분석 서술."))
+            with st.spinner("Flash 모델 분석 중..."): st.write_stream(call_gemini_stream_with_fallback(f"지표:\n{json.dumps(market_data)}\n\n요약:\n{lite_summary}\n\n시장 흐름 심층 분석 서술."))
 
 with tab2:
     st.subheader("핵심 경제 종합 브리핑 및 심리 지수")
@@ -593,7 +590,7 @@ with tab2:
         for idx, n in enumerate(eco_news[:10]):
             st.markdown(f"**[{idx+1}] {n['title']}**")
             if st.button("개별 심층 분석", key=f"eco_an_{idx}"):
-                with st.spinner("Lite 전처리 및 Flash 3.5 의미론적 분석 진행 중..."):
+                with st.spinner("Lite 전처리 및 Flash 의미론적 분석 진행 중..."):
                     l_sum = call_gemini_lite_summary(f"본 뉴스의 핵심적 사실을 왜곡 없이 상세히 요약하라:\n{n['title']}")
                     st.write(call_gemini_with_fallback(f"[뉴스 요약]\n{l_sum}\n\n이 사실이 거시 경제 및 관련 주식 섹터에 파급 효과와 거시적 변화 의의를 분석하라."))
     else: st.info("조회된 핵심 경제 뉴스가 없습니다.")
@@ -609,7 +606,7 @@ with tab3:
                 if st.button(f"분석", key=f"sec_{sec}"): st.write(call_gemini_with_fallback(f"[{sec} 요약]\n" + call_gemini_lite_summary("\n".join([i['title'] for i in items])) + "\n\n주도주 흐름 분석."))
 
 # =======================================================
-# 탭 4: 종목 발굴
+# 탭 4: 종목 발굴 (💡 리포트 접힘 상태 기본값 적용)
 # =======================================================
 def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     ticker = re.sub(r'[^\d]', '', ticker)
@@ -696,7 +693,7 @@ with tab4:
                     for future in concurrent.futures.as_completed(futures):
                         tech_data_str += future.result()
             
-            with st.spinner("[3단계] Flash 3.5 기반 목표가 밴드 매칭 및 수치 방어 논리 작성 중..."):
+            with st.spinner("[3단계] Flash 기반 목표가 밴드 매칭 및 수치 방어 논리 작성 중..."):
                 step3_prompt = (
                     f"당신은 리스크 관리를 최우선으로 하는 퀀트 애널리스트입니다.\n"
                     f"[10개 후보군 팩트 데이터]\n{tech_data_str}\n\n"
@@ -724,7 +721,7 @@ with tab4:
 
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
-        with st.expander("추천 리포트", expanded=True):
+        with st.expander("추천 리포트"):
             display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw.split("[TRACKING_DATA]")[0].strip())
             st.write(display_text)
             
@@ -758,7 +755,7 @@ with tab4:
                                 conn.commit(); st.success(f"✅ 리포트 스크랩 완료!")
 
 # =======================================================
-# 탭 5: 관심종목 진단
+# 탭 5: 관심종목 진단 (💡 리포트 접힘 상태 기본값 적용)
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
@@ -909,7 +906,7 @@ with tab5:
                     conn.commit(); st.rerun()
 
             if report_text:
-                with st.expander("진단 리포트", expanded=True):
+                with st.expander("진단 리포트"):
                     st.write(re.sub(r'TARGET_PRICE:.*', '', report_text).strip())
                     st.divider()
                     col_tgt, col_sl = st.columns(2)
