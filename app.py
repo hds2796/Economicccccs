@@ -94,7 +94,7 @@ def init_db():
                 cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}")
                 connection.commit()
             except Exception:
-                pass # 컬럼이 이미 존재할 경우 발생하는 에러는 무시
+                pass
         return connection
     except Exception as e:
         print(f"[DB Init Error] {e}")
@@ -562,15 +562,77 @@ with tab1:
                 st.write_stream(call_gemini_stream_with_fallback(analysis_prompt))
 
 # =======================================================
-# 탭 2: 핵심 경제
+# 탭 2: 핵심 경제 (종합 브리핑 및 시장 심리 지수 추적)
 # =======================================================
 with tab2:
-    st.subheader("핵심 경제 뉴스 요약")
+    st.subheader("핵심 경제 종합 브리핑 및 심리 지수")
+    
+    # DB에서 심리 지수 이력 조회 및 동일 날짜 평균 산출
+    c.execute("SELECT calc_date, score FROM sentiment_history ORDER BY calc_date ASC")
+    sentiment_rows = c.fetchall()
+    
+    if sentiment_rows:
+        df_sent = pd.DataFrame(sentiment_rows, columns=['date', 'score'])
+        df_sent['date'] = pd.to_datetime(df_sent['date']).dt.strftime('%Y-%m-%d')
+        # 동일 일자 데이터 평균 계산
+        df_avg = df_sent.groupby('date')['score'].mean().reset_index()
+        df_avg.set_index('date', inplace=True)
+        
+        st.markdown("#### 📈 주간/월간 시장 심리 지수 추이 (일별 평균)")
+        st.line_chart(df_avg['score'])
+        latest_score = df_avg.iloc[-1]['score']
+        st.metric("가장 최근의 시장 심리 지수", f"{latest_score:.1f} / 100", help="0=극단적 공포, 50=중립, 100=극단적 탐욕")
+        st.divider()
+
     eco_news = cached_data.get("eco_news", [])
+    
+    if st.button("거시경제 종합 브리핑 생성 (Top 50 뉴스 기반)", use_container_width=True):
+        if not eco_news:
+            st.error("분석할 경제 뉴스가 없습니다.")
+        else:
+            with st.spinner("Lite 모델이 핵심 경제 뉴스 50건을 심층 요약 중..."):
+                eco_str = "\n".join([f"- {n['title']}: {n.get('summary', '')}" for n in eco_news[:50]])
+                lite_prompt = f"다음은 인공지능이 중요도 순으로 선별한 핵심 경제 뉴스 50건이다. 누락 없이 오늘의 시황, 주요 호재와 악재를 상세히 통합 요약하라:\n\n{eco_str}"
+                lite_summary = call_gemini_lite_summary(lite_prompt)
+            
+            with st.spinner("Flash 3.5 모델이 종합 브리핑 및 시장 심리 지수를 산출 중..."):
+                flash_prompt = (
+                    f"지표 데이터:\n{json.dumps(market_data)}\n\n[경제 뉴스 전처리 요약본]\n{lite_summary}\n\n"
+                    f"당신은 거시경제 수석 애널리스트입니다. 위 데이터를 바탕으로 다음 항목이 포함된 종합 브리핑을 작성하십시오.\n"
+                    f"1. 오늘의 시황 요약\n"
+                    f"2. 주요 호재와 악재\n"
+                    f"3. 주식시장에 미치는 영향\n\n"
+                    f"그리고 이 모든 상황을 종합하여 '오늘의 시장 심리 지수(Sentiment Index)'를 0부터 100 사이의 숫자로 산출하십시오. "
+                    f"(0=극단적 공포/폭락장, 50=중립, 100=극단적 탐욕/폭등장)\n\n"
+                    f"※ 리포트 작성을 마친 후, 반드시 맨 마지막 줄에 아래 파싱 형식으로 심리 지수 점수만 출력하십시오.\n"
+                    f"[SENTIMENT_SCORE]: 점수숫자"
+                )
+                
+                full_report = "".join(call_gemini_stream_with_fallback(flash_prompt))
+                
+                # 점수 파싱 및 DB 저장 처리
+                score_match = re.search(r'\[SENTIMENT_SCORE\]:\s*(\d+)', full_report)
+                if score_match:
+                    score_val = float(score_match.group(1))
+                    today_str = datetime.now().strftime("%Y-%m-%d")
+                    c.execute("INSERT INTO sentiment_history (calc_date, score) VALUES (?, ?)", (today_str, score_val))
+                    conn.commit()
+                
+                # 화면 출력 텍스트 저장
+                display_text = re.sub(r'\[SENTIMENT_SCORE\]:.*', '', full_report).strip()
+                st.session_state.eco_briefing = display_text
+                st.rerun()
+
+    # 생성된 종합 브리핑 출력 보존
+    if st.session_state.get('eco_briefing'):
+        with st.expander("📝 오늘의 거시경제 종합 브리핑", expanded=True):
+            st.write(st.session_state.eco_briefing)
+
+    st.subheader("핵심 경제 뉴스 목록")
     if eco_news:
         for idx, n in enumerate(eco_news[:10]):
             st.markdown(f"**[{idx+1}] {n['title']}**")
-            if st.button("심층 분석", key=f"eco_an_{idx}"):
+            if st.button("개별 심층 분석", key=f"eco_an_{idx}"):
                 with st.spinner("Lite 전처리 및 Flash 3.5 의미론적 분석 진행 중..."):
                     l_sum = call_gemini_lite_summary(f"본 뉴스의 핵심적 사실을 왜곡 없이 상세히 요약하라:\n{n['title']}")
                     flash_p = f"[뉴스 요약]\n{l_sum}\n\n이 사실이 거시 경제 및 관련 주식 섹터에 파급 효과와 거시적 변화 의의를 분석하라."
@@ -607,7 +669,7 @@ with tab3:
         st.info("현재 매칭된 섹터별 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 4: 종목 발굴 (💡 Top 3 종목만 강제 리포트)
+# 탭 4: 종목 발굴 (Top 3 종목 선행 계산)
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (심층 분석)")
@@ -656,8 +718,8 @@ with tab4:
                     except: float_ind_per = 0.0
                     
                     current_price = tech['current'] if tech else 0.0
-                    eps_val = fund['eps']
-                    bps_val = fund['bps']
+                    eps_val = fund.get('eps', 0.0)
+                    bps_val = fund.get('bps', 0.0)
                     
                     calc_result_log = ""
                     if investment_horizon == "단기 (1~3개월)":
@@ -693,7 +755,7 @@ with tab4:
                     f"[선택된 투자 기간]: {investment_horizon}\n"
                     f"[10개 후보군 파이썬 연산 완료 데이터]\n{tech_data_str}\n\n"
                     f"=== 리포트 작성 지시 ===\n"
-                    f"1. 10개 후보군 중 가장 확실한 매수 매력도를 가진 **최상위 3개(Top 3) 종목만 엄선**하여 리포트를 작성하십시오.\n"
+                    f"1. 10개 후보군 중 가장 확실한 매수 매력도를 가진 **최상위 3개(Top 3) 종목만 엄선**하여 리포트를 작성하십시오. (절대 4개 이상의 리포트를 출력하지 마십시오)\n"
                     f"2. 각 기업 정보에 제공된 '파이썬 연산 팩트'의 계산식과 결과를 본문에 그대로 인용하며 정성적 해설을 전개하십시오.\n"
                     f"3. 제공된 차트 지표와 뉴스/공시 모멘텀이 시장에 가져올 파장을 객관적으로 융합 분석하십시오.\n\n"
                     f"=== 리포트 작성 항목 (오직 Top 3 종목만 작성하며, 각 종목 분석은 반드시 <ANALYSIS_티커숫자> 와 </ANALYSIS_티커숫자> 태그로 감싸십시오) ===\n"
@@ -752,7 +814,7 @@ with tab4:
                                 st.success(f"✅ '{name}' 종목의 리포트가 내 스크랩북에 저장되었습니다!")
 
 # =======================================================
-# 탭 5: 관심종목 진단 (파이썬 선행 연산 퀀트 공식 적용)
+# 탭 5: 관심종목 진단
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
@@ -799,7 +861,6 @@ with tab5:
                     summary_prompt = f"다음 {name}의 뉴스와 공시 데이터를 누락 없이 상세하게 사실 위주로 통합 요약하라:\n[뉴스]\n{news_str}\n[공시]\n{dart_raw}"
                     lite_summary = call_gemini_lite_summary(summary_prompt)
 
-                    # 💡 탭 5 진단용 파이썬 퀀트 연산 (단기/중기/장기 모두 계산하여 제공)
                     try: float_per = float(fund['per'].replace(',', '')) if fund['per'] != '-' else 0.0
                     except: float_per = 0.0
                     
@@ -810,14 +871,10 @@ with tab5:
                     eps_val = fund.get('eps', 0.0)
                     bps_val = fund.get('bps', 0.0)
                     
-                    # [1] 단기 PEG
                     eps_growth_rate = 15.0 
                     peg_val = float_per / eps_growth_rate if eps_growth_rate > 0 and float_per > 0 else 0.0
-                    
-                    # [2] 중기 상대가치
                     target_valuation_price = eps_val * float_ind_per if eps_val > 0 and float_ind_per > 0 else current_price * 1.15
                     
-                    # [3] 장기 RIM
                     expected_roe = 0.12
                     required_return = 0.08
                     if bps_val > 0:
@@ -839,7 +896,7 @@ with tab5:
                     data_str += f"[정제된 상세 이슈 요약]\n{lite_summary}"
                     
                     prompt = (f"[{name} 진단]\n[파이썬 연산 완료 데이터]\n{data_str}\n\n"
-                              f"당신은 퀀트 애널리스트입니다. 파이썬이 수학적으로 완벽히 연산한 3가지 기간별 팩트 지표(PEG, 상대가치, RIM)를 절대 신뢰하고 기반으로 진단 리포트를 작성하십시오.\n"
+                              f"당신은 퀀트 애널리스트입니다. 파이썬이 수학적으로 연산한 3가지 기간별 팩트 지표(PEG, 상대가치, RIM)를 절대 신뢰하고 진단 리포트를 작성하십시오.\n"
                               f"(당신은 절대로 주가나 수식을 직접 사칙연산하지 마십시오.)\n\n"
                               f"=== 진단 리포트 작성 항목 ===\n"
                               f"- 매수의견 (Buy/Hold/Sell 명시)\n"
