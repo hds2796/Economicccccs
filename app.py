@@ -180,7 +180,7 @@ with st.sidebar:
                 st.rerun()
 
 # =======================================================
-# 투 트랙 API 호출 함수
+# 투 트랙 API 호출 함수 (오류 시 우회 로직 포함)
 # =======================================================
 GEMINI_CONCURRENCY_LIMIT = 3
 _gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
@@ -199,18 +199,47 @@ def call_gemini_with_fallback(prompt, model=MODEL_NAME):
     if not acquired: return "API 호출 대기 시간 초과"
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        return client.models.generate_content(model=model, contents=prompt).text
-    except Exception as e: return f"호출 실패: {e}"
-    finally: _gemini_semaphore.release()
+        try:
+            # 1차 시도: 지정된 모델 (기본값 gemini-3.5-flash)
+            return client.models.generate_content(model=model, contents=prompt).text
+        except Exception as e1:
+            # 2차 시도 (Fallback): 기본 분석 모델이 실패했을 경우 gemini-3-preview로 재시도
+            if model == MODEL_NAME:
+                try:
+                    return client.models.generate_content(model="gemini-3-preview", contents=prompt).text
+                except Exception as e2:
+                    return f"최종 호출 실패 (Flash 및 Preview 모두 에러): {e2}"
+            else:
+                return f"호출 실패: {e1}"
+    except Exception as e:
+        return f"호출 실패: {e}"
+    finally:
+        _gemini_semaphore.release()
 
 def call_gemini_stream_with_fallback(prompt):
     acquired = _gemini_semaphore.acquire(timeout=25)
-    if not acquired: yield "API 호출 대기 시간 초과"; return
+    if not acquired: 
+        yield "API 호출 대기 시간 초과"
+        return
+    
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        for chunk in client.models.generate_content_stream(model=MODEL_NAME, contents=prompt):
-            if chunk.text: yield chunk.text
-    finally: _gemini_semaphore.release()
+        try:
+            # 1차 시도: 3.5-flash 모델로 스트리밍 시도
+            response = client.models.generate_content_stream(model=MODEL_NAME, contents=prompt)
+            for chunk in response:
+                if chunk.text: yield chunk.text
+        except Exception as e1:
+            # 2차 시도 (Fallback): 실패 시 3-preview 모델로 재시도
+            try:
+                fallback_response = client.models.generate_content_stream(model="gemini-3-preview", contents=prompt)
+                yield f"\n[안내] 3.5-flash 서버 응답 지연으로 인해 3-preview 모델로 우회하여 분석을 진행합니다.\n\n"
+                for chunk in fallback_response:
+                    if chunk.text: yield chunk.text
+            except Exception as e2:
+                yield f"\n최종 호출 실패 (Flash 및 Preview 모두 에러): {e2}"
+    finally:
+        _gemini_semaphore.release()
 
 # =======================================================
 # 크롤링 및 데이터 가공 유틸
