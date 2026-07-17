@@ -560,7 +560,7 @@ with tab1:
             with st.spinner("Flash 모델 분석 중..."): st.write_stream(call_gemini_stream_with_fallback(f"지표:\n{json.dumps(market_data)}\n\n요약:\n{lite_summary}\n\n시장 흐름 심층 분석 서술."))
 
 # =======================================================
-# 탭 2: 핵심 경제 (💡 심리지수 시각화 및 향후 전망 섹션 통합)
+# 탭 2: 핵심 경제 (💡 프롬프트 구체화 및 마크다운 정규식 방어)
 # =======================================================
 with tab2:
     st.subheader("핵심 경제 종합 브리핑 및 시장 심리")
@@ -572,7 +572,6 @@ with tab2:
         df_sent['date'] = pd.to_datetime(df_sent['date']).dt.strftime('%Y-%m-%d')
         df_avg = df_sent.groupby('date')['score'].mean().reset_index().set_index('date')
         
-        # 💡 최근 7일치 트렌드만 추출
         df_avg_7d = df_avg.tail(7)
         
         today_str = datetime.now().strftime('%Y-%m-%d')
@@ -586,7 +585,6 @@ with tab2:
                 st.metric("오늘의 평균 시장 심리", f"{today_score:.1f}점", f"{diff:+.1f}p" if len(df_avg) > 1 else "첫 측정")
                 st.caption("0(공포) ◀ 50(중립) ▶ 100(탐욕)\n*최근 7일 트렌드")
             with col_s2:
-                # 💡 7일치 데이터 선 그래프
                 st.line_chart(df_avg_7d['score'], height=150)
                 
     st.divider()
@@ -598,26 +596,30 @@ with tab2:
             with st.spinner("Lite 요약 중..."): 
                 lite_summary = call_gemini_lite_summary("요약하라:\n" + "\n".join([f"- {n['title']}" for n in eco_news[:50]]))
             with st.spinner("Flash 심층 분석 중..."):
-                # 💡 "앞으로 주식시장은?" 항목 추가 및 청산 기한 삭제
                 prompt = (
                     f"당신은 리스크 관리에 철저한 매크로 퀀트 전략가입니다.\n"
                     f"[현재 시장 지표]\n{json.dumps(market_data)}\n"
                     f"[거시 경제 요약]\n{lite_summary}\n\n"
                     f"=== 리포트 작성 항목 ===\n"
                     f"**📰 핵심 경제 종합 브리핑**\n"
-                    f"- (현재 경제 상황 요약)\n"
+                    f"- 제공된 [거시 경제 요약]을 바탕으로 현재 시장에 큰 영향을 미치는 주요 경제/증시 뉴스 3~5가지를 구체적 사실과 함께 상세히 브리핑하십시오.\n"
                     f"**🔮 앞으로 주식시장은?**\n"
                     f"- (향후 시장 전망 및 최대 하방 리스크 점검)\n"
                     f"**🛡️ 대응 전략**\n"
-                    f"- (현재 거시 지표에 기반한 포트폴리오 관리 전략)\n"
-                    f"※ 마지막 줄에는 반드시 현재 시장 심리를 0에서 100 사이의 숫자로 평가하여 아래 형식으로 출력하십시오.\n"
-                    f"[SENTIMENT_SCORE]: 45"
+                    f"- (현재 거시 지표에 기반한 포트폴리오 관리 전략)\n\n"
+                    f"※ 필수 지침: 리포트 맨 마지막 줄에는 반드시 현재 시장 심리를 0에서 100 사이의 숫자로 평가하여 아래와 같은 정확한 포맷으로 출력하십시오. 볼드체나 다른 수식어를 절대 붙이지 마십시오.\n"
+                    f"[SENTIMENT_SCORE]: 50"
                 )
                 full_report = "".join(call_gemini_stream_with_fallback(prompt))
-                if score_match := re.search(r'\[SENTIMENT_SCORE\]:\s*(\d+)', full_report):
+                
+                # 정규식 강화: 특수문자 제거 및 띄어쓰기 유연성 확보
+                clean_report_for_regex = full_report.replace('*', '').replace('#', '')
+                if score_match := re.search(r'\[SENTIMENT_SCORE\]\s*:\s*(\d+)', clean_report_for_regex):
                     c.execute("INSERT INTO sentiment_history (calc_date, score) VALUES (?, ?)", (datetime.now().strftime("%Y-%m-%d"), float(score_match.group(1))))
                     conn.commit()
-                st.session_state.eco_briefing = re.sub(r'\[SENTIMENT_SCORE\]:.*', '', full_report).strip()
+                
+                # 출력 시 점수 부분만 깔끔하게 제거
+                st.session_state.eco_briefing = re.sub(r'\[SENTIMENT_SCORE\].*', '', full_report, flags=re.DOTALL).strip()
                 st.rerun()
 
     if st.session_state.get('eco_briefing'):
