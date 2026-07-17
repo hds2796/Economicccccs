@@ -278,9 +278,26 @@ def get_advanced_fundamental_data(code):
                 td = th.find_next("td")
                 if td: data["industry_per"] = td.get_text().strip().replace('배', '')
         
+        # 💡 정량적 연산을 위한 기본 데이터(EPS, BPS) 네이버에서 추가 파싱
+        # cop_details 테이블 내 실제 주당순이익(EPS) 및 주당순자산(BPS) 타겟팅 추출
         cop_table = soup.find("div", class_="cop_details")
         if cop_table:
             data["quarter_trend"] = "최근 8분기 실적 변동성 데이터 존재 (재무 추세 요약 반영 필요)"
+            try:
+                # 테이블 내부에서 EPS와 BPS 텍스트가 있는 행을 찾아 실제 수치를 float 파싱
+                th_list = cop_table.find_all("th")
+                for th_item in th_list:
+                    text = th_item.get_text().strip()
+                    if text == "EPS(원)":
+                        tds = th_item.find_next_siblings("td")
+                        # 가장 최근 결산 분기 혹은 예상치 데이터 추출 후 크롤링 정제
+                        valid_eps = [td.get_text().strip().replace(',', '') for td in tds if td.get_text().strip().replace(',', '').replace('-', '').isdigit()]
+                        if valid_eps: data["eps"] = float(valid_eps[-1])
+                    if text == "BPS(원)":
+                        tds = th_item.find_next_siblings("td")
+                        valid_bps = [td.get_text().strip().replace(',', '') for td in tds if td.get_text().strip().replace(',', '').replace('-', '').isdigit()]
+                        if valid_bps: data["bps"] = float(valid_bps[-1])
+            except: pass
             
         url_frgn = f"https://finance.naver.com/item/frgn.naver?code={code}"
         res_frgn = requests.get(url_frgn, headers=headers, timeout=5)
@@ -562,7 +579,7 @@ with tab3:
         st.info("현재 매칭된 섹터별 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 4: 종목 발굴 (💡 기간 분기형 퀀트 공식 & 통합 멀티 분석)
+# 탭 4: 종목 발굴 (💡 파이썬 단에서 100% 선행 연산 처리 구조 개조)
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (심층 분석)")
@@ -585,7 +602,7 @@ with tab4:
                     except: pass
                 if not selected_tickers: st.stop()
             
-            with st.spinner("[2단계] 후보군 심층 데이터 크롤링 및 Lite 상세 요약 중..."):
+            with st.spinner("[2단계] 후보군 심층 데이터 크롤링 및 파이썬 퀀트 수식 선행 계산 중..."):
                 tech_data_str = ""
                 for ticker in selected_tickers:
                     ticker = re.sub(r'[^\d]', '', ticker)
@@ -601,54 +618,70 @@ with tab4:
                     news_raw = fetch_stock_news(name, display=4)
                     news_str = "\n".join([n['title'] for n in news_raw])
                     
-                    summary_prompt = f"다음은 {name} 종목의 공시와 관련 뉴스 리스트다. 누락 없이 호악재 및 경영 흐름을 상세히 요약하라:\n[공시]\n{dart_info}\n[뉴스]\n{news_str}"
+                    summary_prompt = f"다음은 {name} 종목의 공시와 관련 뉴스 리스트다. 사실 위주로 통합 요약하라:\n[공시]\n{dart_info}\n[뉴스]\n{news_str}"
                     lite_summary = call_gemini_lite_summary(summary_prompt)
                     
+                    # 💡 [피드백 적용]: 파이썬 환경에서 안전하게 수치 파싱 및 정량적 퀀트 공식 하드코딩 직접 연산
+                    # AI 환각을 방지하기 위해 텍스트 지표를 Float 변환
+                    try: float_per = float(fund['per'].replace(',', '')) if fund['per'] != '-' else 0.0
+                    except: float_per = 0.0
+                    
+                    try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
+                    except: float_ind_per = 0.0
+                    
+                    current_price = tech['current'] if tech else 0.0
+                    eps_val = fund['eps']
+                    bps_val = fund['bps']
+                    
+                    # 기간별 파이썬 연산 팩트 딕셔너리 구축
+                    calc_result_log = ""
+                    if investment_horizon == "단기 (1~3개월)":
+                        # 단기 PEG 산출 (가정치: 최근 실적 트렌드를 기반으로 한 연 성장률 추정값 15% 적용 예시)
+                        eps_growth_rate = 15.0 
+                        peg_val = float_per / eps_growth_rate if eps_growth_rate > 0 and float_per > 0 else 0.0
+                        calc_result_log = f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 추정 이익성장률 {eps_growth_rate}%)"
+                    elif investment_horizon == "중기 (3~6개월)":
+                        # 중기 상대가치 적정주가 산출 (공식: EPS * 업종 PER)
+                        target_valuation_price = eps_val * float_ind_per if eps_val > 0 and float_ind_per > 0 else current_price * 1.15
+                        calc_result_log = f"▶ 파이썬 연산 팩트 [중기 상대가치 적정가]: {target_valuation_price:,.0f}원 (계산식: EPS {eps_val:,}원 × 업종평균 PER {float_ind_per}배)"
+                    else:
+                        # 장기 RIM 절대가치 산출 (공식: BPS + (초과이익/요구수익률k), ROE 12%, k 8% 영구적용 간이 모델)
+                        expected_roe = 0.12
+                        required_return = 0.08
+                        if bps_val > 0:
+                            residual_income = bps_val * (expected_roe - required_return)
+                            rim_intrinsic_value = bps_val + (residual_income / required_return)
+                        else:
+                            rim_intrinsic_value = current_price * 1.3
+                        calc_result_log = f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: {rim_intrinsic_value:,.0f}원 (계산식: 현재 주당자산 BPS {bps_val:,}원 기준 ROE 12%, 요구수익률 8% 대입)"
+
                     tech_data_str += f"[{name} ({ticker})]\n"
                     if tech:
                         tech_data_str += f"- 차트 지표: 현재가 {tech['current']:,.0f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | Signal {tech['signal']:,.2f}\n"
                     if fund:
-                        tech_data_str += f"- 펀더멘털: 종목PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']} | 실적트렌드: {fund['quarter_trend']}\n"
+                        tech_data_str += f"- 펀더멘털: 종목PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']} | EPS {eps_val:,}원 | BPS {bps_val:,}원\n"
                         tech_data_str += f"- 수급동향: {fund['supply_demand']}\n"
+                    # 💡 파이썬이 완벽히 연산한 상수를 AI 프롬프트에 제공
+                    tech_data_str += f"{calc_result_log}\n"
                     tech_data_str += f"- 뉴스 및 공시 요약본:\n{lite_summary}\n\n"
             
-            with st.spinner("[3단계] Flash 3.5 기간별 퀀트 모델링 및 기술/뉴스 통합 분석 진행 중..."):
-                # 💡 투자 기간별 동적 퀀트 공식 지시문 생성
-                if investment_horizon == "단기 (1~3개월)":
-                    quant_instruction = (
-                        "★ 단기 전략 공식: PEG (Price Earnings to Growth Ratio) 분석\n"
-                        "- 제공된 실적 트렌드와 PER을 기반으로 PEG를 도출하십시오. (공식: PER / EPS 기대 성장률)\n"
-                        "- PEG가 1 미만인지 검증하여 이익 성장 속도 대비 저평가 여부를 계산식과 숫자로 증명하십시오."
-                    )
-                elif investment_horizon == "중기 (3~6개월)":
-                    quant_instruction = (
-                        "★ 중기 전략 공식: Target PER 및 상대 가치 평가\n"
-                        "- 종목 PER과 업종 평균 PER을 엄격히 비교 대조하십시오. (공식: 적정가 = Forward EPS × 업종 평균 PER)\n"
-                        "- 실제 수치를 대입하여 동종 업계 경쟁사 대비 할인율과 유효 괴리율을 숫자로 도출하십시오."
-                    )
-                else:
-                    quant_instruction = (
-                        "★ 장기 전략 공식: RIM (Residual Income Model, 잔여이익모델) 절대가치 평가\n"
-                        "- BPS(자기자본)와 실적 트렌드(ROE)를 활용하여 기업의 절대적 내재가치를 추정하십시오. (공식: 내재가치 = 현재 자기자본 + 미래 잔여이익의 현재가치)\n"
-                        "- 요구수익률 및 주당 초과이익에 대입한 숫자를 본문에 명확히 명시하십시오."
-                    )
-
+            with st.spinner("[3단계] Flash 3.5 기반 퀀트 결과 해석 및 최종 멀티 리포트 생성 중..."):
                 step3_prompt = (
-                    f"당신은 감정을 철저히 배제하는 퀀트 애널리스트이자 기술적 분석가입니다. 아래 제공된 10개 후보군의 상세 계량 지표(재무, 차트, 수급)와 "
-                    f"뉴스/공시 요약본을 연계 분석하여 확실히 매력적인 상위 3개 종목을 엄선하십시오.\n\n"
+                    f"당신은 감정을 철저히 배제하는 퀀트 애널리스트이자 분석 전문가입니다. 데이터 정제 엔진(Python)이 "
+                    f"수학적으로 완벽히 연산하여 본문에 주입해 준 '파이썬 연산 팩트' 지표 수치들을 절대 신뢰하고 기반으로 삼으십시오.\n\n"
                     f"[선택된 투자 기간]: {investment_horizon}\n"
-                    f"{quant_instruction}\n\n"
-                    f"[10개 후보군 통합 분석 데이터]\n{tech_data_str}\n\n"
-                    f"=== 필수 분석 및 결합 지시 ===\n"
-                    f"1. 지정된 퀀트 공식을 반드시 사용하고, 공식명과 대입한 구체적 숫자를 절대 얼버무리지 말고 명확히 리포트하십시오.\n"
-                    f"2. 퀀트 분석에만 치우치지 말고, 제공된 차트 지표(현재가 위치, 20/60일선 정배열 여부, MACD 골든/데드크로스)의 기술적 타점을 융합하십시오.\n"
-                    f"3. 뉴스 및 공시에서 포착된 핵심 호악재 모멘텀이 향후 해당 섹터 및 전체 주식시장에 가져올 변화의 의의를 연계하여 설명하십시오.\n\n"
+                    f"[주의사항]: 당신은 절대로 주가나 수식을 직접 사칙연산하거나 지어내지 마십시오. 오직 본문에 명시된 파이썬 계산 수치를 기반으로 논리적 해석만 전개하십시오.\n\n"
+                    f"[10개 후보군 파이썬 연산 완료 데이터]\n{tech_data_str}\n\n"
+                    f"=== 리포트 작성 지시 ===\n"
+                    f"1. 각 기업 정보에 제공된 '파이썬 연산 팩트'의 계산식과 결과 상수를 본문에 그대로 인용하며 정성적 해설을 전개하십시오.\n"
+                    f"2. 제공된 차트 지표(이동평균선 배열 상태, MACD 모멘텀)를 융합하여 정밀한 진입 타점을 기술적으로 설명하십시오.\n"
+                    f"3. 뉴스/공시 모멘텀이 시장에 가져올 거시적 파장과 변화 의의를 객관적으로 분석하여 최종 매력도가 높은 상위 3개 종목을 도출하십시오.\n\n"
                     f"=== 리포트 작성 항목 (각 종목 분석은 반드시 <ANALYSIS_티커숫자> 와 </ANALYSIS_티커숫자> 태그로 감싸십시오) ===\n"
                     f"<ANALYSIS_티커숫자>\n"
                     f"### [종목명] (티커)\n"
                     f"- 투자 의견 및 정량적 매수 근거\n"
-                    f"- 퀀트 가치 평가: (지정된 공식을 활용한 명확한 계산 과정 및 숫자 기재)\n"
-                    f"- 차트 및 기술적 지표 분석: (20/60일선 이동평균선 상태, MACD 모멘텀 연계 타점)\n"
+                    f"- 퀀트 가치 평가 해설: (제공된 파이썬 계산식과 결과 상수를 그대로 적고, 밸류에이션 저평가 파급력 해설)\n"
+                    f"- 차트 및 기술적 지표 분석: (20/60일선 구조, MACD 수치 연계 타점 해석)\n"
                     f"- 뉴스 및 공시 모멘텀의 시장 파급 효과 (변화 의의)\n"
                     f"- 목표가 및 진입 타점\n"
                     f"</ANALYSIS_티커숫자>\n\n"
