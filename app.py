@@ -462,6 +462,7 @@ with tab1:
             analysis_prompt = (f"지표 데이터:\n{json.dumps(market_data)}\n\n[Lite 전처리 요약본]\n{lite_summary}\n\n"
                                f"위 요약 자료와 지표를 근거로, 현재 주식시장의 흐름이 가지는 '구체적 의미'와 '향후 증시에 가져올 변화'를 철저히 객관적인 관점에서 심층 분석하여 서술하라.")
             st.write_stream(call_gemini_stream_with_fallback(analysis_prompt))
+
 # =======================================================
 # 탭 2: 핵심 경제
 # =======================================================
@@ -476,11 +477,9 @@ with tab2:
                     l_sum = call_gemini_lite_summary(f"본 뉴스의 핵심적 사실을 왜곡 없이 상세히 요약하라:\n{n['title']}")
                     flash_p = f"[뉴스 요약]\n{l_sum}\n\n이 사실이 거시 경제 및 관련 주식 섹터에 미칠 중장기 파급 효과와 거시적 변화 의의를 분석하라."
                     st.write(call_gemini_with_fallback(flash_p))
-    else: st.info("조회된 핵심 경제 뉴스가 없습니다.")
+    else: 
+        st.info("조회된 핵심 경제 뉴스가 없습니다.")
 
-# =======================================================
-# 탭 3: 섹터 뉴스
-# =======================================================
 # =======================================================
 # 탭 3: 섹터 뉴스
 # =======================================================
@@ -488,11 +487,9 @@ with tab3:
     st.subheader("섹터별 모멘텀 분석")
     sec_news = g_data.get("sector_news", {}) if g_data else {}
     
-    # 💡 누락되었던 섹터별 뉴스 목록 화면 출력 로직 복구
     if sec_news:
         for sec, items in sec_news.items():
             with st.expander(f"📁 {sec} 섹터 뉴스 ({len(items)}건)"):
-                # 개별 뉴스 타이틀과 링크를 클릭 가능하게 나열
                 for i in items:
                     st.markdown(f"- [{i['title']}]({i.get('link', '#')})")
                 
@@ -505,7 +502,6 @@ with tab3:
                         st.write(call_gemini_with_fallback(flash_p))
     else:
         st.info("현재 매칭된 섹터별 뉴스가 없습니다. (실시간 데이터 수집을 대기 중입니다)")
-                        st.write(call_gemini_with_fallback(flash_p))
 
 # =======================================================
 # 탭 4: 종목 발굴 (투 트랙 최적화 & 상세 요약)
