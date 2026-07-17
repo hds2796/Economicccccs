@@ -64,7 +64,7 @@ NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
 # =======================================================
-# 데이터베이스 초기화 및 DART 고유번호 캐싱 (누수 방지 적용)
+# 데이터베이스 초기화 및 DART 고유번호 캐싱
 # =======================================================
 @st.cache_resource
 def init_db():
@@ -196,7 +196,7 @@ with st.sidebar:
                 st.rerun()
 
 # =======================================================
-# 투 트랙 API 호출 함수 (오류 시 우회 로직 포함)
+# 투 트랙 API 호출 함수
 # =======================================================
 GEMINI_CONCURRENCY_LIMIT = 3
 _gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
@@ -254,7 +254,7 @@ def call_gemini_stream_with_fallback(prompt):
         _gemini_semaphore.release()
 
 # =======================================================
-# 크롤링 및 데이터 가공 유틸 (예외 처리 로깅 추가)
+# 크롤링 및 데이터 가공 유틸
 # =======================================================
 @st.cache_data(ttl=600)
 def get_dart_filings(stock_code):
@@ -317,21 +317,30 @@ def get_advanced_fundamental_data(code):
         url_frgn = f"https://finance.naver.com/item/frgn.naver?code={code}"
         res_frgn = requests.get(url_frgn, headers=headers, timeout=5)
         soup_frgn = BeautifulSoup(res_frgn.text, "html.parser")
-        table = soup_frgn.find("table", class_="type2")
-        if table:
-            trs = table.find_all("tr")[3:8]
-            inst_sum, fore_sum = 0, 0
-            for tr in trs:
-                tds = tr.find_all("td")
-                if len(tds) >= 7:
-                    try:
-                        inst = int(tds[5].get_text().replace(',', ''))
-                        fore = int(tds[6].get_text().replace(',', ''))
-                        inst_sum += inst
-                        fore_sum += fore
-                    except Exception: 
-                        pass
-            data["supply_demand"] = f"최근 5일 누적 -> 기관: {inst_sum:+,}주 / 외국인: {fore_sum:+,}주"
+        
+        # 💡 [피드백 반영] 수급 크롤링 버그 픽스 (onmouseover 속성을 추적하여 정확히 일별 데이터만 5줄 추출)
+        data_rows = soup_frgn.find_all("tr", {"onmouseover": "mouseOver(this)"})
+        inst_sum, fore_sum = 0, 0
+        count = 0
+        for tr in data_rows:
+            if count >= 5: break
+            tds = tr.find_all("td")
+            if len(tds) >= 7:
+                try:
+                    inst_text = tds[5].get_text().strip().replace(',', '')
+                    fore_text = tds[6].get_text().strip().replace(',', '')
+                    inst = int(inst_text) if inst_text else 0
+                    fore = int(fore_text) if fore_text else 0
+                    inst_sum += inst
+                    fore_sum += fore
+                    count += 1
+                except Exception:
+                    pass
+        if count > 0:
+            data["supply_demand"] = f"최근 {count}일 누적 -> 기관: {inst_sum:+,}주 / 외국인: {fore_sum:+,}주"
+        else:
+            data["supply_demand"] = "수급 데이터 수집 불가"
+            
     except Exception as e: 
         print(f"[Fundamental Data Error - {code}] {e}")
     return data
@@ -562,19 +571,17 @@ with tab1:
                 st.write_stream(call_gemini_stream_with_fallback(analysis_prompt))
 
 # =======================================================
-# 탭 2: 핵심 경제 (종합 브리핑 및 시장 심리 지수 추적)
+# 탭 2: 핵심 경제
 # =======================================================
 with tab2:
     st.subheader("핵심 경제 종합 브리핑 및 심리 지수")
     
-    # DB에서 심리 지수 이력 조회 및 동일 날짜 평균 산출
     c.execute("SELECT calc_date, score FROM sentiment_history ORDER BY calc_date ASC")
     sentiment_rows = c.fetchall()
     
     if sentiment_rows:
         df_sent = pd.DataFrame(sentiment_rows, columns=['date', 'score'])
         df_sent['date'] = pd.to_datetime(df_sent['date']).dt.strftime('%Y-%m-%d')
-        # 동일 일자 데이터 평균 계산
         df_avg = df_sent.groupby('date')['score'].mean().reset_index()
         df_avg.set_index('date', inplace=True)
         
@@ -610,7 +617,6 @@ with tab2:
                 
                 full_report = "".join(call_gemini_stream_with_fallback(flash_prompt))
                 
-                # 점수 파싱 및 DB 저장 처리
                 score_match = re.search(r'\[SENTIMENT_SCORE\]:\s*(\d+)', full_report)
                 if score_match:
                     score_val = float(score_match.group(1))
@@ -618,12 +624,10 @@ with tab2:
                     c.execute("INSERT INTO sentiment_history (calc_date, score) VALUES (?, ?)", (today_str, score_val))
                     conn.commit()
                 
-                # 화면 출력 텍스트 저장
                 display_text = re.sub(r'\[SENTIMENT_SCORE\]:.*', '', full_report).strip()
                 st.session_state.eco_briefing = display_text
                 st.rerun()
 
-    # 생성된 종합 브리핑 출력 보존
     if st.session_state.get('eco_briefing'):
         with st.expander("📝 오늘의 거시경제 종합 브리핑", expanded=True):
             st.write(st.session_state.eco_briefing)
@@ -669,7 +673,7 @@ with tab3:
         st.info("현재 매칭된 섹터별 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 4: 종목 발굴 (Top 3 종목 선행 계산)
+# 탭 4: 종목 발굴
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (심층 분석)")
@@ -814,12 +818,14 @@ with tab4:
                                 st.success(f"✅ '{name}' 종목의 리포트가 내 스크랩북에 저장되었습니다!")
 
 # =======================================================
-# 탭 5: 관심종목 진단
+# 탭 5: 관심종목 진단 (💡 폼 초기화 및 보유 상태 연동 반영)
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
     own_status = st.radio("상태", ["미보유", "보유"], horizontal=True, key="add_own_status")
-    with st.form("add_stock"):
+    
+    # 💡 clear_on_submit=True 를 추가하여 종목 추가 시 입력폼 텍스트를 즉시 초기화
+    with st.form("add_stock", clear_on_submit=True):
         new_s = st.text_input("종목명 (예: 삼성전자)")
         c2, c3 = st.columns(2)
         avg_p = c2.text_input("평단가", value="0", disabled=(own_status == "미보유"))
@@ -890,6 +896,12 @@ with tab5:
                     )
 
                     data_str = f"현재가: {current_price:,.0f}\n"
+                    
+                    # 💡 사용자 계좌 보유 정보 주입 로직
+                    if is_owned and avg_price > 0:
+                        current_yield = ((current_price - avg_price) / avg_price) * 100
+                        data_str += f"[내 계좌 보유 정보] 평단가: {avg_price:,.0f}원 | 수량: {quantity}주 | 현재 수익률: {current_yield:+.1f}%\n"
+
                     if tech: data_str += f"[차트] 52주 고/저: {tech['high_52']}/{tech['low_52']} | MACD: {tech['macd']:,.2f}\n"
                     if fund: data_str += f"[펀더멘털] PER: {fund['per']} (업종 {fund['industry_per']}) | PBR: {fund['pbr']} | EPS: {eps_val:,}원 | BPS: {bps_val:,}원 | 수급: {fund['supply_demand']}\n"
                     data_str += f"{calc_result_log}\n"
@@ -900,6 +912,7 @@ with tab5:
                               f"(당신은 절대로 주가나 수식을 직접 사칙연산하지 마십시오.)\n\n"
                               f"=== 진단 리포트 작성 항목 ===\n"
                               f"- 매수의견 (Buy/Hold/Sell 명시)\n"
+                              f"  * 주의: 데이터에 [내 계좌 보유 정보]가 있다면, 현재 수익률과 밸류에이션을 종합하여 '추가매수(Buy)', '보유 유지(Hold)', '익절/손절(Sell)' 중 하나를 객관적으로 제시할 것.\n"
                               f"- 단기/중기/장기 퀀트 밸류에이션 해설: (파이썬 연산 팩트를 인용하여 각 기간별 산출 근거를 서술)\n"
                               f"- 차트 기술적 분석 및 수급 동향 해석\n"
                               f"- 시장 파급 효과 및 주가 변화 의의 분석\n\n"
