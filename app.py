@@ -64,7 +64,7 @@ NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
 # =======================================================
-# 데이터베이스 초기화 및 DART 고유번호 캐싱
+# 데이터베이스 초기화 및 DART 고유번호 캐싱 (누수 방지 적용)
 # =======================================================
 @st.cache_resource
 def init_db():
@@ -196,7 +196,7 @@ with st.sidebar:
                 st.rerun()
 
 # =======================================================
-# 투 트랙 API 호출 함수
+# 투 트랙 API 호출 함수 (오류 시 우회 로직 포함)
 # =======================================================
 GEMINI_CONCURRENCY_LIMIT = 3
 _gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
@@ -254,7 +254,7 @@ def call_gemini_stream_with_fallback(prompt):
         _gemini_semaphore.release()
 
 # =======================================================
-# 크롤링 및 데이터 가공 유틸
+# 크롤링 및 데이터 가공 유틸 (예외 처리 로깅 추가)
 # =======================================================
 @st.cache_data(ttl=600)
 def get_dart_filings(stock_code):
@@ -318,7 +318,6 @@ def get_advanced_fundamental_data(code):
         res_frgn = requests.get(url_frgn, headers=headers, timeout=5)
         soup_frgn = BeautifulSoup(res_frgn.text, "html.parser")
         
-        # 💡 [피드백 반영] 수급 크롤링 버그 픽스 (onmouseover 속성을 추적하여 정확히 일별 데이터만 5줄 추출)
         data_rows = soup_frgn.find_all("tr", {"onmouseover": "mouseOver(this)"})
         inst_sum, fore_sum = 0, 0
         count = 0
@@ -611,7 +610,7 @@ with tab2:
                     f"3. 주식시장에 미치는 영향\n\n"
                     f"그리고 이 모든 상황을 종합하여 '오늘의 시장 심리 지수(Sentiment Index)'를 0부터 100 사이의 숫자로 산출하십시오. "
                     f"(0=극단적 공포/폭락장, 50=중립, 100=극단적 탐욕/폭등장)\n\n"
-                    f"※ 리포트 작성을 마친 후, 반드시 맨 마지막 줄에 아래 파싱 형식으로 심리 지수 점수만 출력하십시오.\n"
+                    f"※ 리포트 작성을 마친 후, 반드시 맨 마지막 줄에 아래 파싱 형식으로 심리 지수 점만 출력하십시오.\n"
                     f"[SENTIMENT_SCORE]: 점수숫자"
                 )
                 
@@ -818,13 +817,12 @@ with tab4:
                                 st.success(f"✅ '{name}' 종목의 리포트가 내 스크랩북에 저장되었습니다!")
 
 # =======================================================
-# 탭 5: 관심종목 진단 (💡 폼 초기화 및 보유 상태 연동 반영)
+# 탭 5: 관심종목 진단 (💡 목표가 종합가중치 개선 및 스크랩 연동)
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
     own_status = st.radio("상태", ["미보유", "보유"], horizontal=True, key="add_own_status")
     
-    # 💡 clear_on_submit=True 를 추가하여 종목 추가 시 입력폼 텍스트를 즉시 초기화
     with st.form("add_stock", clear_on_submit=True):
         new_s = st.text_input("종목명 (예: 삼성전자)")
         c2, c3 = st.columns(2)
@@ -857,7 +855,7 @@ with tab5:
             if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
         with col_btn:
             if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
-                with st.spinner("파이썬 퀀트 수식 선행 계산 및 AI 진단 중..."):
+                with st.spinner("파이썬 퀀트 수식 선행 계산 및 AI 종합 진단 중..."):
                     tech = get_technical_data(code)
                     fund = get_advanced_fundamental_data(code)
                     news_raw = fetch_stock_news(name, display=5)
@@ -897,7 +895,6 @@ with tab5:
 
                     data_str = f"현재가: {current_price:,.0f}\n"
                     
-                    # 💡 사용자 계좌 보유 정보 주입 로직
                     if is_owned and avg_price > 0:
                         current_yield = ((current_price - avg_price) / avg_price) * 100
                         data_str += f"[내 계좌 보유 정보] 평단가: {avg_price:,.0f}원 | 수량: {quantity}주 | 현재 수익률: {current_yield:+.1f}%\n"
@@ -907,16 +904,17 @@ with tab5:
                     data_str += f"{calc_result_log}\n"
                     data_str += f"[정제된 상세 이슈 요약]\n{lite_summary}"
                     
+                    # 💡 프롬프트 개조: 퀀트를 하한/상한선으로 두고 모든 변수 가중치 융합 지시
                     prompt = (f"[{name} 진단]\n[파이썬 연산 완료 데이터]\n{data_str}\n\n"
-                              f"당신은 퀀트 애널리스트입니다. 파이썬이 수학적으로 연산한 3가지 기간별 팩트 지표(PEG, 상대가치, RIM)를 절대 신뢰하고 진단 리포트를 작성하십시오.\n"
-                              f"(당신은 절대로 주가나 수식을 직접 사칙연산하지 마십시오.)\n\n"
+                              f"당신은 퀀트 애널리스트입니다. 파이썬이 선행 연산한 3가지 기간별 팩트 지표(PEG, 상대가치, RIM)를 '기본 밸류에이션 하/상한선'으로 참고하되, 여기에 차트의 기술적 흐름(MACD 등)과 뉴스/공시의 모멘텀 파급력을 '종합적으로 가중 반영'하여 최종 목표가를 산출하십시오.\n"
+                              f"(당신은 절대로 주가나 수식을 직접 사칙연산하지 마십시오. 파이썬 퀀트 수치를 바탕으로 제반 요소를 고려해 정성적 조정을 거친 현실적인 단기/중기/장기 목표가를 도출하십시오.)\n\n"
                               f"=== 진단 리포트 작성 항목 ===\n"
                               f"- 매수의견 (Buy/Hold/Sell 명시)\n"
-                              f"  * 주의: 데이터에 [내 계좌 보유 정보]가 있다면, 현재 수익률과 밸류에이션을 종합하여 '추가매수(Buy)', '보유 유지(Hold)', '익절/손절(Sell)' 중 하나를 객관적으로 제시할 것.\n"
-                              f"- 단기/중기/장기 퀀트 밸류에이션 해설: (파이썬 연산 팩트를 인용하여 각 기간별 산출 근거를 서술)\n"
+                              f"  * 주의: 데이터에 [내 계좌 보유 정보]가 있다면, 현재 수익률과 종합 밸류에이션을 고려하여 '추가매수(Buy)', '보유 유지(Hold)', '익절/손절(Sell)' 중 하나를 객관적으로 제시할 것.\n"
+                              f"- 단기/중기/장기 목표가 산출 논리: (파이썬 퀀트 팩트 + 차트 + 뉴스 모멘텀을 어떻게 종합하여 목표가를 최종 조정했는지 상세히 서술)\n"
                               f"- 차트 기술적 분석 및 수급 동향 해석\n"
                               f"- 시장 파급 효과 및 주가 변화 의의 분석\n\n"
-                              f"※ 마지막 줄은 아래 파싱 형식으로 작성하십시오. (목표가는 파이썬 연산 팩트를 기반으로 숫자로만 도출)\n"
+                              f"※ 마지막 줄은 아래 파싱 형식으로 작성하십시오. (목표가는 모든 요소를 종합한 최종 조정 숫자로 도출)\n"
                               f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가")
                     report = call_gemini_with_fallback(prompt)
                 
@@ -930,8 +928,17 @@ with tab5:
 
         if report_text:
             with st.expander("진단 리포트", expanded=True):
-                st.write(re.sub(r'TARGET_PRICE:.*', '', report_text).strip())
-                st.caption(f"🧠 전처리 요약: {LITE_MODEL_NAME} | 심층 의의 분석: {MODEL_NAME}")
+                # 화면 출력 시 시스템 파싱 태그 정규화 제거
+                display_report = re.sub(r'TARGET_PRICE:.*', '', report_text).strip()
+                st.write(display_report)
+                st.caption(f"🧠 전처리 요약: {LITE_MODEL_NAME} | 심층 의의 종합 분석: {MODEL_NAME}")
+                
+                # 💡 Tab 5 진단 리포트 스크랩북 저장(가격 트래킹) 버튼 추가
+                if st.button("스크랩북에 저장하여 가격 추적하기", key=f"scrap_t5_{p_id}", use_container_width=True):
+                    c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                              (f"{name} 관심종목 진단", report_text, name, ticker, current, tp_s, tp_m, tp_l, bp, datetime.now().strftime("%Y-%m-%d %H:%M"), model_used, current_user))
+                    conn.commit()
+                    st.success(f"✅ '{name}' 종목의 진단 리포트가 스크랩북에 저장되었습니다! (가격 추적 가능)")
         st.divider()
 
 # =======================================================
@@ -991,7 +998,12 @@ with tab6:
                 
                 st.markdown("---")
                 st.markdown("#### 📝 상세 분석 리포트")
-                st.write(analysis.split("[TRACKING_DATA]")[0].strip())
+                
+                # 💡 Tab 4와 Tab 5 양쪽 형식의 파싱 시스템 찌꺼기 텍스트 완벽 제거
+                clean_analysis = analysis.split("[TRACKING_DATA]")[0].strip()
+                clean_analysis = re.sub(r'TARGET_PRICE:.*', '', clean_analysis).strip()
+                
+                st.write(clean_analysis)
                 st.caption(f"🧠 생산 모델: {m_used}")
                 
                 if st.button("삭제", key=f"del_{s_id}", use_container_width=True):
