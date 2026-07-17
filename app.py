@@ -109,7 +109,7 @@ def initialize_dart_codes():
                         stock_code = lst.findtext('stock_code')
                         if stock_code and stock_code.strip():
                             data.append((corp_code, corp_name, stock_code.strip()))
-                    c.executemany("INSERT OR IGNORE INTO dart_corp_codes (corp_code, corp_name, stock_code) VALUES (?, ?, ?)", data)
+                    c.execDirectmany("INSERT OR IGNORE INTO dart_corp_codes (corp_code, corp_name, stock_code) VALUES (?, ?, ?)", data)
                     conn.commit()
         except: pass
 
@@ -382,29 +382,26 @@ def fetch_cached_global_data():
         return json.loads(fh.read().decode('utf-8'))
     except: return None
 
-def fetch_realtime_data_direct(seen_links):
+def fetch_realtime_data_direct():
     if not API_GATEWAY_REALTIME_URL: return None
     try:
-        payload = {"seen_links": list(seen_links)}
+        payload = {"seen_links": []} 
         res = requests.post(API_GATEWAY_REALTIME_URL, json=payload, timeout=30)
         res.raise_for_status()
         return res.json()
     except: return None
 
 # =======================================================
-# 상태 변수 선언 및 데이터 누적 병합 (최신순 유지)
+# 상태 변수 선언 및 데이터 누적 병합 (람다 키 명칭 'sectors' 반영)
 # =======================================================
 cached_data = fetch_cached_global_data() or {}
 
-if "seen_realtime_links" not in st.session_state: 
-    st.session_state.seen_realtime_links = set()
-
-# 💡 수정: 초기 상태를 비워두지 않고 구글 드라이브 캐시로 베이스라인 구축 (섹터 뉴스 증발 방지)
 if "realtime_cache" not in st.session_state: 
     st.session_state.realtime_cache = {
         "market_status": cached_data.get("market_status", {}),
         "realtime_news": cached_data.get("realtime_news", []),
-        "sector_news": cached_data.get("sector_news", {}),
+        # 💡 람다가 보내주는 키 값인 'sectors'와 캐시 결합 연동 안전 장치 추가
+        "sectors": cached_data.get("sectors") or cached_data.get("sector_news", {}),
         "updated_at": cached_data.get("updated_at", "대기 중")
     }
 
@@ -415,34 +412,39 @@ def merge_realtime_data(new_data):
     old_market = old_data.get("market_status", {})
     old_market.update(new_data.get("market_status", {}))
     
-    # 💡 수정: 새로운 뉴스를 무조건 '앞쪽(Prepend)'에 붙여 최신순 유지
     merged_news = dedupe_news(new_data.get("realtime_news", []) + old_data.get("realtime_news", []))
     
-    old_sector = old_data.get("sector_news", {})
-    new_sector = new_data.get("sector_news", {})
-    for sec, items in new_sector.items():
-        # 💡 수정: 새로운 섹터 뉴스도 리스트의 앞쪽에 배치
-        old_sector[sec] = dedupe_news(items + old_sector.get(sec, []))
+    # 💡 키값 불일치 해결: 'sectors'와 'sector_news' 명칭을 모두 통합 처리
+    old_sector = old_data.get("sectors") or old_data.get("sector_news", {})
+    new_sector = new_data.get("sectors") or new_data.get("sector_news", {})
+    
+    merged_sector = {}
+    all_keys = set(old_sector.keys()).union(new_sector.keys())
+    for sec in all_keys:
+        merged_sector[sec] = dedupe_news(new_sector.get(sec, []) + old_sector.get(sec, []))
         
     st.session_state.realtime_cache = {
         "market_status": old_market,
         "realtime_news": merged_news,
-        "sector_news": old_sector,
+        "sectors": merged_sector,
         "updated_at": new_data.get("updated_at", old_data.get("updated_at", "알 수 없음"))
     }
 
-# 갱신 전 렌더링용 변수 확보
+if not st.session_state.realtime_cache.get("realtime_news"):
+    with st.spinner("데이터 로딩 중..."):
+        new_data = fetch_realtime_data_direct()
+        if new_data:
+            merge_realtime_data(new_data)
+
 g_data = st.session_state.realtime_cache
 
 col_title, col_refresh = st.columns([5, 1.2])
 with col_refresh:
     if st.button("실시간 갱신", use_container_width=True):
         with st.spinner("갱신 중..."):
-            new_data = fetch_realtime_data_direct(st.session_state.seen_realtime_links)
+            new_data = fetch_realtime_data_direct()
             if new_data:
                 merge_realtime_data(new_data)
-                for n in new_data.get("realtime_news", []): 
-                    st.session_state.seen_realtime_links.add(n['link'])
                 st.rerun()
 
 with col_title:
@@ -463,14 +465,13 @@ st.divider()
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경제", "섹터 뉴스", "종목 발굴", "관심종목 진단", "스크랩북"])
 
 # =======================================================
-# 탭 1: 실시간 브리핑 (최신순으로 최대 10개 고정 출력)
+# 탭 1: 실시간 브리핑
 # =======================================================
 with tab1:
     st.subheader("실시간 시황 브리핑")
     news_pool = g_data.get("realtime_news", [])
     
     if news_pool:
-        # 최신 병합 리스트에서 10개를 가져옵니다. 10개가 안 되면 있는 것 전부(기존 내역 포함) 최신순으로 출력됩니다.
         with st.expander(f"📰 수집된 실시간 뉴스 (최신 10건 표시 / 총 {len(news_pool)}건 누적)", expanded=True):
             for idx, n in enumerate(news_pool[:10]): 
                 st.markdown(f"{idx+1}. [{n['title']}]({n['link']})")
@@ -493,7 +494,7 @@ with tab1:
                 st.write_stream(call_gemini_stream_with_fallback(analysis_prompt))
 
 # =======================================================
-# 탭 2: 핵심 경제 (투 트랙 최적화)
+# 탭 2: 핵심 경제
 # =======================================================
 with tab2:
     st.subheader("핵심 경제 뉴스 요약")
@@ -510,15 +511,17 @@ with tab2:
         st.info("조회된 핵심 경제 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 3: 섹터 뉴스 (상시 렌더링 유지 완료)
+# 탭 3: 섹터 뉴스 (💡 람다 'sectors' 데이터 연동 완전 정상화)
 # =======================================================
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
-    sec_news = g_data.get("sector_news", {})
+    sec_news = g_data.get("sectors") or cached_data.get("sectors") or g_data.get("sector_news", {})
     
     if sec_news:
+        has_items = False
         for sec, items in sec_news.items():
             if not items: continue
+            has_items = True
             with st.expander(f"📁 {sec} 섹터 뉴스 ({len(items)}건)"):
                 for i in items:
                     st.markdown(f"- [{i['title']}]({i.get('link', '#')})")
@@ -530,11 +533,13 @@ with tab3:
                     with st.spinner("Flash 3.5 주도주 변화 예측 중..."):
                         flash_p = f"[{sec} 섹터 이슈 요약]\n{lite_s}\n\n이 트렌드가 향후 {sec} 섹터 내 주도주 흐름에 가져올 변화와 주식시장에 미칠 파장을 분석하라."
                         st.write(call_gemini_with_fallback(flash_p))
+        if not has_items:
+            st.info("현재 매칭된 섹터별 뉴스가 없습니다.")
     else:
         st.info("현재 매칭된 섹터별 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 4: 종목 발굴 (상세 요약 및 10개 필터링)
+# 탭 4: 종목 발굴
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (심층 분석)")
@@ -638,7 +643,7 @@ with tab4:
                                 conn.commit(); st.success("저장 완료")
 
 # =======================================================
-# 탭 5: 관심종목 진단 (투 트랙 최적화)
+# 탭 5: 관심종목 진단
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
