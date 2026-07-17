@@ -64,7 +64,7 @@ NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
 # =======================================================
-# 데이터베이스 초기화 및 DART 고유번호 캐싱 (누수 방지 적용)
+# 데이터베이스 초기화 및 DART 고유번호 캐싱
 # =======================================================
 @st.cache_resource
 def init_db():
@@ -196,7 +196,7 @@ with st.sidebar:
                 st.rerun()
 
 # =======================================================
-# 투 트랙 API 호출 함수 (오류 시 우회 로직 포함)
+# 투 트랙 API 호출 함수
 # =======================================================
 GEMINI_CONCURRENCY_LIMIT = 3
 _gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
@@ -254,7 +254,7 @@ def call_gemini_stream_with_fallback(prompt):
         _gemini_semaphore.release()
 
 # =======================================================
-# 크롤링 및 데이터 가공 유틸 (예외 처리 로깅 추가)
+# 크롤링 및 데이터 가공 유틸 (동적 3개년 데이터 추출 포함)
 # =======================================================
 @st.cache_data(ttl=600)
 def get_dart_filings(stock_code):
@@ -278,7 +278,7 @@ def get_dart_filings(stock_code):
 
 @st.cache_data(ttl=600)
 def get_advanced_fundamental_data(code):
-    data = {"per": "-", "pbr": "-", "eps": 0, "bps": 0, "industry_per": "-", "quarter_trend": "정보 없음", "supply_demand": "정보 없음"}
+    data = {"per": "-", "pbr": "-", "eps": 0, "bps": 0, "industry_per": "-", "quarter_trend": "정보 없음", "supply_demand": "정보 없음", "eps_history": [], "roe_history": []}
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         url = f"https://finance.naver.com/item/main.naver?code={code}"
@@ -298,19 +298,39 @@ def get_advanced_fundamental_data(code):
         
         cop_table = soup.find("div", class_="cop_details")
         if cop_table:
-            data["quarter_trend"] = "최근 8분기 실적 변동성 데이터 존재 (재무 추세 요약 반영 필요)"
+            data["quarter_trend"] = "최근 실적 및 동적 연산 변수 수집 완료"
             try:
                 th_list = cop_table.find_all("th")
                 for th_item in th_list:
                     text = th_item.get_text().strip()
-                    if text == "EPS(원)":
+                    if "EPS(원)" in text:
                         tds = th_item.find_next_siblings("td")
-                        valid_eps = [td.get_text().strip().replace(',', '') for td in tds if td.get_text().strip().replace(',', '').replace('-', '').isdigit()]
-                        if valid_eps: data["eps"] = float(valid_eps[-1])
-                    if text == "BPS(원)":
+                        valid_eps = []
+                        for td in tds:
+                            val = td.get_text().strip().replace(',', '')
+                            if val and val.replace('.', '', 1).replace('-', '', 1).isdigit():
+                                valid_eps.append(float(val))
+                        if valid_eps:
+                            data["eps"] = valid_eps[-1]
+                            data["eps_history"] = valid_eps[-3:] # 최근 3개년/분기 확보
+                    if "BPS(원)" in text:
                         tds = th_item.find_next_siblings("td")
-                        valid_bps = [td.get_text().strip().replace(',', '') for td in tds if td.get_text().strip().replace(',', '').replace('-', '').isdigit()]
-                        if valid_bps: data["bps"] = float(valid_bps[-1])
+                        valid_bps = []
+                        for td in tds:
+                            val = td.get_text().strip().replace(',', '')
+                            if val and val.replace('.', '', 1).replace('-', '', 1).isdigit():
+                                valid_bps.append(float(val))
+                        if valid_bps: 
+                            data["bps"] = valid_bps[-1]
+                    if "ROE" in text:
+                        tds = th_item.find_next_siblings("td")
+                        valid_roe = []
+                        for td in tds:
+                            val = td.get_text().strip().replace(',', '')
+                            if val and val.replace('.', '', 1).replace('-', '', 1).isdigit():
+                                valid_roe.append(float(val))
+                        if valid_roe: 
+                            data["roe_history"] = valid_roe[-3:] # 최근 3개년/분기 확보
             except Exception as inner_e: 
                 print(f"[Fundamental Parsing Error - {code}] {inner_e}")
             
@@ -610,7 +630,7 @@ with tab2:
                     f"3. 주식시장에 미치는 영향\n\n"
                     f"그리고 이 모든 상황을 종합하여 '오늘의 시장 심리 지수(Sentiment Index)'를 0부터 100 사이의 숫자로 산출하십시오. "
                     f"(0=극단적 공포/폭락장, 50=중립, 100=극단적 탐욕/폭등장)\n\n"
-                    f"※ 리포트 작성을 마친 후, 반드시 맨 마지막 줄에 아래 파싱 형식으로 심리 지수 점만 출력하십시오.\n"
+                    f"※ 리포트 작성을 마친 후, 반드시 맨 마지막 줄에 아래 파싱 형식으로 심리 지수 점수만 출력하십시오.\n"
                     f"[SENTIMENT_SCORE]: 점수숫자"
                 )
                 
@@ -672,7 +692,7 @@ with tab3:
         st.info("현재 매칭된 섹터별 뉴스가 없습니다.")
 
 # =======================================================
-# 탭 4: 종목 발굴
+# 탭 4: 종목 발굴 (동적 변수 연산 적용)
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (심층 분석)")
@@ -695,7 +715,7 @@ with tab4:
                     except: pass
                 if not selected_tickers: st.stop()
             
-            with st.spinner("[2단계] 후보군 심층 데이터 크롤링 및 파이썬 퀀트 수식 선행 계산 중..."):
+            with st.spinner("[2단계] 후보군 심층 데이터 크롤링 및 동적 퀀트 수식 계산 중..."):
                 tech_data_str = ""
                 for ticker in selected_tickers:
                     ticker = re.sub(r'[^\d]', '', ticker)
@@ -723,24 +743,42 @@ with tab4:
                     current_price = tech['current'] if tech else 0.0
                     eps_val = fund.get('eps', 0.0)
                     bps_val = fund.get('bps', 0.0)
+                    eps_history = fund.get('eps_history', [])
+                    roe_history = fund.get('roe_history', [])
                     
                     calc_result_log = ""
                     if investment_horizon == "단기 (1~3개월)":
-                        eps_growth_rate = 15.0 
+                        # 동적 EPS 성장률 연산
+                        if len(eps_history) >= 2 and eps_history[-2] > 0:
+                            eps_growth_rate = ((eps_history[-1] - eps_history[-2]) / eps_history[-2]) * 100
+                            eps_growth_rate = max(5.0, min(eps_growth_rate, 50.0))
+                        else:
+                            eps_growth_rate = 10.0
+                            
                         peg_val = float_per / eps_growth_rate if eps_growth_rate > 0 and float_per > 0 else 0.0
-                        calc_result_log = f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 추정 이익성장률 {eps_growth_rate}%)"
+                        calc_result_log = f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 실적 데이터 기반 동적 이익성장률 {eps_growth_rate:.1f}%)"
+                        
                     elif investment_horizon == "중기 (3~6개월)":
                         target_valuation_price = eps_val * float_ind_per if eps_val > 0 and float_ind_per > 0 else current_price * 1.15
                         calc_result_log = f"▶ 파이썬 연산 팩트 [중기 상대가치 적정가]: {target_valuation_price:,.0f}원 (계산식: EPS {eps_val:,}원 × 업종평균 PER {float_ind_per}배)"
+                        
                     else:
-                        expected_roe = 0.12
+                        # 동적 3개년 가중평균 ROE 연산
+                        if len(roe_history) == 3:
+                            expected_roe = ((roe_history[2] * 3) + (roe_history[1] * 2) + (roe_history[0] * 1)) / 6 / 100
+                        elif len(roe_history) > 0:
+                            expected_roe = roe_history[-1] / 100
+                        else:
+                            expected_roe = 0.10
+                        expected_roe = max(0.05, min(expected_roe, 0.30))
                         required_return = 0.08
+                        
                         if bps_val > 0:
                             residual_income = bps_val * (expected_roe - required_return)
                             rim_intrinsic_value = bps_val + (residual_income / required_return)
                         else:
                             rim_intrinsic_value = current_price * 1.3
-                        calc_result_log = f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: {rim_intrinsic_value:,.0f}원 (계산식: 현재 주당자산 BPS {bps_val:,}원 기준 ROE 12%, 요구수익률 8% 대입)"
+                        calc_result_log = f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: {rim_intrinsic_value:,.0f}원 (계산식: 주당자산 BPS {bps_val:,}원, 3개년 가중평균 ROE {expected_roe*100:.1f}%, 요구수익률 8% 대입)"
 
                     tech_data_str += f"[{name} ({ticker})]\n"
                     if tech:
@@ -817,7 +855,7 @@ with tab4:
                                 st.success(f"✅ '{name}' 종목의 리포트가 내 스크랩북에 저장되었습니다!")
 
 # =======================================================
-# 탭 5: 관심종목 진단 (💡 목표가 종합가중치 개선 및 스크랩 연동)
+# 탭 5: 관심종목 진단 (동적 연산 적용)
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
@@ -855,7 +893,7 @@ with tab5:
             if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
         with col_btn:
             if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
-                with st.spinner("파이썬 퀀트 수식 선행 계산 및 AI 종합 진단 중..."):
+                with st.spinner("파이썬 동적 퀀트 수식 선행 계산 및 AI 종합 진단 중..."):
                     tech = get_technical_data(code)
                     fund = get_advanced_fundamental_data(code)
                     news_raw = fetch_stock_news(name, display=5)
@@ -874,13 +912,27 @@ with tab5:
                     current_price = tech['current'] if tech else current
                     eps_val = fund.get('eps', 0.0)
                     bps_val = fund.get('bps', 0.0)
+                    eps_history = fund.get('eps_history', [])
+                    roe_history = fund.get('roe_history', [])
                     
-                    eps_growth_rate = 15.0 
+                    if len(eps_history) >= 2 and eps_history[-2] > 0:
+                        eps_growth_rate = ((eps_history[-1] - eps_history[-2]) / eps_history[-2]) * 100
+                        eps_growth_rate = max(5.0, min(eps_growth_rate, 50.0))
+                    else:
+                        eps_growth_rate = 10.0
+                        
                     peg_val = float_per / eps_growth_rate if eps_growth_rate > 0 and float_per > 0 else 0.0
                     target_valuation_price = eps_val * float_ind_per if eps_val > 0 and float_ind_per > 0 else current_price * 1.15
                     
-                    expected_roe = 0.12
+                    if len(roe_history) == 3:
+                        expected_roe = ((roe_history[2] * 3) + (roe_history[1] * 2) + (roe_history[0] * 1)) / 6 / 100
+                    elif len(roe_history) > 0:
+                        expected_roe = roe_history[-1] / 100
+                    else:
+                        expected_roe = 0.10
+                    expected_roe = max(0.05, min(expected_roe, 0.30))
                     required_return = 0.08
+                    
                     if bps_val > 0:
                         residual_income = bps_val * (expected_roe - required_return)
                         rim_intrinsic_value = bps_val + (residual_income / required_return)
@@ -888,9 +940,9 @@ with tab5:
                         rim_intrinsic_value = current_price * 1.3
                         
                     calc_result_log = (
-                        f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 추정 이익성장률 {eps_growth_rate}%)\n"
+                        f"▶ 파이썬 연산 팩트 [단기 PEG]: {peg_val:.2f} (계산식: PER {float_per} / 실적 동적 이익성장률 {eps_growth_rate:.1f}%)\n"
                         f"▶ 파이썬 연산 팩트 [중기 상대가치 적정가]: {target_valuation_price:,.0f}원 (계산식: EPS {eps_val:,}원 × 업종평균 PER {float_ind_per}배)\n"
-                        f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: {rim_intrinsic_value:,.0f}원 (계산식: 현재 주당자산 BPS {bps_val:,}원 기준 ROE 12%, 요구수익률 8% 대입)\n"
+                        f"▶ 파이썬 연산 팩트 [장기 RIM 내재가치]: {rim_intrinsic_value:,.0f}원 (계산식: 주당자산 BPS {bps_val:,}원, 3개년 가중평균 ROE {expected_roe*100:.1f}%, 요구수익률 8% 대입)\n"
                     )
 
                     data_str = f"현재가: {current_price:,.0f}\n"
@@ -904,7 +956,6 @@ with tab5:
                     data_str += f"{calc_result_log}\n"
                     data_str += f"[정제된 상세 이슈 요약]\n{lite_summary}"
                     
-                    # 💡 프롬프트 개조: 퀀트를 하한/상한선으로 두고 모든 변수 가중치 융합 지시
                     prompt = (f"[{name} 진단]\n[파이썬 연산 완료 데이터]\n{data_str}\n\n"
                               f"당신은 퀀트 애널리스트입니다. 파이썬이 선행 연산한 3가지 기간별 팩트 지표(PEG, 상대가치, RIM)를 '기본 밸류에이션 하/상한선'으로 참고하되, 여기에 차트의 기술적 흐름(MACD 등)과 뉴스/공시의 모멘텀 파급력을 '종합적으로 가중 반영'하여 최종 목표가를 산출하십시오.\n"
                               f"(당신은 절대로 주가나 수식을 직접 사칙연산하지 마십시오. 파이썬 퀀트 수치를 바탕으로 제반 요소를 고려해 정성적 조정을 거친 현실적인 단기/중기/장기 목표가를 도출하십시오.)\n\n"
@@ -928,12 +979,10 @@ with tab5:
 
         if report_text:
             with st.expander("진단 리포트", expanded=True):
-                # 화면 출력 시 시스템 파싱 태그 정규화 제거
                 display_report = re.sub(r'TARGET_PRICE:.*', '', report_text).strip()
                 st.write(display_report)
                 st.caption(f"🧠 전처리 요약: {LITE_MODEL_NAME} | 심층 의의 종합 분석: {MODEL_NAME}")
                 
-                # 💡 Tab 5 진단 리포트 스크랩북 저장(가격 트래킹) 버튼 추가
                 if st.button("스크랩북에 저장하여 가격 추적하기", key=f"scrap_t5_{p_id}", use_container_width=True):
                     c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                               (f"{name} 관심종목 진단", report_text, name, ticker, current, tp_s, tp_m, tp_l, bp, datetime.now().strftime("%Y-%m-%d %H:%M"), model_used, current_user))
@@ -999,7 +1048,6 @@ with tab6:
                 st.markdown("---")
                 st.markdown("#### 📝 상세 분석 리포트")
                 
-                # 💡 Tab 4와 Tab 5 양쪽 형식의 파싱 시스템 찌꺼기 텍스트 완벽 제거
                 clean_analysis = analysis.split("[TRACKING_DATA]")[0].strip()
                 clean_analysis = re.sub(r'TARGET_PRICE:.*', '', clean_analysis).strip()
                 
