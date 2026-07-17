@@ -23,7 +23,6 @@ from google import genai
 MODEL_NAME = "gemini-3.5-flash"
 LITE_MODEL_NAME = "gemini-3.1-flash-lite"
 
-# 💡 사이드바 및 UI 초기 구조 최적화
 st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 
 # =======================================================
@@ -475,7 +474,6 @@ if not st.session_state.realtime_cache.get("realtime_news"):
 
 g_data = st.session_state.realtime_cache
 
-# 💡 UI 고도화: 메인 최상단에 K 슬라이더 전진 배치 (상시 노출)
 st.markdown("### 📊 실시간 시장 및 시스템 계수 관리")
 col_title, col_k1, col_k2, col_refresh = st.columns([2, 1.8, 3.2, 1.2])
 with col_refresh:
@@ -486,7 +484,7 @@ with col_refresh:
 
 with col_title: st.caption(f"동기화 시점: {g_data.get('updated_at', '알 수 없음')}")
 with col_k1: k_factor = st.slider("⚙️ 리스크 관리 계수 (k)", min_value=1.0, max_value=3.5, value=2.0, step=0.1, help="표준편차 배수 설정")
-with col_k2: st.caption("1.0~1.5 (보수적 손절/단기 대응) ◀ `2.0 (표준 노이즈 차단)` ▶ 2.5~3.5 (추세 매매/버티기)")
+with col_k2: st.caption("1.0~1.5 (보수적 방어) ◀ `2.0 (표준)` ▶ 2.5~3.5 (추세 매매)")
 
 market_data = g_data.get("market_status", {})
 cols = st.columns(4)
@@ -563,7 +561,7 @@ with tab3:
                 if st.button(f"분석", key=f"sec_{sec}"): st.write(call_gemini_with_fallback(f"[{sec} 요약]\n" + call_gemini_lite_summary("\n".join([i['title'] for i in items])) + "\n\n주도주 흐름 분석."))
 
 # =======================================================
-# 탭 4: 종목 발굴 (💡 피드백 적용: 3대 시나리오 밴드 선행 연산 탑재)
+# 탭 4: 종목 발굴 (💡 수치 기반 타당성 증명 강제)
 # =======================================================
 def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     ticker = re.sub(r'[^\d]', '', ticker)
@@ -590,12 +588,10 @@ def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
     except: float_ind_per = 0.0
     
-    # 기계적 손절가 계산
     sl_s = current_price * (1 - user_k * daily_vol * np.sqrt(20)) if daily_vol > 0 else 0.0
     sl_m = current_price * (1 - user_k * daily_vol * np.sqrt(60)) if daily_vol > 0 else 0.0
     sl_l = current_price * (1 - user_k * daily_vol * np.sqrt(250)) if daily_vol > 0 else 0.0
 
-    # 💡 정량적 목표가 밴드 선행 연산 구조 주입
     if eps_val <= 0:
         fund_target_log = (
             f"   - [보수적 시나리오] BPS 자산가치 기준: {bps_val:,.0f}원\n" if bps_val > 0 else f"   - [보수적 시나리오] BPS 자산가치 기준: {current_price * 0.8:,.0f}원\n"
@@ -622,8 +618,8 @@ def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     )
 
     tech_data_str = f"[{name} ({ticker})]\n"
-    if tech: tech_data_str += f"- 차트: 현재가 {tech['current']:,.0f} | 20일선 {tech['ma20']:,.0f} | MACD {tech['macd']:,.2f}\n"
-    if fund: tech_data_str += f"- 재무 비율: PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']}\n"
+    if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(일간) {daily_vol*100:.2f}%\n"
+    if fund: tech_data_str += f"- 재무 비율: PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']} | EPS {eps_val:,}원 | BPS {bps_val:,}원\n"
     tech_data_str += f"{calc_result_log}\n- 요약본:\n{lite_summary}\n\n"
     return tech_data_str
 
@@ -652,14 +648,14 @@ with tab4:
                     for future in concurrent.futures.as_completed(futures):
                         tech_data_str += future.result()
             
-            with st.spinner("[3단계] Flash 3.5 기반 밴드 매칭 및 최종 리포트 도출 중..."):
+            with st.spinner("[3단계] Flash 3.5 기반 목표가 밴드 매칭 및 수치 방어 논리 작성 중..."):
                 step3_prompt = (
                     f"당신은 리스크 관리를 최우선으로 하는 퀀트 애널리스트입니다.\n"
                     f"[10개 후보군 팩트 데이터]\n{tech_data_str}\n\n"
-                    f"=== ⚠️ AI 분석 및 목표가 선택 지침 (환각 금지) ===\n"
+                    f"=== ⚠️ AI 분석 및 목표가 선택 지침 (환각 금지 및 수치 인용 필수) ===\n"
                     f"1. 가장 매력적인 **Top 3 종목만 엄선**하십시오.\n"
                     f"2. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 굳이 이 종목을 지금 사야 하는가?'**에 대한 핵심 투자 아이디어(Why Buy?)를 최상단에 선언하십시오.\n"
-                    f"3. **절대 주가나 목표가를 직접 사칙연산하여 임의의 값을 창조하지 마십시오.** 파이썬이 계산해 준 세 가지 시나리오 밴드 가격([보수적/중립적/공격적]) 중 현재 차트 매물대 저항선에 비추어 가장 합리적인 시나리오를 매칭/선택하여 단기, 중기, 장기 칸을 채우십시오.\n"
+                    f"3. **절대 주가나 목표가를 직접 사칙연산하여 임의의 값을 창조하지 마십시오.** 파이썬이 제공한 [보수적/중립적/공격적] 목표가 밴드 가격 중 현재 상황에 가장 맞는 시나리오를 매칭/선택하십시오.\n"
                     f"4. 편향을 제거하기 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리 작성하여 자가 검열하십시오.\n"
                     f"5. 파이썬이 연산한 '단기/중기/장기 손절가' 데이터를 그대로 신뢰하여 대응 전략을 제시하십시오.\n\n"
                     f"=== 리포트 작성 항목 ===\n"
@@ -669,8 +665,8 @@ with tab4:
                     f"- (가장 강력하고 결정적인 이유 1~2줄 명시)\n"
                     f"**🟢 강세 논리 (Bull Case)**\n"
                     f"**🔴 약세/위험 논리 (Bear Case)**\n"
-                    f"**⚖️ 최종 판단 및 목표가 선택 논리**\n"
-                    f"- 파이썬이 제공한 3가지 시나리오 목표가 중 어떤 가격을 각각 최종 단기/중기/장기 목표가로 '선택'했는지 그 수치적 매칭 관계를 적고, 차트 저항선 돌파 여부와 연계하여 구체적으로 설명하십시오.\n"
+                    f"**⚖️ 최종 판단 및 리스크 평가**\n"
+                    f"- 목표가 도달 논증 (구체적 수치 인용 필수): 파이썬이 제공한 3대 목표가 시나리오 중 최종 선택한 단기/중기/장기 가격을 명시하십시오. 그리고 **반드시 본문에 제공된 팩트 수치(EPS, BPS, PER, 20일선, MACD 등)를 직접 인용하여** 왜 이 목표가가 타당한지 정량적/기술적으로 증명하십시오. (예: '실적이 좋아질 것'이란 모호한 표현 대신, 'BPS 15,000원과 20일선 14,000원을 지지하고 있어...'와 같이 숫자로 논증할 것)\n"
                     f"</ANALYSIS_티커숫자>\n\n"
                     f"※ 마지막 줄은 아래 파싱 형식으로 출력 (손절가 필수)\n"
                     f"[TRACKING_DATA]\n"
@@ -714,7 +710,7 @@ with tab4:
                                 conn.commit(); st.success(f"✅ 리포트 스크랩 완료!")
 
 # =======================================================
-# 탭 5: 관심종목 진단 (💡 피드백 적용: 3대 목표가 시나리오 밴드 완벽 연동 및 화면 출력 복구)
+# 탭 5: 관심종목 진단 (💡 수치 기반 타당성 증명 강제)
 # =======================================================
 with tab5:
     st.subheader("관심종목 진단")
@@ -771,7 +767,7 @@ with tab5:
                 if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
             with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
-                    with st.spinner("파이썬 타임프레임 손절가 및 3대 목표가 밴드 연산 중..."):
+                    with st.spinner("파이썬 타임프레임 연산 및 수치 방어 논리 작성 중..."):
                         tech = get_technical_data(code)
                         fund = get_advanced_fundamental_data(code)
                         news_raw = fetch_stock_news(name, display=5)
@@ -790,12 +786,10 @@ with tab5:
                         try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
                         except: float_ind_per = 0.0
                         
-                        # 손절가 계산 동기화
                         calc_sl_s = current_price * (1 - k_factor * daily_vol * np.sqrt(20)) if daily_vol > 0 else 0.0
                         calc_sl_m = current_price * (1 - k_factor * daily_vol * np.sqrt(60)) if daily_vol > 0 else 0.0
                         calc_sl_l = current_price * (1 - k_factor * daily_vol * np.sqrt(250)) if daily_vol > 0 else 0.0
 
-                        # 💡 관심종목 진단에도 목표가 3대 시나리오 수학적 선행 계산 완벽 이식
                         if eps_val <= 0:
                             fund_target_log = (
                                 f"   - [보수적 시나리오] BPS 자산가치 기준: {bps_val:,.0f}원\n" if bps_val > 0 else f"   - [보수적 시나리오] BPS 자산가치 기준: {current_price * 0.8:,.0f}원\n"
@@ -824,13 +818,14 @@ with tab5:
 
                         data_str = f"현재가: {current_price:,.0f}\n"
                         if is_owned and avg_price > 0: data_str += f"[내 계좌 정보] 평단가: {avg_price:,.0f} | 현재 수익률: {((current_price - avg_price) / avg_price * 100):+.1f}%\n"
-                        if tech: data_str += f"[차트] MACD: {tech['macd']:,.2f}\n"
+                        if tech: data_str += f"[차트/리스크] 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(일간) {daily_vol*100:.2f}%\n"
+                        if fund: data_str += f"[재무 비율] PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']} | EPS {eps_val:,}원 | BPS {bps_val:,}원\n"
                         data_str += f"{calc_result_log}\n[요약]\n{lite_summary}"
                         
                         prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_str}\n\n"
                                   f"당신은 리스크 관리에 철저한 애널리스트입니다.\n"
                                   f"1. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 이 종목을 지금 매수/보유/매도해야 하는가?'**에 대한 핵심 논리를 최상단에 선언하십시오.\n"
-                                  f"2. **절대 가격이나 수식을 직접 계산하여 사칙연산 오류를 내지 마십시오.** 파이썬이 선행 연산하여 제공한 3가지 목표가 시나리오 밴드 가격 중 현재 차트 지지/저항선과 결합하여 가장 실현 타당한 가치 가격을 '선택'하십시오.\n"
+                                  f"2. **절대 가격이나 수식을 직접 계산하여 사칙연산 오류를 내지 마십시오.** 파이썬이 선행 연산하여 제공한 3가지 목표가 시나리오 밴드 가격 중 가장 실현 타당한 가치 가격을 '선택'하십시오.\n"
                                   f"3. 낙관적 편향 제거를 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리하여 자가 검열하십시오.\n"
                                   f"4. 내 계좌 정보가 있다면 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
                                   f"=== 작성 항목 ===\n"
@@ -839,7 +834,7 @@ with tab5:
                                   f"**🟢 강세 논리 (Bull Case)**\n"
                                   f"**🔴 약세/위험 논리 (Bear Case)**\n"
                                   f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                                  f"- 목표가 설정 근거: 파이썬이 제시한 3가지 시나리오 목표가 중 어떤 가격을 각각 최종 단기/중기/장기 목표가로 '선택'했는지 수치적 연계성을 명시하고, 왜 그 시나리오가 모멘텀상 방어 가능한지 상세히 서술하십시오.\n"
+                                  f"- 목표가 도달 논증 (구체적 수치 인용 필수): 파이썬이 제공한 3대 목표가 시나리오 중 최종 선택한 단기/중기/장기 가격을 명시하십시오. 그리고 **반드시 본문에 제공된 팩트 수치(EPS, BPS, 평단가, 수익률, 20일 변동성, 이평선 등)를 직접 인용하여** 왜 이 목표가가 타당한지 정량적/기술적으로 증명하십시오. 두루뭉술한 표현을 배제하고 철저히 숫자로 방어하십시오.\n"
                                   f"※ 마지막 줄은 아래 파싱 형식으로 출력\n"
                                   f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가|단기손절가|중기손절가|장기손절가")
                         report = call_gemini_with_fallback(prompt)
@@ -862,7 +857,6 @@ with tab5:
                     conn.commit(); st.rerun()
 
             if report_text:
-                # 💡 UI 렌더링 수정: AI가 선택 완료한 구체적 수치 지표가 화면 하단에 무조건 나타나도록 명시적 복구
                 with st.expander("진단 리포트", expanded=True):
                     st.write(re.sub(r'TARGET_PRICE:.*', '', report_text).strip())
                     st.divider()
@@ -964,9 +958,9 @@ with tab6:
                         st.progress(min(int(pct_s), 100), text=f"단기 목표가 대비 진행률: **{pct_s:.1f}%**")
                         
                         if min_low > 0 and min_low <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 리스크 관리 상태를 점검하십시오.")
+                            st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 현재 반등했더라도 시스템 룰에 따른 리뷰가 필요합니다.")
                         elif current_p <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 규칙 청산을 고려하십시오.")
+                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 손절을 고려하십시오.")
                     
                     clean_analysis = re.sub(r'TARGET_PRICE:.*', '', analysis.split("[TRACKING_DATA]")[0].strip()).strip()
                     st.markdown("---")
