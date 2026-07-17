@@ -125,7 +125,7 @@ def get_technical_data(code):
     except Exception:
         return None
 
-# 🛠️ 수정한 네이버 금융 PC 기반 펀더멘털 수집기 (기업실적분석 표 직접 파싱)
+# 🛠️ 수정한 펀더멘털 파싱 함수 (우측 고정 지표 영역 크롤링으로 변경)
 @st.cache_data(ttl=600)
 def get_fundamental_data(code):
     try:
@@ -136,42 +136,34 @@ def get_fundamental_data(code):
         
         fund_data = {"per": "-", "pbr": "-", "eps": 0, "bps": 0}
         
-        # 1. 기업실적분석(cop_details) 테이블에서 최신 값 파싱 (가장 정확한 방법)
-        cop_table = soup.find("div", class_="cop_details")
-        if cop_table:
-            trs = cop_table.find_all("tr")
-            for tr in trs:
-                th = tr.find("th")
-                if th:
-                    th_text = th.get_text().strip()
-                    key = None
-                    if "PER" in th_text: key = "per"
-                    elif "PBR" in th_text: key = "pbr"
-                    elif "EPS" in th_text: key = "eps"
-                    elif "BPS" in th_text: key = "bps"
-                    
-                    if key:
-                        tds = tr.find_all("td")
-                        # 최신 연도/분기가 표의 우측에 있으므로 역순으로 탐색
-                        for td in reversed(tds):
-                            txt = td.get_text().strip().replace(",", "")
-                            # 빈칸이나 '-' 가 아닌 유효한 숫자 찾기
-                            if txt and txt != "-" and re.search(r'\d', txt):
-                                val = float(re.search(r'[\d.]+', txt).group())
-                                fund_data[key] = val
-                                break
-                                
-        # 2. cop_table에서 못 찾았을 경우 우측 상단 투자정보 요약 박스에서 2차 시도 (대비책)
-        if fund_data["per"] == "-":
-            per_elem = soup.find(id="_per")
-            if per_elem: fund_data["per"] = float(re.search(r'[\d.]+', per_elem.get_text()).group())
-        if fund_data["pbr"] == "-":
-            pbr_elem = soup.find(id="_pbr")
-            if pbr_elem: fund_data["pbr"] = float(re.search(r'[\d.]+', pbr_elem.get_text()).group())
-        if fund_data["eps"] == 0:
-            eps_elem = soup.find(id="_eps")
-            if eps_elem: fund_data["eps"] = float(re.search(r'[\d.]+', eps_elem.get_text().replace(',', '')).group())
+        # 1. 요약 박스에서 PER, PBR, EPS 추출
+        per_elem = soup.find(id="_per")
+        if per_elem:
+            try: fund_data["per"] = float(re.search(r'[\d.]+', per_elem.get_text()).group())
+            except: pass
             
+        pbr_elem = soup.find(id="_pbr")
+        if pbr_elem:
+            try: fund_data["pbr"] = float(re.search(r'[\d.]+', pbr_elem.get_text()).group())
+            except: pass
+            
+        eps_elem = soup.find(id="_eps")
+        if eps_elem:
+            try: fund_data["eps"] = int(re.sub(r'[^\d]', '', eps_elem.get_text()))
+            except: pass
+
+        # 2. 고정 텍스트 매칭으로 BPS 직접 추출 (가장 확실한 대체 방안)
+        # 테이블의 'th' 태그 내용 중 'BPS'가 적힌 항목을 찾아 바로 옆 'td' 값을 파싱합니다.
+        th_elements = soup.find_all("th")
+        for th in th_elements:
+            if "BPS" in th.get_text():
+                td = th.find_next("td")
+                if td:
+                    txt = re.sub(r'[^\d]', '', td.get_text())
+                    if txt:
+                        fund_data["bps"] = int(txt)
+                        break
+
         return fund_data
     except Exception:
         return {"per": "-", "pbr": "-", "eps": 0, "bps": 0}
@@ -277,8 +269,6 @@ def dedupe_news(news_list):
         if not key or key in seen: continue
         seen.add(key); out.append(n)
     return out
-
-st.title("Project2_Stock")
 
 if "seen_realtime_links" not in st.session_state:
     st.session_state.seen_realtime_links = set()
