@@ -90,6 +90,19 @@ def init_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KEY AUTOINCREMENT, calc_date TEXT, score REAL)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS dart_corp_codes (corp_code TEXT, corp_name TEXT, stock_code TEXT PRIMARY KEY)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, k_factor REAL)''')
+    
+    cursor.execute('''CREATE TABLE IF NOT EXISTS holding_companies (stock_code TEXT PRIMARY KEY, corp_name TEXT)''')
+    cursor.execute("SELECT count(*) FROM holding_companies")
+    if cursor.fetchone()[0] == 0:
+        default_holdings = [
+            ('078930', 'GS'), ('000880', '한화'), ('001040', 'CJ'), ('006260', 'LS'), 
+            ('034730', 'SK'), ('000150', '두산'), ('004800', '효성'), ('028260', '삼성물산'), 
+            ('267250', 'HD현대'), ('004990', '롯데지주'), ('002020', '코오롱'), ('000240', '한국앤컴퍼니'), 
+            ('002790', '아모레G'), ('000210', 'DL'), ('058650', '세아홀딩스'), ('000140', '하이트진로홀딩스'), 
+            ('005720', '넥센'), ('003550', 'LG')
+        ]
+        cursor.executemany("INSERT OR IGNORE INTO holding_companies (stock_code, corp_name) VALUES (?, ?)", default_holdings)
+    
     connection.commit()
 
     columns_to_add = [
@@ -117,6 +130,13 @@ def init_db():
 
 conn = init_db()
 c = conn.cursor()
+
+@st.cache_data(ttl=86400)
+def fetch_holding_ticker_list_from_db():
+    local_conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
+    local_c = local_conn.cursor()
+    local_c.execute("SELECT stock_code FROM holding_companies")
+    return [row[0] for row in local_c.fetchall()]
 
 @st.cache_resource
 def initialize_dart_codes():
@@ -309,8 +329,12 @@ def get_risk_free_rate():
 def get_dart_filings(stock_code):
     if not DART_API_KEY: return "DART API 키 없음"
     try:
-        c.execute("SELECT corp_code FROM dart_corp_codes WHERE stock_code = ?", (stock_code,))
-        row = c.fetchone()
+        local_conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
+        local_c = local_conn.cursor()
+        local_c.execute("SELECT corp_code FROM dart_corp_codes WHERE stock_code = ?", (stock_code,))
+        row = local_c.fetchone()
+        local_conn.close()
+        
         if not row: return "DART 매핑 데이터 없음"
         bgn_de = (datetime.now() - pd.Timedelta(days=90)).strftime("%Y%m%d")
         url = f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={row[0]}&bgn_de={bgn_de}&page_count=5"
@@ -322,8 +346,8 @@ def get_dart_filings(stock_code):
 
 @st.cache_data(ttl=600)
 def get_advanced_fundamental_data(code):
-    data = {"per": "-", "pbr": "-", "eps": 0, "bps": 0, "industry_per": "-", "quarter_trend": "정보 없음", "supply_demand": "정보 없음", "eps_history": [], "roe_history": []}
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    data = {"per": "-", "pbr": "-", "eps": None, "bps": None, "industry_per": "-", "quarter_trend": "정보 없음", "supply_demand": "정보 없음", "eps_history": [], "roe_history": []}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     session = get_session()
     try:
         url = f"https://finance.naver.com/item/main.naver?code={code}"
@@ -363,11 +387,12 @@ def get_advanced_fundamental_data(code):
                     if "EPS(원)" in text:
                         valid_eps = [float(v) for td in th_item.find_next_siblings("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
                         if valid_eps:
-                            if data["eps"] == 0: data["eps"] = valid_eps[-1]
+                            if data["eps"] is None: data["eps"] = valid_eps[-1] 
                             data["eps_history"] = valid_eps[-3:]
                     if "BPS(원)" in text:
                         valid_bps = [float(v) for td in th_item.find_next_siblings("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
-                        if valid_bps and data["bps"] == 0: data["bps"] = valid_bps[-1]
+                        if valid_bps:
+                            if data["bps"] is None: data["bps"] = valid_bps[-1] 
                     if "ROE" in text:
                         valid_roe = [float(v) for td in th_item.find_next_siblings("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
                         if valid_roe: data["roe_history"] = valid_roe[-3:]
@@ -420,7 +445,6 @@ def get_technical_data(code):
         macd = df_series.ewm(span=12, adjust=False).mean() - df_series.ewm(span=26, adjust=False).mean()
         signal = macd.ewm(span=9, adjust=False).mean()
 
-        # 시계열 인덱스 매칭을 통한 완벽한 베타(Beta) 산출
         beta = 1.0
         if not kospi_returns.empty and not returns.empty:
             combined_df = pd.concat([returns, kospi_returns], axis=1, join="inner").dropna()
@@ -543,11 +567,11 @@ def fetch_realtime_data_direct():
     except: return None
 
 # =======================================================
-# 핵심 퀀트 엔진: process_single_ticker 복구 및 CAPM 적용
+# 핵심 퀀트 엔진: 지주사 예외 기반 복원력(Resilience) 패치 (0.5 매직넘버 수정)
 # =======================================================
 def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=False):
     ticker = re.sub(r'[^\d]', '', ticker)
-    if len(ticker) != 6: return ""
+    if len(ticker) != 6: return None
     
     session = get_session()
     try:
@@ -563,64 +587,114 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     
     current_price = tech['current'] if tech else 0.0
     daily_vol = tech['daily_volatility'] if tech else 0.0
-    beta = tech['beta'] if tech and 'beta' in tech else 1.0 # 동적 베타값 확보
+    beta = tech['beta'] if tech and 'beta' in tech else 1.0
     
-    eps_val = fund.get('eps', 0.0)
-    bps_val = fund.get('bps', 0.0)
+    eps_val = fund.get('eps')
+    bps_val = fund.get('bps')
     roe_history = fund.get('roe_history', [])
     eps_history = fund.get('eps_history', [])
     
     try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
     except: float_ind_per = 0.0
 
-    if bps_val > 0 and current_price > 0: fund['pbr'] = f"{current_price / bps_val:.2f}"
-    else: fund['pbr'] = "-"
+    if bps_val is not None and bps_val > 0 and current_price > 0: 
+        fund['pbr'] = f"{current_price / bps_val:.2f}"
+    else: 
+        fund['pbr'] = "-"
 
     eps_growth = 0.0
     if len(eps_history) >= 2 and eps_history[0] != 0:
         eps_growth = (eps_history[-1] - eps_history[0]) / abs(eps_history[0])
         eps_growth = min(max(eps_growth, -0.5), 1.0)
 
-    bps_discount = 1.0
-    if len(eps_history) >= 2 and eps_history[-1] < 0 and eps_history[0] < 0 and eps_history[-1] < eps_history[0]:
-        bps_discount = 0.8
-        
-    conservative_bps = (bps_val * bps_discount) if bps_val > 0 else current_price * 0.8
-
-    # 손절가 캡핑 적용
     sl_s = current_price * (1 - min(user_k * daily_vol * np.sqrt(20), 0.15)) if daily_vol > 0 else current_price * 0.95
     sl_m = current_price * (1 - min(user_k * daily_vol * np.sqrt(60), 0.30)) if daily_vol > 0 else current_price * 0.90
     sl_l = current_price * (1 - min(user_k * daily_vol * np.sqrt(250), 0.50)) if daily_vol > 0 else current_price * 0.80
-
-    # 목표가 연산
     tp_s = current_price * min(1 + user_k * daily_vol * np.sqrt(20), 1.25) if daily_vol > 0 else current_price * 1.05
-
     rf = get_risk_free_rate()
 
-    if eps_val <= 0:
+    holding_ticker_list = fetch_holding_ticker_list_from_db()
+    is_holding = any(kw in name for kw in ['지주', '홀딩스']) or (ticker in holding_ticker_list)
+    
+    structural_warning = ""
+
+    if bps_val is None:
         tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
         tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
-        fund_type = "적자 대용치 (기술적 밴드)"
+        fund_type = "BPS 데이터 누락 (기술적 밴드 대체)"
+        structural_warning = "⚠️ [핵심 데이터 누락] 가치 산정의 기본인 BPS가 누락되어 기술적 밴드로 대체 연산했습니다."
+        conservative_bps = 0.0
+        data_incomplete = True
+        
+    elif is_holding:
+        # [수정] 지주사 할인율 0.6 -> 0.5 변경 적용
+        holding_discount = 0.5  
+        effective_bps = bps_val * holding_discount
+        tp_m = effective_bps
+        fund_type = "지주사 특수 모델 (NAV 50% 할인 앵커링)"
+        
+        if eps_val is None:
+            structural_warning = "⚠️ [지주사 디스카운트 & 일부 데이터 누락] 지주사 할인 0.5를 적용해 가치를 산정했습니다. 단, EPS 수집 실패로 인해 계량 리포트 작성 시 손익 서술이 제한될 수 있습니다."
+        else:
+            structural_warning = f"⚠️ [지주사 디스카운트] 지주회사 구조적 할인을 반영하여 타겟 PBR 0.5 수준(목표가 {tp_m:,.0f}원)으로 강제 앵커링함."
+            
+        required_return = rf + (beta * 0.06) 
+        expected_roe = (roe_history[-1] / 100) if (roe_history and roe_history[-1] > 0) else 0.05
+        tp_l = effective_bps + (effective_bps * (expected_roe - required_return) / required_return)
+        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, ERP 6.0%)"
+        conservative_bps = effective_bps
+        data_incomplete = False
+        
+    elif eps_val is None:
+        tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
+        tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
+        fund_type = "EPS 데이터 누락 (기술적 밴드 대체)"
+        structural_warning = "⚠️ [실적 데이터 누락] 일반 사업회사의 EPS가 수집되지 않아 상대 가치 추정이 불가능하므로 기술적 밴드로 연산했습니다."
+        conservative_bps = bps_val
+        data_incomplete = True
+        
+    elif eps_val <= 0:
+        tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
+        tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
+        fund_type = "적자 운영 기업 (기술적 밴드 대용)"
+        
+        bps_discount = 0.8 if len(eps_history) >= 2 and eps_history[-1] < 0 and eps_history[0] < 0 and eps_history[-1] < eps_history[0] else 1.0
+        conservative_bps = bps_val * bps_discount
+        data_incomplete = False
+        
     else:
         adjusted_ind_per = float_ind_per * (1 + eps_growth) if float_ind_per > 0 else 0.0
-        tp_m = eps_val * adjusted_ind_per if adjusted_ind_per > 0 else eps_val * 10
+        current_per = (current_price / eps_val)
         
-        # [핵심] CAPM 산식에 따른 동적 요구수익률 (ERP 6.0%)
+        tp_m = eps_val * adjusted_ind_per if adjusted_ind_per > 0 else eps_val * 10
+        if current_per > 0 and (adjusted_ind_per / current_per) >= 3.0:
+            fund_type = "상대 가치 (Value Trap 위험)"
+            structural_warning = "⚠️ [단순 PER 컨버전스 부적합] 업종 PER과 3배 이상 괴리가 발생했습니다. 일시적 저평가인지 구조적 결함(특수관계자, 저배당 등)인지 AI가 보수적으로 검증할 것."
+        else:
+            fund_type = "기본 상대 가치 (업종 평균 수렴)"
+            
         required_return = rf + (beta * 0.06) 
         expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
-        
-        tp_l = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
-        fund_type = f"RIM (CAPM 적용: Rf {rf*100:.1f}%, Beta {beta:.2f}, ERP 6.0%)"
+        tp_l = bps_val + (bps_val * (expected_roe - required_return) / required_return)
+        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, ERP 6.0%)"
+        conservative_bps = bps_val
+        data_incomplete = False
 
     if is_discovery_mode:
-        if current_price <= 0: return "" 
-        if eps_val <= 0:
-            if current_price > 0 and conservative_bps < current_price: return ""
+        if data_incomplete:
+            pass 
+        elif is_holding:
+            if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None
+        elif eps_val <= 0:
+            if current_price > 0 and conservative_bps < current_price: return None
         else:
-            if current_price > 0 and (tp_m < current_price or tp_l < current_price): return "" 
+            if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None 
 
     flag_m = "정상" if tp_s <= tp_m else f"⚠️역전됨 (단기 모멘텀 {tp_s:,.0f}원 대비 중기 가치가 낮음)"
     flag_l = "정상" if tp_m <= tp_l else f"⚠️역전됨 (중기 가치 대비 장기 RIM 가치({tp_l:,.0f}원)가 낮음)"
+    
+    struct_warn_line = f"   - 구조적 분석: {structural_warning}\n" if structural_warning else ""
+    bps_disp_val = f"{bps_val:,.0f}원" if bps_val is not None else "데이터 누락"
 
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
@@ -630,17 +704,33 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         f"   - 장기 목표가: {tp_l:,.0f}원\n"
         f"▶ [퀀트 엔진 내부 검증 로그 (리스크 플래그)]:\n"
         f"   - 밸류에이션 모델 타입: {fund_type}\n"
+        f"{struct_warn_line}"
         f"   - 중기 시그널 상태: {flag_m}\n"
         f"   - 장기 시그널 상태: {flag_l}\n"
-        f"   - 참고 BPS 청산가치: {conservative_bps:,.0f}원\n"
+        f"   - 참고 원본 BPS: {bps_disp_val}\n"
     )
+
+    eps_str = f"{eps_val:,}원" if eps_val is not None else "데이터 누락"
+    bps_str = f"{bps_val:,}원" if bps_val is not None else "데이터 누락"
 
     tech_data_str = f"[{name} ({ticker})]\n"
     if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | Beta {beta:.2f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(일간) {daily_vol*100:.2f}%\n"
-    if fund: tech_data_str += f"- 재무 비율: PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']} | EPS {eps_val:,}원 | BPS {bps_val:,}원\n"
+    if fund: tech_data_str += f"- 재무 비율: PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']} | EPS {eps_str} | BPS {bps_str}\n"
     tech_data_str += f"{calc_result_log}\n- 뉴스/공시 요약본:\n{lite_summary}\n\n"
     
-    return tech_data_str
+    return {
+        "ticker": ticker,
+        "name": name,
+        "tp_s": tp_s,
+        "tp_m": tp_m,
+        "tp_l": tp_l,
+        "sl_s": sl_s,
+        "sl_m": sl_m,
+        "sl_l": sl_l,
+        "current_price": current_price,
+        "conservative_bps": conservative_bps,
+        "tech_data_str": tech_data_str
+    }
 
 # =======================================================
 # 상태 변수 선언 및 상단 레이아웃 제어
@@ -838,8 +928,8 @@ with tab4:
             with st.spinner("[3단계] 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                     futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in selected_tickers]
-                    results = [future.result() for future in concurrent.futures.as_completed(futures)]
-                    valid_results = [r for r in results if r and r.strip()]
+                    results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
+                    valid_results = results
 
             tried_tickers = set(selected_tickers)
             max_retry = 2
@@ -861,27 +951,28 @@ with tab4:
                     
                     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                         futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in extra_tickers]
-                        extra_results = [f.result() for f in concurrent.futures.as_completed(futures)]
-                        valid_results += [r for r in extra_results if r and r.strip()]
+                        extra_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
+                        valid_results += extra_results
                     retry_count += 1
-
-            tech_data_str = "".join(valid_results)
 
             if len(valid_results) == 0:
                 st.warning("⚠️ 2회 재시도 보충을 진행했으나, 후보군 전부 밸류에이션상 상승여력이 없어 추천에서 제외되었습니다.")
                 st.session_state.today_recommendation = ""
+                st.session_state.valid_results_cache = []
             else:
+                tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
+                st.session_state.valid_results_cache = valid_results
+                
                 with st.spinner(f"[4단계] 최종 선별된 {len(valid_results)}개 중 Flash 기반 Top 3 보고서 작성 중..."):
                     step3_prompt = (
                         f"당신은 리스크와 기회를 종합적으로 분석하는 전문 퀀트 애널리스트입니다.\n"
-                        f"[시장 전체 핵심 모멘텀 분석 (Lite 모델 제공)]\n{momentum_context}\n\n"
-                        f"[후보군 팩트 데이터(뉴스, 공시, 재무, 차트 포함)]\n{tech_data_str}\n\n"
+                        f"[시장 전체 핵심 모멘텀 분석]\n{momentum_context}\n\n"
+                        f"[후보군 팩트 데이터(뉴스, 공시, 재무, 차트 포함)]\n{tech_data_str_all}\n\n"
                         f"=== ⚠️ AI 분석 지침 ===\n"
-                        f"1. 종합매력도 점수가 높은 **Top 3 종목만 엄선**하십시오.\n"
-                        f"2. **[종합 분석 및 스코어링]** 제공된 모든 데이터(시장 모멘텀, 종목 뉴스, 수급, 펀더멘털, 차트수치등)를 당신의 역량으로 종합하여 **'종합 매력도 점수(0~100점)'**를 1순위로 산정하고 최상단에 명시하십시오.\n"
-                        f"3. 절대 주가나 수식을 임의 계산하지 마시고 파이썬이 연산한 [최종 채택 목표가]와 손절가를 그대로 인용하십시오.\n"
-                        f"4. **[논리적 근거 강제]** 강세/약세 논리를 서술할 때 반드시 뉴스/공시 이슈를 서술하고, 목표가의 타당성을 논증할 때는 파이썬이 제공한 팩트 데이터의 숫자를 직접 인용하여 증명하십시오.\n"
-                        f"5. **[매우 중요]** 목표가가 기간별로 '역전됨' 플래그가 발견된 종목은 단기 오버슈팅 상태입니다. 반드시 <BEAR_CASE>에 '장기 가치 수렴 한계 리스크'를 구체적으로 경고하십시오.\n\n"
+                        f"1. 가장 종합 매력도 점수가 높은 **Top 3 종목만 엄선**하십시오.\n"
+                        f"2. 제공된 모든 데이터를 종합하여 **'종합 매력도 점수(0~100점)'**를 산정하고 최상단에 명시하십시오.\n"
+                        f"3. 강세/약세 논리를 서술할 때 반드시 파이썬이 연산하여 넘겨준 팩트 데이터의 숫자를 인용하여 증명하십시오.\n"
+                        f"4. 역전됨 플래그나 특수 경고 플래그가 발견된 종목은 반드시 <BEAR_CASE>에 구체적으로 경고하십시오.\n\n"
                         f"=== 리포트 작성 항목 ===\n"
                         f"<ANALYSIS_티커숫자>\n"
                         f"### [종목명] (티커)\n"
@@ -889,55 +980,55 @@ with tab4:
                         f"**🎯 핵심 투자 아이디어 및 모멘텀 (Why Buy?)**\n"
                         f"- (뉴스/공시 모멘텀을 기반으로 핵심 매수 이유 작성)\n"
                         f"**🟢 강세 논리 (Bull Case)**\n"
-                        f"**🔴 약세/위험 논리 (Bear Case - 역전 보정 경고 포함)**\n"
-                        f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                        f"- 단기 목표가 논증: (기술적/수급 수치 인용)\n"
-                        f"- 중/장기 목표가 논증: (펀더멘털 수치 인용)\n"
+                        f"**🔴 약세/위험 논리 (Bear Case - 구조적 경고 포함)**\n"
                         f"</ANALYSIS_티커숫자>\n\n"
-                        f"※ 마지막 줄은 아래 파싱 형식으로 출력\n"
-                        f"[TRACKING_DATA]\n"
-                        f"종목명|티커|단기목표가|중기목표가|장기목표가|진입타점|단기손절가|중기손절가|장기손절가"
+                        f"※ 절대 목표가나 손절가 수치를 임의로 작성하지 마십시오. 마지막 줄에 선정된 3개 종목의 티커를 콤마로 구분하여 아래 형식으로 반드시 출력하십시오.\n"
+                        f"[SELECTED_TICKERS]: 000000, 111111, 222222"
                     )
                     st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step3_prompt))
 
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
+        cached_results = st.session_state.get('valid_results_cache', [])
+        
         with st.expander("추천 리포트"):
-            display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw.split("[TRACKING_DATA]")[0].strip())
+            display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw.split("[SELECTED_TICKERS]")[0].strip())
             st.write(display_text)
             
-            if "[TRACKING_DATA]" in raw:
-                block = raw.split("[TRACKING_DATA]")[1].strip().replace("```", "")
-                parsed_rows = []
-                for line in block.split('\n'):
-                    if not line.strip(): continue
-                    data = line.split('|')
-                    if len(data) >= 9: 
-                        parsed_rows.append((data[0].strip(), data[1].strip(), parse_won(data[2]), parse_won(data[3]), parse_won(data[4]), parse_won(data[5]), parse_won(data[6]), parse_won(data[7]), parse_won(data[8])))
-                
-                price_map = fetch_current_prices([r[1] for r in parsed_rows])
-                cols_rec = st.columns(3)
-                
-                for idx, (name, tick, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l) in enumerate(parsed_rows):
-                    code = re.sub(r'[^\d]', '', tick)
-                    price_info = price_map.get(code, {})
-                    current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
+            if "[SELECTED_TICKERS]" in raw:
+                match = re.search(r'\[SELECTED_TICKERS\]\s*:\s*([\d\s,]+)', raw)
+                if match:
+                    selected_ticks = [t.strip() for t in match.group(1).split(',') if len(t.strip()) == 6]
+                    price_map = fetch_current_prices(selected_ticks)
+                    cols_rec = st.columns(3)
                     
-                    with cols_rec[idx % 3]:
-                        with st.container(border=True):
-                            st.markdown(f"**{name}** `{tick}`")
-                            if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
-                            c_tp, c_bp = st.columns(2)
-                            c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}<br>장: {tp_l:,.0f}", unsafe_allow_html=True)
-                            c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
-                            
-                            if st.button("스크랩", key=f"rec_s_{tick}", use_container_width=True):
-                                match = re.search(f"<ANALYSIS_{code}>(.*?)</ANALYSIS_{code}>", raw, re.DOTALL)
-                                specific_analysis = match.group(1).strip() if match else display_text
-                                c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                          (f"{name} 퀀트 심층분석", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user))
-                                conn.commit()
-                                st.success(f"✅ 리포트 스크랩 완료!")
+                    for idx, tick in enumerate(selected_ticks):
+                        tick_data = next((r for r in cached_results if r['ticker'] == tick), None)
+                        if not tick_data: continue
+                        
+                        name = tick_data['name']
+                        tp_s, tp_m, tp_l = tick_data['tp_s'], tick_data['tp_m'], tick_data['tp_l']
+                        sl_s, sl_m, sl_l = tick_data['sl_s'], tick_data['sl_m'], tick_data['sl_l']
+                        
+                        price_info = price_map.get(tick, {})
+                        current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
+                        
+                        with cols_rec[idx % 3]:
+                            with st.container(border=True):
+                                st.markdown(f"**{name}** `{tick}`")
+                                if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
+                                c_tp, c_bp = st.columns(2)
+                                c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}<br>장: {tp_l:,.0f}", unsafe_allow_html=True)
+                                c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
+                                
+                                if st.button("스크랩", key=f"rec_s_{tick}", use_container_width=True):
+                                    analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw, re.DOTALL)
+                                    specific_analysis = analysis_match.group(1).strip() if analysis_match else display_text
+                                    
+                                    c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                              (f"{name} 퀀트 심층분석", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, current, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user))
+                                    conn.commit()
+                                    st.success(f"✅ 리포트 스크랩 완료!")
 
 with tab5:
     st.subheader("관심종목 진단")
@@ -995,42 +1086,35 @@ with tab5:
             with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
                     with st.spinner("파이썬 연산 및 수치 방어 논리 작성 중..."):
-                        data_str_base = process_single_ticker(ticker, "단기/중기/장기 종합", k_factor, is_discovery_mode=False)
+                        data_dict = process_single_ticker(ticker, "단기/중기/장기 종합", k_factor, is_discovery_mode=False)
+                        if not data_dict:
+                            st.error("데이터 수집 실패")
+                            continue
+                            
                         extra_ctx = f"\n현재가: {current:,.0f}\n"
                         if is_owned and avg_price > 0: extra_ctx += f"[내 계좌 정보] 평단가: {avg_price:,.0f} | 현재 수익률: {((current - avg_price) / avg_price * 100):+.1f}%\n"
                         
-                        prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_str_base}\n{extra_ctx}\n\n"
+                        prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_dict['tech_data_str']}\n{extra_ctx}\n\n"
                                   f"당신은 리스크와 기회를 종합적으로 분석하는 전문 퀀트 애널리스트입니다.\n"
-                                  f"1. 파이썬이 선행 연산하여 제공한 [최종 채택 목표가] 가격을 그대로 채택하여 진단하십시오.\n"
-                                  f"2. **[종합 매력도 점수]** 해당 종목의 뉴스/이슈와 퀀트 수치, 차트수치를 스스로 가중치 부여하여 **'종합 매력도 점수(0~100점)'**를 산정하십시오.\n"
-                                  f"3. **[논리적 근거 강제]** 현황 및 촉매제를 설명할 때는 반드시 제공된 '뉴스/공시 요약본'의 구체적 이슈를 인용하고, '목표가의 타당성'을 논증할 때는 제공된 팩트 데이터(EPS, BPS, 변동성 등)의 '숫자'를 직접 인용하여 방어하십시오.\n"
-                                  f"4. **[위험 요소]** '역전됨' 플래그가 발견된 종목은 반드시 <BEAR_CASE>에 구체적인 오버슈팅 리스크를 서술하십시오.\n"
-                                  f"5. 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
+                                  f"1. **[종합 매력도 점수]** 해당 종목의 뉴스/이슈와 퀀트 수치, 차트수치를 스스로 가중치 부여하여 **'종합 매력도 점수(0~100점)'**를 산정하십시오.\n"
+                                  f"2. **[논리적 근거 강제]** 현황 및 촉매제를 설명할 때는 반드시 제공된 '뉴스/공시 요약본'의 구체적 이슈를 인용하십시오.\n"
+                                  f"3. **[위험 요소]** '역전됨' 플래그나 특수 구조적 경고가 발견된 종목은 반드시 <BEAR_CASE>에 구체적인 오버슈팅 및 밸류 트랩 리스크를 서술하십시오.\n"
+                                  f"4. 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
                                   f"=== 작성 항목 ===\n"
                                   f"**🎯 종합 매력도 점수: [00]/100점**\n"
                                   f"**🎯 핵심 투자 아이디어 (Why Buy/Hold/Sell?)**\n"
                                   f"**🟢 강세 논리 (Bull Case)**\n"
                                   f"**🔴 약세/위험 논리 (Bear Case)**\n"
-                                  f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                                  f"- 단기 목표가 논증: (기술적 수치를 인용하여 작성)\n"
-                                  f"- 중/장기 목표가 논증: (펀더멘털 수치를 인용하여 작성)\n"
-                                  f"※ 마지막 줄은 아래 파싱 형식으로 출력\n"
-                                  f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가|단기손절가|중기손절가|장기손절가")
-                    
-                    report = call_gemini_with_fallback(prompt)
-                    tp_match = re.search(r'TARGET_PRICE:\s*([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|(.*)', report)
-                    
-                    n_tp_s = parse_won(tp_match.group(1)) if tp_match else 0.0
-                    n_tp_m = parse_won(tp_match.group(2)) if tp_match else 0.0
-                    n_tp_l = parse_won(tp_match.group(3)) if tp_match else 0.0
-                    n_bp = parse_won(tp_match.group(4)) if tp_match else 0.0
-                    n_sl_s = parse_won(tp_match.group(5)) if tp_match else 0.0
-                    n_sl_m = parse_won(tp_match.group(6)) if tp_match else 0.0
-                    n_sl_l = parse_won(tp_match.group(7)) if tp_match else 0.0
+                                  f"**⚖️ 최종 판단 및 리스크 평가**")
+                        
+                        report = call_gemini_with_fallback(prompt)
+                        
+                        n_tp_s, n_tp_m, n_tp_l = data_dict['tp_s'], data_dict['tp_m'], data_dict['tp_l']
+                        n_sl_s, n_sl_m, n_sl_l = data_dict['sl_s'], data_dict['sl_m'], data_dict['sl_l']
 
-                    c.execute("UPDATE portfolio SET report_text=?, tp_s=?, tp_m=?, tp_l=?, bp=?, sl_s=?, sl_m=?, sl_l=?, model_used=?, report_time=? WHERE id=?", 
-                              (report, n_tp_s, n_tp_m, n_tp_l, n_bp, n_sl_s, n_sl_m, n_sl_l, MODEL_NAME, datetime.now().strftime("%Y-%m-%d %H:%M"), p_id))
-                    conn.commit(); st.rerun()
+                        c.execute("UPDATE portfolio SET report_text=?, tp_s=?, tp_m=?, tp_l=?, bp=?, sl_s=?, sl_m=?, sl_l=?, model_used=?, report_time=? WHERE id=?", 
+                                  (report, n_tp_s, n_tp_m, n_tp_l, current, n_sl_s, n_sl_m, n_sl_l, MODEL_NAME, datetime.now().strftime("%Y-%m-%d %H:%M"), p_id))
+                        conn.commit(); st.rerun()
             with col_del:
                 if st.button("개별 삭제", key=f"del_t5_{p_id}", use_container_width=True):
                     c.execute("DELETE FROM portfolio WHERE id=?", (p_id,))
@@ -1038,7 +1122,7 @@ with tab5:
 
             if report_text:
                 with st.expander("진단 리포트"):
-                    st.write(re.sub(r'TARGET_PRICE:.*', '', report_text).strip())
+                    st.write(report_text)
                     st.divider()
                     col_tgt, col_sl = st.columns(2)
                     with col_tgt:
@@ -1141,9 +1225,8 @@ with tab6:
                         elif current_p <= sl_s and sl_s > 0:
                             st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 손절을 고려하십시오.")
                     
-                    clean_analysis = re.sub(r'TARGET_PRICE:.*', '', analysis.split("[TRACKING_DATA]")[0].strip()).strip()
                     st.markdown("---")
-                    st.write(clean_analysis)
+                    st.write(analysis)
                     
                     if st.button("개별 삭제", key=f"del_t6_{s_id}", use_container_width=True):
                         c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,))
