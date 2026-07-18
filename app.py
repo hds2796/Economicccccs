@@ -994,159 +994,159 @@ with tab3:
                             st.write(call_gemini_with_fallback(f"[{sec} 요약]\n{l_sum}\n\n위 요약을 바탕으로 해당 섹터의 주도주 흐름과 향후 모멘텀을 심층 분석하라."))
 
 with tab4:
-    st.subheader("종목 발굴 (멀티 스트래티지 고속 운용)")
-    st.caption("리포트 유니버스 전체 풀을 대상으로 선택한 투자 기간의 퀀트 수치, 차트 지표, 실시간 뉴스 모멘텀을 분석해 매력도 최상위 3종목을 추천합니다.")
-    
-    investment_horizon = st.radio("포트폴리오 투자 기간", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True, key="recommend_horizon_radio")
-    
-    analyst_universe = cached_data.get("analyst_universe", {})
-    realtime_news_pool = g_data.get("realtime_news", [])
+    st.subheader("종목 발굴 (병렬 고속 분석)")
+    investment_horizon = st.radio("투자기간", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
 
     if st.button("추천 종목 발굴", use_container_width=True, key="btn_recommend"):
-    import time
-    t_start = time.time()
-    
-    all_raw_news = (g_data.get("realtime_news", []) if g_data else []) + (cached_data.get("eco_news", []) if cached_data else [])
-    sec_data = g_data.get("sectors") or cached_data.get("sectors") or {}
-    for sec, items in sec_data.items():
-        all_raw_news.extend(items[:30]) 
-        
-    rec_news = dedupe_news(all_raw_news)
-    
-    if not rec_news: 
-        st.error("분석 대상 뉴스 풀이 비어있습니다.")
-    else:
-        with st.spinner("[1단계] Lite 모델이 수집된 핵심 뉴스를 바탕으로 시장 전체 모멘텀을 추출 중..."):
-            t1 = time.time()
-            news_str = "\n".join([f"- {n.get('title', '')}: {n.get('summary', '')}" for n in rec_news])
-            
-            # ▼▼▼ [수정] 무제한 출력 지시를 없애고, 분량/개수를 명확히 제한 ▼▼▼
-            momentum_context = call_gemini_lite_summary(
-                f"다음은 현재 시장의 실시간, 거시경제, 섹터별 핵심 뉴스 목록이다. "
-                f"이 중 시장을 지배하는 핵심 테마 3~5개만 골라, 각 테마당 2~3문장으로 "
-                f"핵심 근거와 관련 종목/섹터를 요약하라. 전체 800자를 넘기지 마라:\n\n{news_str}"
-            )
-            print(f"[TIMING] 뉴스풀 {len(rec_news)}건 / Lite 모멘텀 추출: {time.time()-t1:.1f}초")
+        t_start = time.time()
 
-        with st.spinner("[2단계] 추출된 모멘텀 기반으로 1차 후보군 발굴 중..."):
-            t2 = time.time()
-            prompt = f"투자 [{investment_horizon}] 모멘텀 종목 10개 6자리 JSON 배열 출력.\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"000000\", \"111111\"] 형태의 배열만 출력하시오."
-            res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
-            print(f"[TIMING] 티커 추출: {time.time()-t2:.1f}초")
-            
-            selected_tickers = []
-            matches = re.findall(r'"(\d{6})"', res)
-            if matches:
-                selected_tickers = list(dict.fromkeys(matches))[:10]
-        
-        print(f"[TIMING] 1단계 전체 누적: {time.time()-t_start:.1f}초")
-        ...
+        all_raw_news = (g_data.get("realtime_news", []) if g_data else []) + (cached_data.get("eco_news", []) if cached_data else [])
+        sec_data = g_data.get("sectors") or cached_data.get("sectors") or {}
+        for sec, items in sec_data.items():
+            all_raw_news.extend(items[:30])
 
-        with st.spinner(f"[2단계] 10개 후보군 퀀트/차트 연산 및 애널리스트 목표가 교차검증 연동 중..."):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True, analyst_universe) for t in selected_tickers]
-                valid_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
-            
-        if not valid_results:
-            st.error("기계적 리스크 필터를 통과한 종목이 존재하지 않습니다.")
-            st.stop()
-            
-        with st.spinner("[3단계] 퀀트 수치 정량 팩트 로그 및 컨센서스 괴리율 기반 최종 심층 리포트 컴파일 중..."):
-            tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
-            st.session_state.quant_results_cache = valid_results
-            
-            step3_prompt = (
-                f"당신은 전문 매크로 퀀트 애널리스트입니다. 투자 판단 기간 국면은 **{investment_horizon}**입니다.\n"
-                f"파이썬 기계 엔진이 컨센서스 목표가 교차 검증까지 마친 아래 팩트 로그 데이터를 정밀 분석하십시오.\n\n"
-                f"[파이썬 엔진 연산 및 교차 검증 팩트 로그]:\n{tech_data_str_all}\n"
-                f"[실시간 시장 뉴스 컨텍스트]:\n{news_context}\n\n"
-                f"=== ⚠️ AI 심사 및 작성 지침 ===\n"
-                f"1. **실시간 뉴스 모멘텀, 차트 수치(이평선, MACD), 그리고 퀀트 밸류에이션(EPS, BPS)**을 종합하여 매력도를 객관적으로 산출하고 Top 3 종목을 엄선하십시오.\n"
-                f"2. 각 종목에 대해 0~100점의 **[종합 매력도 점수]**를 부여하되, 파이썬 로그에 기재된 애널리스트 목표가 트렌드(연속 상향/하향) 및 '교차검증: ⚠️' 경고 플래그를 점수에 철저히 가감하십시오.\n"
-                f"3. 강세(Bull) 및 약세(Bear) 논리를 서술할 때는 파이썬이 연산하여 로그에 찍어준 숫자(목표가, 변동성, 이격도 등)만 인용하십시오.\n\n"
-                f"=== 리포트 작성 포맷 ===\n"
-                f"<ANALYSIS_종목명>\n"
-                f"### [종목명]\n"
-                f"**🎯 {investment_horizon} 종합 매력도 점수: [00]/100점**\n"
-                f"**🟢 강세 논리 (Bull Case):** (퀀트 데이터, 차트 이격 수치, 뉴스 모멘텀 및 목표가 트렌드를 융합하여 구체적 기술)\n"
-                f"**🔴 위험 논리 (Bear Case):** (엔진 내부 리스크 플래그, 가치 역전 현상, 증권사 컨센서스 오차 및 하방 리스크 서술)\n"
-                f"</ANALYSIS_종목명>\n\n"
-                f"※ 수치나 목표가 밴드를 임의로 가공하지 마십시오. 마지막 줄은 반드시 [SELECTED_NAMES]: 종목명1, 종목명2, 종목명3 형식으로 종료해야 합니다."
-            )
-            st.session_state.top3_report = "".join(call_gemini_stream_with_fallback(step3_prompt))
+        rec_news = dedupe_news(all_raw_news)
 
-    if st.session_state.get('top3_report'):
-        raw_top3 = st.session_state.top3_report
-        cached_results = st.session_state.get('quant_results_cache', [])
-        
-        with st.container(border=True):
-            st.markdown("### 📝 퀀트-모멘텀 컨센서스 통합 TOP 3 리포트")
-            display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw_top3.split("[SELECTED_NAMES]")[0].strip())
-            st.markdown(display_text)
-            
-            if "[SELECTED_NAMES]" in raw_top3:
-                match = re.search(r'\[SELECTED_NAMES\]\s*:\s*([^%\n\r]+)', raw_top3)
+        if not rec_news:
+            st.error("분석 대상 뉴스 풀이 비어있습니다.")
+        else:
+            with st.spinner("[1단계] Lite 모델이 수집된 핵심 뉴스를 바탕으로 시장 전체 모멘텀을 추출 중..."):
+                t1 = time.time()
+                news_str = "\n".join([f"- {n.get('title', '')}: {n.get('summary', '')}" for n in rec_news])
+                momentum_context = call_gemini_lite_summary(
+                    f"다음은 현재 시장의 실시간, 거시경제, 섹터별 핵심 뉴스 목록이다. "
+                    f"이 중 시장을 지배하는 핵심 테마 3~5개만 골라, 각 테마당 2~3문장으로 "
+                    f"핵심 근거와 관련 종목/섹터를 요약하라. 전체 800자를 넘기지 마라:\n\n{news_str}"
+                )
+                print(f"[TIMING] 뉴스풀 {len(rec_news)}건 / Lite 모멘텀 추출: {time.time()-t1:.1f}초")
+
+            with st.spinner("[2단계] 추출된 모멘텀 기반으로 1차 후보군 발굴 중..."):
+                t2 = time.time()
+                prompt = f"투자 [{investment_horizon}] 모멘텀 종목 10개 6자리 JSON 배열 출력.\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"000000\", \"111111\"] 형태의 배열만 출력하시오."
+                res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
+                print(f"[TIMING] 1차 티커 추출: {time.time()-t2:.1f}초")
+
+                selected_tickers = []
+                matches = re.findall(r'"(\d{6})"', res)
+                if matches:
+                    selected_tickers = list(dict.fromkeys(matches))[:10]
+
+            if not selected_tickers:
+                st.error("⚠️ AI가 조건에 맞는 종목을 추출하지 못했거나 API 응답이 지연되었습니다. 잠시 후 다시 시도해주세요.")
+                st.stop()
+
+            with st.spinner("[3단계] 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
+                t3 = time.time()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                    futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in selected_tickers]
+                    results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
+                    valid_results = results
+                print(f"[TIMING] 3단계 병렬 크롤링({len(selected_tickers)}종목): {time.time()-t3:.1f}초")
+
+            tried_tickers = set(selected_tickers)
+            max_retry = 2
+            retry_count = 0
+
+            while len(valid_results) < 10 and retry_count < max_retry:
+                with st.spinner(f"[보충 단계] 부족분 보충 중 (시도 {retry_count+1}/{max_retry})..."):
+                    t_retry = time.time()
+                    deficit = 10 - len(valid_results)
+                    extra_prompt = f"다음 티커들을 제외하고, 투자 [{investment_horizon}] 모멘텀 종목 {deficit}개 6자리 JSON 배열 출력.\n(제외: {', '.join(tried_tickers)})\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"000000\", \"111111\"] 형태의 배열만 출력하시오."
+                    extra_res = call_gemini_with_fallback(extra_prompt, model=LITE_MODEL_NAME)
+
+                    extra_tickers = []
+                    ex_matches = re.findall(r'"(\d{6})"', extra_res)
+                    if ex_matches:
+                        extra_tickers = [t for t in list(dict.fromkeys(ex_matches)) if t not in tried_tickers][:deficit]
+
+                    if not extra_tickers: break
+                    tried_tickers.update(extra_tickers)
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                        futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in extra_tickers]
+                        extra_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
+                        valid_results += extra_results
+                    retry_count += 1
+                    print(f"[TIMING] 보충 {retry_count}회차: {time.time()-t_retry:.1f}초")
+
+            if len(valid_results) == 0:
+                st.warning("⚠️ 2회 재시도 보충을 진행했으나, 후보군 전부 밸류에이션상 상승여력이 없어 추천에서 제외되었습니다.")
+                st.session_state.today_recommendation = ""
+                st.session_state.valid_results_cache = []
+            else:
+                tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
+                st.session_state.valid_results_cache = valid_results
+
+                with st.spinner(f"[4단계] 최종 선별된 {len(valid_results)}개 중 Flash 기반 Top 3 보고서 작성 중..."):
+                    t4 = time.time()
+                    step3_prompt = (
+                        f"당신은 리스크와 기회를 종합적으로 분석하는 전문 퀀트 애널리스트입니다.\n"
+                        f"[시장 전체 핵심 모멘텀 분석]\n{momentum_context}\n\n"
+                        f"[후보군 팩트 데이터(뉴스, 공시, 재무, 차트 포함)]\n{tech_data_str_all}\n\n"
+                        f"=== ⚠️ AI 분석 지침 ===\n"
+                        f"1. 가장 매력적인 **Top 3 종목만 엄선**하십시오.\n"
+                        f"2. 제공된 모든 데이터를 종합하여 **'종합 매력도 점수(0~100점)'**를 산정하고 최상단에 명시하십시오.\n"
+                        f"3. 강세/약세 논리를 서술할 때 반드시 파이썬이 연산하여 넘겨준 팩트 데이터의 숫자를 인용하여 증명하십시오.\n"
+                        f"4. 역전됨 플래그나 특수 경고 플래그가 발견된 종목은 반드시 <BEAR_CASE>에 구체적으로 경고하십시오.\n\n"
+                        f"=== 리포트 작성 항목 ===\n"
+                        f"<ANALYSIS_티커숫자>\n"
+                        f"### [종목명] (티커)\n"
+                        f"**🎯 종합 매력도 점수: [00]/100점**\n"
+                        f"**🎯 핵심 투자 아이디어 및 모멘텀 (Why Buy?)**\n"
+                        f"- (뉴스/공시 모멘텀을 기반으로 핵심 매수 이유 작성)\n"
+                        f"**🟢 강세 논리 (Bull Case)**\n"
+                        f"**🔴 약세/위험 논리 (Bear Case - 구조적 경고 포함)**\n"
+                        f"</ANALYSIS_티커숫자>\n\n"
+                        f"※ 절대 목표가나 손절가 수치를 임의로 작성하지 마십시오. 마지막 줄에 선정된 3개 종목의 티커를 콤마로 구분하여 아래 형식으로 반드시 출력하십시오.\n"
+                        f"[SELECTED_TICKERS]: 000000, 111111, 222222"
+                    )
+                    st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step3_prompt))
+                    print(f"[TIMING] 4단계 최종 리포트: {time.time()-t4:.1f}초")
+
+            print(f"[TIMING] 종목 발굴 전체 누적: {time.time()-t_start:.1f}초")
+
+    if st.session_state.get('today_recommendation'):
+        raw = st.session_state.today_recommendation
+        cached_results = st.session_state.get('valid_results_cache', [])
+
+        with st.expander("추천 리포트"):
+            display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw.split("[SELECTED_TICKERS]")[0].strip())
+            st.write(display_text)
+
+            if "[SELECTED_TICKERS]" in raw:
+                match = re.search(r'\[SELECTED_TICKERS\]\s*:\s*([\d\s,]+)', raw)
                 if match:
-                    selected_names = [n.strip() for n in match.group(1).split(',')]
-                    st.markdown("---")
-                    st.markdown(f"### 📊 퀀트 vs 애널리스트 컨센서스 실시간 트래킹 ({investment_horizon[:2]} 운용)")
-                    
+                    selected_ticks = [t.strip() for t in match.group(1).split(',') if len(t.strip()) == 6]
+                    price_map = fetch_current_prices(selected_ticks)
                     cols_rec = st.columns(3)
-                    for idx, s_name in enumerate(selected_names[:3]):
-                        tick_code, matched_name = search_stock_code(s_name)
-                        if not tick_code: continue
-                        
-                        q_data = next((r for r in cached_results if r['ticker'] == tick_code), None)
-                        if not q_data: continue
-                        
-                        current_p = q_data['current_price']
-                        q_target_mid = q_data['tp_m'] 
-                        
-                        if "단기" in investment_horizon:
-                            active_target, active_sl = q_data['tp_s'], q_data['sl_s']
-                        elif "중기" in investment_horizon:
-                            active_target, active_sl = q_data['tp_m'], q_data['sl_m']
-                        else:
-                            active_target, active_sl = q_data['tp_l'], q_data['sl_l']
-                        
-                        rep_info = next((v for k, v in analyst_universe.items() if v.get("ticker") == tick_code), analyst_universe.get(matched_name, {}))
-                        extracted_target = float(rep_info.get("target_price", 0))
-                        
+
+                    for idx, tick in enumerate(selected_ticks):
+                        tick_data = next((r for r in cached_results if r['ticker'] == tick), None)
+                        if not tick_data: continue
+
+                        name = tick_data['name']
+                        tp_s, tp_m, tp_l = tick_data['tp_s'], tick_data['tp_m'], tick_data['tp_l']
+                        sl_s, sl_m, sl_l = tick_data['sl_s'], tick_data['sl_m'], tick_data['sl_l']
+
+                        price_info = price_map.get(tick, {})
+                        current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
+
                         with cols_rec[idx % 3]:
                             with st.container(border=True):
-                                st.markdown(f"#### **{matched_name}** `{tick_code}`")
-                                st.metric("실시간 현재가", f"{current_p:,.0f}원")
-                                
-                                if extracted_target > 0 and current_p > 0:
-                                    divergence = abs(q_target_mid - extracted_target) / q_target_mid
-                                    if divergence >= 0.05:
-                                        st.warning(f"⚠️ **목표가 괴리율 ({divergence*100:.1f}%)**")
-                                        st.markdown(f"- **퀀트 적정가(중기):** {q_target_mid:,.0f}원")
-                                        st.markdown(f"- **애널리스트 목표가:** {extracted_target:,.0f}원")
-                                    else:
-                                        st.success(f"✅ **통합 적정가 컨센서스 수렴:** {q_target_mid:,.0f}원")
-                                
-                                st.divider()
-                                st.markdown(f"🎯 **시스템 운용 목표가:** **{active_target:,.0f}원**")
-                                st.markdown(f"🔴 **시스템 기계 손절선:** <span style='color:red; font-weight:bold;'>{active_sl:,.0f}원</span>", unsafe_allow_html=True)
-                                
-                                if st.button("이 리포트 스크랩북 저장", key=f"t3_scr_{tick_code}", use_container_width=True):
-                                    analysis_match = re.search(f"<ANALYSIS_{matched_name}>(.*?)</ANALYSIS_{matched_name}>", raw_top3, re.DOTALL)
+                                st.markdown(f"**{name}** `{tick}`")
+                                if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
+                                c_tp, c_bp = st.columns(2)
+                                c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}<br>장: {tp_l:,.0f}", unsafe_allow_html=True)
+                                c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
+
+                                if st.button("스크랩", key=f"rec_s_{tick}", use_container_width=True):
+                                    analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw, re.DOTALL)
                                     specific_analysis = analysis_match.group(1).strip() if analysis_match else display_text
-                                    
-                                    c.execute("""
-                                        INSERT INTO scrapbook (
-                                            title, analysis, stock_name, ticker, saved_price, 
-                                            target_price, target_price_mid, target_price_long, 
-                                            sl_s, sl_m, sl_l, scrap_date, model_used, user_id
-                                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                                    """, (
-                                        f"{matched_name} 퀀트 추천({investment_horizon[:2]})", specific_analysis, matched_name, tick_code, current_p, 
-                                        q_data['tp_s'], q_data['tp_m'], q_data['tp_l'], q_data['sl_s'], q_data['sl_m'], q_data['sl_l'], 
-                                        datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user
-                                    ))
+
+                                    c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                              (f"{name} 퀀트 심층분석", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, current, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user))
                                     conn.commit()
-                                    st.success("✅ 스크랩북 저장 완료")
+                                    st.success(f"✅ 리포트 스크랩 완료!")
 
 with tab5:
     st.subheader("관심종목 진단")
