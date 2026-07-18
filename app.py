@@ -801,7 +801,6 @@ g_data = st.session_state.realtime_cache
 
 st.markdown("### 📊 글로벌 마켓 실시간 전광판")
 
-# 트레이딩뷰 실시간 티커 테이프 위젯 이식 (높이 확보 및 투명도 해제)
 components.html(
     """
     <div class="tradingview-widget-container">
@@ -809,45 +808,36 @@ components.html(
       <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/tv-widget-ticker-tape.js" async>
       {
       "symbols": [
-        {
-          "proName": "KRX:KOSPI",
-          "title": "코스피"
-        },
-        {
-          "proName": "KRX:KOSDAQ",
-          "title": "코스닥"
-        },
-        {
-          "proName": "FX_IDC:USDKRW",
-          "title": "원/달러 환율"
-        },
-        {
-          "proName": "OANDA:SPX500USD",
-          "title": "S&P 500"
-        },
-        {
-          "proName": "OANDA:NAS100USD",
-          "title": "나스닥 100"
-        },
-        {
-          "proName": "ECONOMICS:USINTR",
-          "title": "미국 기준금리"
-        }
+        { "proName": "KRX:KOSPI", "title": "코스피" },
+        { "proName": "KRX:KOSDAQ", "title": "코스닥" },
+        { "proName": "FX_IDC:USDKRW", "title": "원/달러 환율" },
+        { "proName": "OANDA:SPX500USD", "title": "S&P 500" },
+        { "proName": "OANDA:NAS100USD", "title": "나스닥 100" },
+        { "proName": "ECONOMICS:USINTR", "title": "미국 기준금리" }
       ],
       "showSymbolLogo": true,
       "isTransparent": false,
       "displayMode": "adaptive",
       "colorTheme": "light",
       "locale": "kr"
-    }
+      }
       </script>
     </div>
     """,
     height=100
 )
 
+col_title, col_refresh = st.columns([5, 1.2])
+with col_refresh:
+    if st.button("뉴스/리포트 갱신", use_container_width=True):
+        with st.spinner("AI 서버와 동기화 중..."):
+            if new_data := fetch_realtime_data_direct(): merge_realtime_data(new_data)
+            st.rerun()
+with col_title: 
+    st.caption(f"🧠 AI 백엔드 동기화 시점: {g_data.get('updated_at', '대기 중')} (뉴스는 수동 갱신, 지수는 자동 실시간)")
+
 # 기존 파이썬 람다 동기화 컨트롤러
-(
+
 col_title, col_refresh = st.columns([5, 1.2])
 with col_refresh:
     if st.button("뉴스/리포트 갱신", use_container_width=True):
@@ -858,7 +848,7 @@ with col_title:
     st.caption(f"🧠 AI 백엔드 동기화 시점: {g_data.get('updated_at', '대기 중')} (뉴스와 리포트 데이터만 수동 동기화되며 지수는 실시간입니다.)")
 
 st.divider()
-)
+ )
 
 # 기존 파이썬 람다 동기화 컨트롤러 (뉴스와 리포트를 위해 유지하되 UI는 간소화)
 col_title, col_refresh = st.columns([5, 1.2])
