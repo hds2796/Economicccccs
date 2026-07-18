@@ -1002,31 +1002,45 @@ with tab4:
     analyst_universe = cached_data.get("analyst_universe", {})
     realtime_news_pool = g_data.get("realtime_news", [])
 
-    if st.button("핵심 종목 추천 TOP 3 발굴", use_container_width=True, key="btn_quant_top3"):
-        if not analyst_universe:
-            st.error("리포트 DB가 로드되지 않았습니다.")
-            st.stop()
-
-        with st.spinner(f"[1단계] {investment_horizon} 전략에 부합하는 1차 후보군 10개 분석 중..."):
-            safe_pool = list(analyst_universe.values())
-            universe_map = [{"ticker": r.get("ticker", search_stock_code(r["stock_name"])[0]), "name": r["stock_name"]} for r in safe_pool if r.get("ticker") or search_stock_code(r["stock_name"])[0]]
+    if st.button("추천 종목 발굴", use_container_width=True, key="btn_recommend"):
+    import time
+    t_start = time.time()
+    
+    all_raw_news = (g_data.get("realtime_news", []) if g_data else []) + (cached_data.get("eco_news", []) if cached_data else [])
+    sec_data = g_data.get("sectors") or cached_data.get("sectors") or {}
+    for sec, items in sec_data.items():
+        all_raw_news.extend(items[:30]) 
+        
+    rec_news = dedupe_news(all_raw_news)
+    
+    if not rec_news: 
+        st.error("분석 대상 뉴스 풀이 비어있습니다.")
+    else:
+        with st.spinner("[1단계] Lite 모델이 수집된 핵심 뉴스를 바탕으로 시장 전체 모멘텀을 추출 중..."):
+            t1 = time.time()
+            news_str = "\n".join([f"- {n.get('title', '')}: {n.get('summary', '')}" for n in rec_news])
             
-            universe_context = json.dumps(universe_map[:250], ensure_ascii=False)
-            news_context = "\n".join([n['title'] for n in realtime_news_pool[:30]])
-            
-            prompt1 = (
-                f"당신은 감정이 배제된 헤지펀드 계량 트레이더입니다. 오직 주어진 자산 풀 목록 내에서만 종목을 선정하십시오.\n"
-                f"[실시간 뉴스 모멘텀 데이터]:\n{news_context}\n\n"
-                f"[심사 대상 종목 풀 목록]:\n{universe_context}\n\n"
-                f"위 목록 중 현재 시장 뉴스와 매크로 모멘텀을 고려하여 **{investment_horizon}** 투진에 가장 최적화된 기계적 후보 종목 10개를 선별하십시오.\n"
-                f"※ 어떠한 설명 문구도 생략하고 10개 종목의 'ticker'만 [\"000000\", \"111111\"] 형태의 JSON 배열 구조로만 정확하게 출력하십시오."
+            # ▼▼▼ [수정] 무제한 출력 지시를 없애고, 분량/개수를 명확히 제한 ▼▼▼
+            momentum_context = call_gemini_lite_summary(
+                f"다음은 현재 시장의 실시간, 거시경제, 섹터별 핵심 뉴스 목록이다. "
+                f"이 중 시장을 지배하는 핵심 테마 3~5개만 골라, 각 테마당 2~3문장으로 "
+                f"핵심 근거와 관련 종목/섹터를 요약하라. 전체 800자를 넘기지 마라:\n\n{news_str}"
             )
-            res = call_gemini_with_fallback(prompt1, model=LITE_MODEL_NAME)
-            selected_tickers = list(dict.fromkeys(re.findall(r'"(\d{6})"', res)))[:10]
+            print(f"[TIMING] 뉴스풀 {len(rec_news)}건 / Lite 모멘텀 추출: {time.time()-t1:.1f}초")
 
-        if not selected_tickers:
-            st.error("1차 후보군 추출에 실패했습니다. 다시 시도하십시오.")
-            st.stop()
+        with st.spinner("[2단계] 추출된 모멘텀 기반으로 1차 후보군 발굴 중..."):
+            t2 = time.time()
+            prompt = f"투자 [{investment_horizon}] 모멘텀 종목 10개 6자리 JSON 배열 출력.\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"000000\", \"111111\"] 형태의 배열만 출력하시오."
+            res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
+            print(f"[TIMING] 티커 추출: {time.time()-t2:.1f}초")
+            
+            selected_tickers = []
+            matches = re.findall(r'"(\d{6})"', res)
+            if matches:
+                selected_tickers = list(dict.fromkeys(matches))[:10]
+        
+        print(f"[TIMING] 1단계 전체 누적: {time.time()-t_start:.1f}초")
+        ...
 
         with st.spinner(f"[2단계] 10개 후보군 퀀트/차트 연산 및 애널리스트 목표가 교차검증 연동 중..."):
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
