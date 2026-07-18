@@ -11,7 +11,6 @@ import urllib.request
 import urllib.parse
 import os
 import io
-import streamlit.components.v1 as components
 import zipfile
 import xml.etree.ElementTree as ET
 import concurrent.futures
@@ -21,6 +20,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google import genai
+import streamlit.components.v1 as components
 
 # =======================================================
 # 설정 및 모델
@@ -746,6 +746,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         f"   - 참고 원본 BPS: {bps_disp_val}\n"
     )
 
+    # 롤백: 파이썬 단의 마스킹(숨김 처리)을 해제하고 모든 데이터를 항상 넘겨줌
     eps_str = f"{eps_val:,}원" if eps_val is not None else "데이터 누락"
     bps_str = f"{bps_val:,}원" if bps_val is not None else "데이터 누락"
 
@@ -799,6 +800,9 @@ if not st.session_state.realtime_cache.get("realtime_news"):
 
 g_data = st.session_state.realtime_cache
 
+# =======================================================
+# 상단 레이아웃: 트레이딩뷰 실시간 웹소켓 티커
+# =======================================================
 st.markdown("### 📊 글로벌 마켓 실시간 전광판")
 
 components.html(
@@ -838,41 +842,6 @@ with col_title:
 
 st.divider()
 
-col_title, col_refresh = st.columns([5, 1.2])
-with col_refresh:
-    if st.button("뉴스/리포트 갱신", use_container_width=True):
-        with st.spinner("AI 서버와 동기화 중..."):
-            if new_data := fetch_realtime_data_direct(): merge_realtime_data(new_data)
-            st.rerun()
-with col_title: 
-    st.caption(f"🧠 AI 백엔드 동기화 시점: {g_data.get('updated_at', '대기 중')} (뉴스는 수동 갱신, 지수는 자동 실시간)")
-
-# 기존 파이썬 람다 동기화 컨트롤러
-
-col_title, col_refresh = st.columns([5, 1.2])
-with col_refresh:
-    if st.button("뉴스/리포트 갱신", use_container_width=True):
-        with st.spinner("AI 서버와 동기화 중..."):
-            if new_data := fetch_realtime_data_direct(): merge_realtime_data(new_data)
-            st.rerun()
-with col_title: 
-    st.caption(f"🧠 AI 백엔드 동기화 시점: {g_data.get('updated_at', '대기 중')} (뉴스와 리포트 데이터만 수동 동기화되며 지수는 실시간입니다.)")
-
-st.divider()
- 
-
-# 기존 파이썬 람다 동기화 컨트롤러 (뉴스와 리포트를 위해 유지하되 UI는 간소화)
-col_title, col_refresh = st.columns([5, 1.2])
-with col_refresh:
-    if st.button("뉴스/리포트 갱신", use_container_width=True):
-        with st.spinner("AI 서버와 동기화 중..."):
-            if new_data := fetch_realtime_data_direct(): merge_realtime_data(new_data)
-            st.rerun()
-with col_title: 
-    st.caption(f"🧠 AI 백엔드 동기화 시점: {g_data.get('updated_at', '대기 중')} (뉴스와 리포트 데이터만 수동 동기화되며 지수는 실시간입니다.)")
-
-st.divider()
-
 # =======================================================
 # 각 탭별 기능
 # =======================================================
@@ -889,7 +858,7 @@ with tab1:
         else:
             news_str = "\n".join([f"- {n['title']}: {n.get('summary', '')}" for n in news_pool[:50]])
             with st.spinner("Lite 모델 압축 중..."): lite_summary = call_gemini_lite_summary(f"다음 뉴스를 요약하라:\n\n{news_str}")
-            with st.spinner("Flash 모델 분석 중..."): st.write_stream(call_gemini_stream_with_fallback(f"지표:\n{json.dumps(market_data)}\n\n요약:\n{lite_summary}\n\n시장 흐름 심층 분석 서술."))
+            with st.spinner("Flash 모델 분석 중..."): st.write_stream(call_gemini_stream_with_fallback(f"지표:\n{json.dumps(g_data.get('market_status', {}))}\n\n요약:\n{lite_summary}\n\n시장 흐름 심층 분석 서술."))
 
 with tab2:
     st.subheader("핵심 경제 종합 브리핑 및 시장 심리")
@@ -966,7 +935,7 @@ with tab2:
     st.divider()
 
     st.markdown("### 🎯 초강력 국면 융합형 모닝 핫브리핑")
-    st.caption("단순 뉴스 나열을 넘어, 파이썬 퀀트 엔진의 목표가(tp_m)와 애널리스트 컨센서를 정면으로 비교/교차검증하여 시장을 관통하는 핫픽 2종목을 도출합니다.")
+    st.caption("단순 뉴스 나열을 넘어, 파이썬 퀀트 엔진의 목표가(tp_m)와 애널리스트 컨센서스를 정면으로 비교/교차검증하여 시장을 관통하는 핫픽 2종목을 도출합니다.")
     
     btn_cols = st.columns([1, 4, 1])
     with btn_cols[1]:
@@ -1098,13 +1067,11 @@ with tab4:
                     f"이 중 시장을 지배하는 핵심 테마 3~5개만 골라, 각 테마당 2~3문장으로 "
                     f"핵심 근거와 관련 종목/섹터를 요약하라. 전체 800자를 넘기지 마라:\n\n{news_str}"
                 )
-                print(f"[TIMING] 뉴스풀 {len(rec_news)}건 / Lite 모멘텀 추출: {time.time()-t1:.1f}초")
 
             with st.spinner("[2단계] 추출된 모멘텀 기반으로 1차 후보군 발굴 중..."):
                 t2 = time.time()
                 prompt = f"투자 [{investment_horizon}] 모멘텀 수혜가 예상되는 종목 15개의 '종목명'만 JSON 배열로 출력하라.\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"삼성전자\", \"현대차\"] 형태의 배열만 출력하시오."
                 res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
-                print(f"[TIMING] 1차 종목 추출: {time.time()-t2:.1f}초")
 
                 selected_tickers = []
                 try:
@@ -1123,12 +1090,9 @@ with tab4:
                 st.stop()
 
             with st.spinner("[3단계] 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
-                t3 = time.time()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                     futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True, analyst_universe) for t in selected_tickers]
-                    results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
-                    valid_results = results
-                print(f"[TIMING] 3단계 병렬 크롤링({len(selected_tickers)}종목): {time.time()-t3:.1f}초")
+                    valid_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
 
             tried_tickers = set(selected_tickers)
             max_retry = 2
@@ -1136,7 +1100,6 @@ with tab4:
 
             while len(valid_results) < 10 and retry_count < max_retry:
                 with st.spinner(f"[보충 단계] 부족분 보충 중 (시도 {retry_count+1}/{max_retry})..."):
-                    t_retry = time.time()
                     deficit = 10 - len(valid_results)
                     extra_prompt = f"다음 코드를 제외하고, 투자 [{investment_horizon}] 모멘텀 수혜 예상 종목 {deficit}개의 '종목명'만 JSON 배열로 출력하라.\n(제외: {', '.join(tried_tickers)})\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"SK하이닉스\", \"LG에너지솔루션\"] 형태의 배열만 출력하시오."
                     extra_res = call_gemini_with_fallback(extra_prompt, model=LITE_MODEL_NAME)
@@ -1161,7 +1124,6 @@ with tab4:
                         extra_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
                         valid_results += extra_results
                     retry_count += 1
-                    print(f"[TIMING] 보충 {retry_count}회차: {time.time()-t_retry:.1f}초")
 
             if len(valid_results) == 0:
                 st.warning("⚠️ 2회 재시도 보충을 진행했으나, 후보군 전부 밸류에이션상 상승여력이 없어 추천에서 제외되었습니다.")
@@ -1172,30 +1134,29 @@ with tab4:
                 st.session_state.valid_results_cache = valid_results
 
                 with st.spinner(f"[4단계] 최종 선별된 {len(valid_results)}개 중 시니어 애널리스트 방식 Top 3 보고서 작성 중..."):
-                    t4 = time.time()
                     
-                    # [핵심 패치] 투자 기간에 따른 평가 지침을 동적으로 변경하여 AI의 채점 기준을 통제
                     if "단기" in investment_horizon:
-                        strategy_guide = "▶ [단기(1~3개월) 집중 전략]: 장기 펀더멘털보다 **실시간 뉴스 테마 모멘텀, 최근 5일 수급(외인/기관), 차트 기술적 지표(20일선, MACD, 변동성)**를 최우선 가중치로 평가하십시오. 장기 지표는 배제하고 단기 목표가 달성 가능성에 집중하십시오."
+                        persona = "모멘텀 스윙 트레이더 (단기 차트 및 수급, 뉴스 테마 돌파 매매 전문)"
+                        strategy_guide = "▶ [단기(1~3개월) 매매 전략]: 파이썬 로그에 장기 펀더멘털 데이터(BPS, PER 등)가 제공되더라도 '절대 언급하지 말고 철저히 무시'하십시오. 오로지 차트, 5일 수급, 당장의 뉴스 모멘텀에만 집중하여 매수 논리를 구성하십시오."
                     elif "중기" in investment_horizon:
-                        strategy_guide = "▶ [중기(3~6개월) 집중 전략]: **분기별 실적 턴어라운드(매출/영업이익 추세)와 밸류에이션(PER 괴리율)**을 최우선 가중치로 평가하십시오. 단기 노이즈를 걸러내고 60일선 추세와 20일 누적 수급을 핵심 근거로 삼으십시오."
+                        persona = "실적 턴어라운드/가치투자 애널리스트 (분기 실적 및 적정 주가 회귀 전문)"
+                        strategy_guide = "▶ [중기(3~6개월) 매매 전략]: 파이썬 로그에 제공된 데이터 중 분기/다음 분기의 '실적 턴어라운드(영업이익)'와 'PER 밸류에이션 매력도', 기관/외인의 '최근 20일 누적 수급 변화'에 집중하십시오. 단일 뉴스 가십은 무시하십시오."
                     else:
-                        strategy_guide = "▶ [장기(1년 이상) 집중 전략]: 단기적 수급이나 차트 기술적 노이즈는 완전히 무시하십시오. 오직 **본질적 가치(BPS), 자본효율성(ROE), 구조적 산업 성장성, 그리고 장기 RIM(잔여이익모델) 적정가**만을 바탕으로 기업의 펀더멘털을 평가하십시오."
+                        persona = "장기 구조적 성장/매크로 전략가 (메가트렌드 및 ROE, BPS 가치투자 전문)"
+                        strategy_guide = "▶ [장기(1년 이상) 매매 전략]: 파이썬 로그에 단기 노이즈 데이터(최근 5일 수급, 단기 이동평균선, 단순 뉴스 등)가 있더라도 '철저히 무시'하십시오. 기업의 본질적 가치(BPS), 자본효율성(ROE 추세), 구조적 산업 성장에만 집중하여 논리를 구성하십시오."
 
                     step3_prompt = (
-                        f"당신은 월스트리트 헤지펀드의 시니어 퀀트 애널리스트입니다.\n"
-                        f"고객의 투자 기간은 **{investment_horizon}**입니다.\n\n"
+                        f"당신은 월스트리트 헤지펀드의 {persona}입니다.\n"
+                        f"고객의 투자 타임라인은 **{investment_horizon}**입니다. 주어진 역할과 전략에 완벽히 몰입하십시오.\n\n"
                         f"[시장 전체 핵심 모멘텀 분석]\n{momentum_context}\n\n"
-                        f"[후보군 팩트 데이터(실적 추세, 최근 20일 수급 동향, 밸류에이션, 차트)]\n{tech_data_str_all}\n\n"
+                        f"[후보군 팩트 데이터]\n{tech_data_str_all}\n\n"
                         f"=== ⚠️ 시니어 애널리스트 분석 지침 ===\n"
-                        f"1. [투자기간 맞춤형 평가 - 핵심] {strategy_guide}\n"
-                        f"2. [전수 평가 및 선별] 전달받은 전체 후보군 데이터를 모두 비교 평가하여 각각의 '종합 매력도 점수'를 매기십시오. 그 후 가장 점수가 높은 **최상위 Top 3 종목만 엄선**하여 심층 리포트를 작성하십시오.\n"
-                        f"3. [집중 전략 준수] 사용자가 설정한 기간에 따른 집중 전략을 준수하여 리포트를 작성하십시오.
-                        f"4. [숫자 일치 강제 - 매우 중요] 리포트에 기재하는 모든 가격(현재가, 목표가, 손절가 등)과 실적 수치는 **'파이썬 퀀트 엔진 연산 로그'에 찍힌 숫자를 절대 반올림하거나 가공하지 말고 1원 단위까지 똑같이 복사해서 기재**하십시오.\n"
-                        f"5. [스토리텔링] 파편화된 데이터(뉴스, 수급, 밸류에이션, 실적 추이)를 단순 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
-                        f"6. [추세 변화] 실적(매출/영업이익)의 분기별 증감 추세와 외국인/기관의 '최근 5일 vs 20일 수급 변화'를 바탕으로 모멘텀을 분석하십시오.\n"
-                        f"7. [자기 검증] 스스로 도출한 결론이 틀릴 가능성(반대 논리 및 Value Trap 리스크) 3가지를 반드시 서술하십시오.\n"
-                        f"8. [액션 플랜] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 확인해야 할 이벤트를 반드시 요약하십시오.\n\n"
+                        f"1. [전수 평가 및 선별] 전달받은 전체 후보군 데이터를 모두 비교 평가하여 각각의 '종합 매력도 점수'를 매기십시오. 그 후 가장 점수가 높은 **최상위 Top 3 종목만 엄선**하여 심층 리포트를 작성하십시오.\n"
+                        f"2. [집중 전략 준수 강제] {strategy_guide}\n"
+                        f"3. [숫자 일치 강제] 리포트에 기재하는 모든 가격(현재가, 목표가, 손절가 등)과 실적 수치는 **'파이썬 퀀트 엔진 연산 로그'에 찍힌 숫자를 절대 반올림하지 말고 똑같이 복사해서 기재**하십시오.\n"
+                        f"4. [스토리텔링] 파편화된 데이터를 단순 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
+                        f"5. [자기 검증] 긍정적 편향을 깨기 위해, 스스로 도출한 결론이 틀릴 가능성(반대 논리 및 Value Trap 리스크) 3가지를 반드시 서술하십시오.\n"
+                        f"6. [액션 플랜] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 확인해야 할 이벤트를 반드시 요약하십시오.\n\n"
                         f"=== 리포트 작성 포맷 ===\n"
                         f"### 🏆 1차 후보군 스크리닝 요약 (전체 평가)\n"
                         f"(검토한 전체 후보군의 종목명, 매력도 점수, 핵심 이유 1줄을 간단한 표나 리스트로 먼저 제시할 것)\n\n"
@@ -1203,17 +1164,17 @@ with tab4:
                         f"<ANALYSIS_티커숫자>\n"
                         f"### [종목명] (티커)\n"
                         f"**📖 핵심 투자 스토리 (Investment Story)**\n"
-                        f"(수급, 실적 추세, 뉴스, 밸류에이션을 하나로 엮은 심층 분석)\n\n"
-                        f"**📊 실적 및 수급 추세 분석**\n"
-                        f"(분기별 성장성 및 기관/외인 수급 변화 분석)\n\n"
+                        f"({investment_horizon} 전략 관점에 맞춘 심층 분석 서술)\n\n"
+                        f"**📊 집중 전략 팩트 분석**\n"
+                        f"(단기는 수급/차트, 중/장기는 실적/가치 위주로 팩트 증명)\n\n"
                         f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n"
                         f"1. \n2. \n3. \n\n"
                         f"---\n"
                         f"**🏁 최종 투자 의사결정 (Action Plan)**\n"
                         f"- **현재 투자의견:** [매수 / 관망 / 비중축소] (신뢰도: 00%)\n"
                         f"- **적정 매수가:** [000원 이하]\n"
-                        f"- **목표가:** [단기 00원 / 중기 00원]\n"
-                        f"- **손절가:** [00원]\n"
+                        f"- **목표가:** [해당 기간 목표가 00원]\n"
+                        f"- **손절가:** [해당 기간 손절선 00원]\n"
                         f"- **의사결정 핵심 근거 Top 3:** (1, 2, 3)\n"
                         f"- **향후 반드시 확인해야 할 트리거 이벤트:** (예: 다음 분기 영업이익률 회복 여부 등)\n"
                         f"</ANALYSIS_티커숫자>\n\n"
@@ -1221,9 +1182,6 @@ with tab4:
                         f"[SELECTED_TICKERS]: 000000, 111111, 222222"
                     )
                     st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step3_prompt))
-                    print(f"[TIMING] 4단계 최종 리포트: {time.time()-t4:.1f}초")
-
-            print(f"[TIMING] 종목 발굴 전체 누적: {time.time()-t_start:.1f}초")
 
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
@@ -1273,7 +1231,6 @@ with tab4:
 with tab5:
     st.subheader("관심종목 진단 (보유종목 정밀 평가)")
     
-    # [핵심 패치] 내 관심종목도 단/중/장기 어떤 관점으로 평가받을지 선택할 수 있도록 추가
     eval_horizon = st.radio("진단 관점 (투자기간)", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
     st.divider()
 
@@ -1341,37 +1298,42 @@ with tab5:
                         if is_owned and avg_price > 0: extra_ctx += f"[내 계좌 정보] 평단가: {avg_price:,.0f} | 현재 수익률: {((current - avg_price) / avg_price * 100):+.1f}%\n"
 
                         if "단기" in eval_horizon:
-                            t5_strategy = "▶ [단기(1~3개월) 집중 전략]: 펀더멘털보다 **수급(최근 5일), 차트 기술적 지표(20일선, MACD), 단기 뉴스 모멘텀**을 최우선으로 평가하십시오. 현재 가격이 단기 손절선에 근접했는지 철저히 경고하십시오."
+                            persona_t5 = "단기 스윙 트레이더"
+                            t5_strategy = "▶ [단기(1~3개월) 매매 전략]: 파이썬 로그에 장기 지표(BPS, PER 등)가 있더라도 철저히 무시하십시오. 오직 '최근 5일 수급', '차트 흐름', '뉴스 모멘텀'만으로 매수/손절을 판단하십시오."
                         elif "중기" in eval_horizon:
-                            t5_strategy = "▶ [중기(3~6개월) 집중 전략]: **분기 실적 추세(영업이익/EPS)와 밸류에이션(PER)**의 조화를 중시하고, 20일 누적 기관/외인 수급 이탈 여부를 확인하십시오."
+                            persona_t5 = "가치/성장 투자 애널리스트"
+                            t5_strategy = "▶ [중기(3~6개월) 매매 전략]: 단기 노이즈는 무시하고, 분기별 실적 증감 추세와 PER 밸류에이션, 기관/외인의 최근 20일 수급 추세에 집중하여 판단하십시오."
                         else:
-                            t5_strategy = "▶ [장기(1년 이상) 집중 전략]: 단기 수급/차트는 무시하고 오직 **장기 RIM 적정가, BPS, ROE 추세, 구조적 산업 성장성** 등 펀더멘털만 집중 평가하십시오."
-                        
-                        prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_dict['tech_data_str']}\n{extra_ctx}\n\n"
-                                  f"당신은 리스크와 기회를 종합적으로 분석하는 전문 퀀트 애널리스트입니다.\n"
-                                  f"고객의 투자 타임라인은 **{eval_horizon}**입니다.\n\n"
-                                  f"=== ⚠️ AI 분석 지침 ===\n"
-                                  f"1. [투자기간 맞춤 진단] {t5_strategy}\n"
-                                  f"2. [숫자 일치 강제] 리포트에 기재하는 모든 수치는 **'팩트 데이터'에 찍힌 숫자를 절대 반올림하지 말고 1원 단위까지 똑같이 복사해서 기재**하십시오.\n"
-                                  f"3. [스토리텔링] 파편화된 데이터를 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
-                                  f"4. [계좌 진단] 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 판단하십시오.\n"
-                                  f"5. [자기 검증] 스스로 도출한 결론이 틀릴 가능성(반대 논리 및 Value Trap 리스크) 3가지를 반드시 서술하십시오.\n"
-                                  f"6. [액션 플랜] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 확인해야 할 이벤트를 요약하십시오.\n\n"
-                                  f"=== 리포트 작성 포맷 ===\n"
-                                  f"**📖 핵심 투자 스토리 (Investment Story)**\n"
-                                  f"(수급, 실적 추세, 뉴스, 밸류에이션을 하나로 엮은 심층 분석)\n\n"
-                                  f"**📊 실적 및 수급 추세 분석**\n"
-                                  f"(분기별 성장성 및 기관/외인 수급 변화 분석)\n\n"
-                                  f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n"
-                                  f"1. \n2. \n3. \n\n"
-                                  f"---\n"
-                                  f"**🏁 최종 투자 의사결정 (Action Plan)**\n"
-                                  f"- **현재 투자의견:** [매수 / 유지 / 비중축소 / 손절] (신뢰도: 00%)\n"
-                                  f"- **적정 매수가:** [000원 이하]\n"
-                                  f"- **목표가:** [단기 00원 / 중기 00원 / 장기 00원]\n"
-                                  f"- **시스템 손절가:** [00원]\n"
-                                  f"- **의사결정 핵심 근거 Top 3:** (1, 2, 3)\n"
-                                  f"- **향후 반드시 확인해야 할 트리거 이벤트:** (예: 다음 분기 영업이익률 회복 여부 등)\n")
+                            persona_t5 = "장기 구조적 매크로 전략가"
+                            t5_strategy = "▶ [장기(1년 이상) 매매 전략]: 단기 수급이나 차트 노이즈는 절대 언급하지 마십시오. 오직 BPS, ROE 추세, 산업 메가트렌드 등 본질적 가치(펀더멘털)에만 집중하여 평가하십시오."
+
+                        prompt = (
+                            f"[{name} 진단]\n[팩트 데이터]\n{data_dict['tech_data_str']}\n{extra_ctx}\n\n"
+                            f"당신은 리스크와 기회를 종합적으로 분석하는 {persona_t5}입니다.\n"
+                            f"고객의 투자 타임라인은 **{eval_horizon}**입니다.\n\n"
+                            f"=== ⚠️ AI 분석 지침 ===\n"
+                            f"1. [집중 전략 준수 강제] {t5_strategy}\n"
+                            f"2. [숫자 일치 강제] 리포트에 기재하는 모든 가격(목표가/손절가) 수치는 절대 반올림하지 말고 **'팩트 데이터'에 찍힌 숫자를 1원 단위까지 100% 똑같이 복사해서 기재**하십시오.\n"
+                            f"3. [계좌 진단] 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 판단하십시오.\n"
+                            f"4. [스토리텔링] 파편화된 데이터를 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
+                            f"5. [자기 검증] 스스로 도출한 결론이 틀릴 가능성(반대 논리 및 Value Trap 리스크) 3가지를 반드시 서술하십시오.\n"
+                            f"6. [액션 플랜] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 확인해야 할 이벤트를 요약하십시오.\n\n"
+                            f"=== 리포트 작성 포맷 ===\n"
+                            f"**📖 핵심 투자 스토리 (Investment Story)**\n"
+                            f"({eval_horizon} 전략 관점에 맞춘 심층 분석 서술)\n\n"
+                            f"**📊 {eval_horizon} 맞춤형 팩트 분석**\n"
+                            f"(전략에 부합하는 팩트만 선별하여 증명)\n\n"
+                            f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n"
+                            f"1. \n2. \n3. \n\n"
+                            f"---\n"
+                            f"**🏁 최종 투자 의사결정 (Action Plan)**\n"
+                            f"- **현재 투자의견:** [매수 / 유지 / 비중축소 / 손절] (신뢰도: 00%)\n"
+                            f"- **적정 매수가:** [000원 이하]\n"
+                            f"- **목표가:** [{eval_horizon} 목표가 00원]\n"
+                            f"- **시스템 손절가:** [{eval_horizon} 손절가 00원]\n"
+                            f"- **의사결정 핵심 근거 Top 3:** (1, 2, 3)\n"
+                            f"- **향후 반드시 확인해야 할 트리거 이벤트:** (예: 다음 분기 실적 등)\n"
+                        )
                         
                         report = call_gemini_with_fallback(prompt)
                         
