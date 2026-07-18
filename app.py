@@ -859,7 +859,7 @@ with col_title:
     st.caption(f"🧠 AI 백엔드 동기화 시점: {g_data.get('updated_at', '대기 중')} (뉴스와 리포트 데이터만 수동 동기화되며 지수는 실시간입니다.)")
 
 st.divider()
- )
+ 
 
 # 기존 파이썬 람다 동기화 컨트롤러 (뉴스와 리포트를 위해 유지하되 UI는 간소화)
 col_title, col_refresh = st.columns([5, 1.2])
