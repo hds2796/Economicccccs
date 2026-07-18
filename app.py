@@ -809,7 +809,7 @@ st.markdown("### 📊 글로벌 마켓 실시간 전광판")
 tv_config = {
     "symbols": [
         { "proName": "FX_IDC:USDKRW", "title": "원/달러 환율" },
-        { "proName": "TVC:US10Y", "title": "미국 10년물 국채 금리" },
+        { "proName": "OANDA:WTICOUSD", "title": "WTI 원유" },
         { "proName": "OANDA:SPX500USD", "title": "S&P 500" },
         { "proName": "OANDA:NAS100USD", "title": "나스닥 100" },
         { "proName": "BINANCE:BTCUSDT", "title": "비트코인" },
