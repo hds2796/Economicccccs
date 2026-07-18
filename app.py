@@ -613,6 +613,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         fund_type = f"RIM (CAPM 적용: Rf {rf*100:.1f}%, Beta {beta:.2f}, ERP 6.0%)"
 
     if is_discovery_mode:
+        if current_price <= 0: return "" 
         if eps_val <= 0:
             if current_price > 0 and conservative_bps < current_price: return ""
         else:
