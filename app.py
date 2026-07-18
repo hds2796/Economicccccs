@@ -751,7 +751,7 @@ with tab4:
             
             with st.spinner("[2단계] 10개 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
                 tech_data_str = ""
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
                     futures = [executor.submit(process_single_ticker_for_tab4, t, investment_horizon, k_factor) for t in selected_tickers]
                     for future in concurrent.futures.as_completed(futures):
                         tech_data_str += future.result()
