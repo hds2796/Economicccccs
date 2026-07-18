@@ -735,7 +735,7 @@ def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
 # 후보군 추출 헬퍼 함수 (탭 4 진입 전 선언)
 # =======================================================
 def fetch_candidate_tickers(rec_news, investment_horizon, exclude_tickers, need_count):
-    articles_str = "\n".join([f"- {n['title']}" for n in rec_news[:50]])
+    articles_str = "\n".join([f"- {n['title']}: {n.get('summary', '')}" for n in rec_news[:50]])
     exclude_str = f"\n(다음 종목은 이미 검토했으니 제외: {', '.join(exclude_tickers)})" if exclude_tickers else ""
     prompt = f"투자 [{investment_horizon}] 모멘텀 종목 {need_count}개 6자리 JSON 배열 출력.{exclude_str}\n\n{articles_str}"
     res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
