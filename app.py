@@ -731,48 +731,55 @@ def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     tech_data_str += f"{calc_result_log}\n- 요약본:\n{lite_summary}\n\n"
     return tech_data_str
 
-# 수정 지점 1: 1단계 로직을 "재사용 가능한 함수"로 분리 (tab4 바깥 또는 상단에 배치)
+# =======================================================
+# 후보군 추출 헬퍼 함수 (탭 4 진입 전 선언)
+# =======================================================
 def fetch_candidate_tickers(rec_news, investment_horizon, exclude_tickers, need_count):
-    articles_str = "\n".join([f"- {n['title']}" for n in rec_news[:50]]) [cite: 88]
+    articles_str = "\n".join([f"- {n['title']}" for n in rec_news[:50]])
     exclude_str = f"\n(다음 종목은 이미 검토했으니 제외: {', '.join(exclude_tickers)})" if exclude_tickers else ""
-    prompt = f"투자 [{investment_horizon}] 모멘텀 종목 {need_count}개 6자리 JSON 배열 출력.{exclude_str}\n\n{articles_str}" [cite: 88]
-    res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME) [cite: 88]
+    prompt = f"투자 [{investment_horizon}] 모멘텀 종목 {need_count}개 6자리 JSON 배열 출력.{exclude_str}\n\n{articles_str}"
+    res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
     tickers = []
-    if match := re.search(r'\[.*\]', res, re.DOTALL): [cite: 89]
-        try: tickers = json.loads(match.group(0))[:need_count] [cite: 89]
-        except: pass
+    
+    match = re.search(r'\[.*\]', res, re.DOTALL)
+    if match:
+        try: 
+            tickers = json.loads(match.group(0))[:need_count]
+        except: 
+            pass
     return tickers
 
+# =======================================================
+# 탭 4: 종목 발굴
+# =======================================================
 with tab4:
-    st.subheader("종목 발굴")
-    investment_horizon = st.radio("투자기간", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True) [cite: 87]
+    st.subheader("종목 발굴 (병렬 고속 분석)")
+    investment_horizon = st.radio("투자기간", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
 
-    if st.button("추천 종목 발굴", use_container_width=True, key="btn_recommend"): [cite: 87]
-        rec_news = dedupe_news((g_data.get("realtime_news", []) if g_data else []) + (cached_data.get("eco_news", []) if cached_data else [])) [cite: 87]
-        if not rec_news: [cite: 87]
-            st.error("분석 대상 뉴스 풀이 비어있습니다.") [cite: 87]
+    if st.button("추천 종목 발굴", use_container_width=True, key="btn_recommend"):
+        rec_news = dedupe_news((g_data.get("realtime_news", []) if g_data else []) + (cached_data.get("eco_news", []) if cached_data else []))
+        
+        if not rec_news: 
+            st.error("분석 대상 뉴스 풀이 비어있습니다.")
         else:
-            with st.spinner("[1단계] 1차 후보군 10개 추출 중..."): [cite: 88]
-                # 최초 10개 요청
+            with st.spinner("[1단계] 1차 후보군 10개 추출 중..."):
                 selected_tickers = fetch_candidate_tickers(rec_news, investment_horizon, set(), 10)
                 if not selected_tickers: 
-                    st.stop() [cite: 89]
+                    st.stop()
             
-            with st.spinner("[2단계] 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."): [cite: 90]
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor: [cite: 90]
-                    futures = [executor.submit(process_single_ticker_for_tab4, t, investment_horizon, k_factor) for t in selected_tickers] [cite: 90]
-                    # 수정 지점 2: 결과를 리스트로 받아서 성공 개수 필터링
-                    results = [future.result() for future in concurrent.futures.as_completed(futures)] [cite: 91]
-                    valid_results = [r for r in results if r.strip()]
+            with st.spinner("[2단계] 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                    futures = [executor.submit(process_single_ticker_for_tab4, t, investment_horizon, k_factor) for t in selected_tickers]
+                    results = [future.result() for future in concurrent.futures.as_completed(futures)]
+                    valid_results = [r for r in results if r and r.strip()]
 
-            # 수정 지점 3: 최소 기준(3개)에 부족하면 추가 후보를 요청하는 반복 루프
             tried_tickers = set(selected_tickers)
             max_retry = 2
             retry_count = 0
             
             while len(valid_results) < 3 and retry_count < max_retry:
-                with st.spinner(f"[보충 단계] 현재 {len(valid_results)}개 확보로 최소 기준(3개) 미달. 추가 분석 중 (시도 {retry_count+1}/{max_retry})..."):
-                    deficit = 10 - len(valid_results)  # 10개를 채우기 위한 부족분 계산
+                with st.spinner(f"[보충 단계] 현재 {len(valid_results)}개 확보. 최소 기준(3개) 미달로 추가 분석 중 (시도 {retry_count+1}/{max_retry})..."):
+                    deficit = 10 - len(valid_results)
                     extra_tickers = fetch_candidate_tickers(rec_news, investment_horizon, tried_tickers, deficit)
                     extra_tickers = [t for t in extra_tickers if t not in tried_tickers]
                     
@@ -781,47 +788,44 @@ with tab4:
                         
                     tried_tickers.update(extra_tickers)
                     
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor: [cite: 90]
-                        futures = [executor.submit(process_single_ticker_for_tab4, t, investment_horizon, k_factor) for t in extra_tickers] [cite: 90]
-                        valid_results += [f.result() for f in concurrent.futures.as_completed(futures) if f.result().strip()]
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                        futures = [executor.submit(process_single_ticker_for_tab4, t, investment_horizon, k_factor) for t in extra_tickers]
+                        extra_results = [f.result() for f in concurrent.futures.as_completed(futures)]
+                        valid_results += [r for r in extra_results if r and r.strip()]
                         
                     retry_count += 1
 
-            # 최종 문자열 합치기
             tech_data_str = "".join(valid_results)
 
-            # 수정 지점 4: 최종 루프 탈출 후에도 생존 종목이 없는 경우 검사
             if len(valid_results) == 0:
-                st.warning("⚠️ 재시도 부충을 진행했으나, 후보군 전부 밸류에이션상 상승여력(목표가 > 현재가)이 없어 추천에서 제외되었습니다. 잠시 후 다시 시도해보세요.") [cite: 91, 92]
-                st.session_state.today_recommendation = "" [cite: 92]
+                st.warning("⚠️ 재시도 보충을 진행했으나, 후보군 전부 밸류에이션상 상승여력(목표가 > 현재가)이 없어 추천에서 제외되었습니다. 잠시 후 다시 시도해보세요.")
+                st.session_state.today_recommendation = ""
             else:
-                with st.spinner(f"[3단계] 최종 선별된 {len(valid_results)}개 중 Flash 기반 Top 3 보고서 작성 중..."): [cite: 92]
-                    step3_prompt = ( [cite: 92]
-                        f"당신은 리스크 관리를 최우선으로 하는 퀀트 애널리스트입니다.\n" [cite: 93]
-                        f"[후보군 팩트 데이터]\n{tech_data_str}\n\n" [cite: 93]
-                        f"=== ⚠️ AI 분석 및 목표가 선택 지침 (환각 금지 및 수치 인용 필수) ===\n" [cite: 93]
-                        f"1. 가장 매력적인 **Top 3 종목만 엄선**하십시오. (제공된 데이터가 3개 미만이면 제공된 종목만 작성하십시오.)\n" [cite: 94]
-                        f"2. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 굳이 이 종목을 지금 사야 하는가?'**에 대한 핵심 투자 아이디어(Why Buy?)를 최상단에 선언하십시오.\n" [cite: 94]
-                        f"3. **절대 주가나 목표가를 직접 사칙연산하여 임의의 값을 창조하지 마십시오.** 파이썬이 제공한 [보수적/중립적/공격적] 목표가 밴드 가격 중 현재 상황에 가장 맞는 시나리오를 매칭/선택하십시오.\n" [cite: 94]
-                        f"4. 편향을 제거하기 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리 작성하여 자가 검열하십시오.\n" [cite: 95]
-                        f"5. 파이썬이 연산한 '단기/중기/장기 손절가' 데이터를 그대로 신뢰하여 대응 전략을 제시하십시오.\n\n" [cite: 95]
-                        f"=== 리포트 작성 항목 ===\n" [cite: 95]
-                        f"<ANALYSIS_티커숫자>\n" [cite: 96]
-                        f"### [종목명] (티커)\n" [cite: 96]
-                        f"**🎯 핵심 투자 아이디어 (Why Buy?)**\n" [cite: 96]
-                        f"- (가장 강력하고 결정적인 이유 1~2줄 명시)\n" [cite: 96, 97]
-                        f"**🟢 강세 논리 (Bull Case)**\n" [cite: 97]
-                        f"**🔴 약세/위험 논리 (Bear Case)**\n" [cite: 97]
-                        f"**⚖️ 최종 판단 및 리스크 평가**\n" [cite: 97]
-                        f"- 목표가 도달 논증 (구체적 수치 인용 필수): 파이썬이 제공한 3대 목표가 시나리오 중 최종 선택한 단기/중기/장기 가격을 명시하십시오. 그리고 **반드시 본문에 제공된 팩트 수치(EPS, BPS, PER, 20일선, MACD 등)를 직접 인용하여** 왜 이 목표가가 타당한지 정량적/기술적으로 증명하십시오.\n" [cite: 98, 99]
-                        f"</ANALYSIS_티커숫자>\n\n" [cite: 99]
-                        f"※ 마지막 줄은 아래 파싱 형식으로 출력 (손절가 필수)\n" [cite: 99]
-                        f"[TRACKING_DATA]\n" [cite: 99]
-                        f"종목명|티커|단기목표가|중기목표가|장기목표가|진입타점|단기손절가|중기손절가|장기손절가" [cite: 100]
+                with st.spinner(f"[3단계] 최종 선별된 {len(valid_results)}개 중 Flash 기반 Top 3 보고서 작성 중..."):
+                    step3_prompt = (
+                        f"당신은 리스크 관리를 최우선으로 하는 퀀트 애널리스트입니다.\n"
+                        f"[후보군 팩트 데이터]\n{tech_data_str}\n\n"
+                        f"=== ⚠️ AI 분석 및 목표가 선택 지침 (환각 금지 및 수치 인용 필수) ===\n"
+                        f"1. 가장 매력적인 **Top 3 종목만 엄선**하십시오. (제공된 데이터가 3개 미만이면 제공된 종목만 작성하십시오.)\n"
+                        f"2. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 굳이 이 종목을 지금 사야 하는가?'**에 대한 핵심 투자 아이디어(Why Buy?)를 최상단에 선언하십시오.\n"
+                        f"3. **절대 주가나 목표가를 직접 사칙연산하여 임의의 값을 창조하지 마십시오.** 파이썬이 제공한 [보수적/중립적/공격적] 목표가 밴드 가격 중 현재 상황에 가장 맞는 시나리오를 매칭/선택하십시오.\n"
+                        f"4. 편향을 제거하기 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리 작성하여 자가 검열하십시오.\n"
+                        f"5. 파이썬이 연산한 '단기/중기/장기 손절가' 데이터를 그대로 신뢰하여 대응 전략을 제시하십시오.\n\n"
+                        f"=== 리포트 작성 항목 ===\n"
+                        f"<ANALYSIS_티커숫자>\n"
+                        f"### [종목명] (티커)\n"
+                        f"**🎯 핵심 투자 아이디어 (Why Buy?)**\n"
+                        f"- (가장 강력하고 결정적인 이유 1~2줄 명시)\n"
+                        f"**🟢 강세 논리 (Bull Case)**\n"
+                        f"**🔴 약세/위험 논리 (Bear Case)**\n"
+                        f"**⚖️ 최종 판단 및 리스크 평가**\n"
+                        f"- 목표가 도달 논증 (구체적 수치 인용 필수): 파이썬이 제공한 3대 목표가 시나리오 중 최종 선택한 단기/중기/장기 가격을 명시하십시오. 그리고 **반드시 본문에 제공된 팩트 수치(EPS, BPS, PER, 20일선, MACD 등)를 직접 인용하여** 왜 이 목표가가 타당한지 정량적/기술적으로 증명하십시오.\n"
+                        f"</ANALYSIS_티커숫자>\n\n"
+                        f"※ 마지막 줄은 아래 파싱 형식으로 출력 (손절가 필수)\n"
+                        f"[TRACKING_DATA]\n"
+                        f"종목명|티커|단기목표가|중기목표가|장기목표가|진입타점|단기손절가|중기손절가|장기손절가"
                     )
-                    st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step3_prompt)) [cite: 100]
-
-    # 하단 출력 및 스크랩북 저장 로직은 원본 유지 [cite: 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110]
+                    st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step3_prompt))
 
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
@@ -834,7 +838,8 @@ with tab4:
                 parsed_rows = []
                 for line in block.split('\n'):
                     if not line.strip(): continue
-                    if len(data := line.split('|')) >= 9: 
+                    data = line.split('|')
+                    if len(data) >= 9: 
                         parsed_rows.append((data[0].strip(), data[1].strip(), parse_won(data[2]), parse_won(data[3]), parse_won(data[4]), parse_won(data[5]), parse_won(data[6]), parse_won(data[7]), parse_won(data[8])))
                 
                 price_map = fetch_current_prices([r[1] for r in parsed_rows])
@@ -844,6 +849,7 @@ with tab4:
                     code = re.sub(r'[^\d]', '', tick)
                     price_info = price_map.get(code, {})
                     current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
+                    
                     with cols_rec[idx % 3]:
                         with st.container(border=True):
                             st.markdown(f"**{name}** `{tick}`")
@@ -853,11 +859,12 @@ with tab4:
                             c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
                             
                             if st.button("스크랩", key=f"rec_s_{tick}", use_container_width=True):
-                                specific_analysis = match.group(1).strip() if (match := re.search(f"<ANALYSIS_{code}>(.*?)</ANALYSIS_{code}>", raw, re.DOTALL)) else display_text
+                                match = re.search(f"<ANALYSIS_{code}>(.*?)</ANALYSIS_{code}>", raw, re.DOTALL)
+                                specific_analysis = match.group(1).strip() if match else display_text
                                 c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                           (f"{name} 퀀트 심층분석", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user))
-                                conn.commit(); st.success(f"✅ 리포트 스크랩 완료!")
-
+                                conn.commit()
+                                st.success(f"✅ 리포트 스크랩 완료!")
 # =======================================================
 # 탭 5: 관심종목 진단
 # =======================================================
