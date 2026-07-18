@@ -370,9 +370,13 @@ def get_technical_data(code):
     try:
         url = f"https://fchart.stock.naver.com/sise.nhn?symbol={code}&timeframe=day&count=250&requestType=0"
         res = requests.get(url, timeout=5)
-        items = BeautifulSoup(res.text, "html.parser").find_all('item')
+        
+        # XML 파서 교체 (경고 해결)
+        root = ET.fromstring(res.text)
+        items = root.findall('.//item')
         if not items: return None
-        df_data = [float(item['data'].split('|')[4]) for item in items]
+        
+        df_data = [float(item.attrib['data'].split('|')[4]) for item in items]
         if len(df_data) < 60: return None
         
         df = pd.Series(df_data)
@@ -404,13 +408,16 @@ def get_historical_high_low(code, start_date_str):
     try:
         url = f"https://fchart.stock.naver.com/sise.nhn?symbol={code}&timeframe=day&count=250&requestType=0"
         res = requests.get(url, timeout=5)
-        items = BeautifulSoup(res.text, "html.parser").find_all('item')
+        
+        # XML 파서 교체 (경고 해결)
+        root = ET.fromstring(res.text)
+        items = root.findall('.//item')
         
         start_date = datetime.strptime(start_date_str.split()[0], "%Y-%m-%d")
         max_h, min_l = 0.0, float('inf')
         
         for item in items:
-            data = item['data'].split('|')
+            data = item.attrib['data'].split('|')
             item_date = datetime.strptime(data[0], "%Y%m%d")
             if item_date >= start_date:
                 high, low = float(data[2]), float(data[3])
@@ -774,8 +781,11 @@ with tab4:
         else:
             with st.spinner("[1단계] 1차 후보군 10개 추출 중..."):
                 selected_tickers = fetch_candidate_tickers(rec_news, investment_horizon, set(), 10)
-                if not selected_tickers: 
-                    st.stop()
+            
+            # 스피너가 종료된 후(바깥에서) 중단 명령을 내려야 무한 로딩이 걸리지 않습니다.
+            if not selected_tickers: 
+                st.error("⚠️ AI가 조건에 맞는 종목을 추출하지 못했거나 API 응답이 지연되었습니다. 잠시 후 다시 시도해주세요.")
+                st.stop()
             
             with st.spinner("[2단계] 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
@@ -819,7 +829,7 @@ with tab4:
                         f"=== ⚠️ AI 분석 및 목표가 선택 지침 (환각 금지 및 수치 인용 필수) ===\n"
                         f"1. 가장 매력적인 **Top 3 종목만 엄선**하십시오. (제공된 데이터가 3개 미만이면 제공된 종목만 작성하십시오.)\n"
                         f"2. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 굳이 이 종목을 지금 사야 하는가?'**에 대한 핵심 투자 아이디어(Why Buy?)를 최상단에 선언하십시오.\n"
-                        f"3. **절대 주가나 목표가를 직접 사칙연산하여 임의의 값을 창조하지 마십시오.** 파이썬이 제공한 [보수적/중립적/공격적] 목표가 밴드 가격 중 현재 상황에 가장 맞는 시나리오를 매칭/선택하십시오.\n"
+                        f"3. **절대 주가나 목표가를 직접 사칙연산하여 임의의 값을 창조하지 마십시오.** 파이썬이 제공한 단기/중기/장기 목표가 가격을 그대로 채택/명시하십시오.\n"
                         f"4. 편향을 제거하기 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리 작성하여 자가 검열하십시오.\n"
                         f"5. 파이썬이 연산한 '단기/중기/장기 손절가' 데이터를 그대로 신뢰하여 대응 전략을 제시하십시오.\n\n"
                         f"=== 리포트 작성 항목 ===\n"
@@ -830,7 +840,7 @@ with tab4:
                         f"**🟢 강세 논리 (Bull Case)**\n"
                         f"**🔴 약세/위험 논리 (Bear Case)**\n"
                         f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                        f"- 목표가 도달 논증 (구체적 수치 인용 필수): 파이썬이 제공한 3대 목표가 시나리오 중 최종 선택한 단기/중기/장기 가격을 명시하십시오. 그리고 **반드시 본문에 제공된 팩트 수치(EPS, BPS, PER, 20일선, MACD 등)를 직접 인용하여** 왜 이 목표가가 타당한지 정량적/기술적으로 증명하십시오.\n"
+                        f"- 목표가 도달 논증 (구체적 수치 인용 필수): 파이썬이 제공한 단기/중기/장기 목표가 가격을 명시하십시오. 그리고 **반드시 본문에 제공된 팩트 수치(EPS, BPS, PER, 20일선, MACD 등)를 직접 인용하여** 왜 이 목표가가 타당한지 정량적/기술적으로 증명하십시오.\n"
                         f"</ANALYSIS_티커숫자>\n\n"
                         f"※ 마지막 줄은 아래 파싱 형식으로 출력 (손절가 필수)\n"
                         f"[TRACKING_DATA]\n"
@@ -962,39 +972,44 @@ with tab5:
                         if len(eps_history) >= 2 and eps_history[-1] < 0 and eps_history[0] < 0 and eps_history[-1] < eps_history[0]:
                             bps_discount = 0.8
                         
+                        # --- [손절가 산출 (시간 제곱근 법칙)] ---
                         calc_sl_s = current_price * (1 - k_factor * daily_vol * np.sqrt(20)) if daily_vol > 0 else 0.0
                         calc_sl_m = current_price * (1 - k_factor * daily_vol * np.sqrt(60)) if daily_vol > 0 else 0.0
                         calc_sl_l = current_price * (1 - k_factor * daily_vol * np.sqrt(250)) if daily_vol > 0 else 0.0
 
+                        # --- [목표가 산출 (타임프레임 재정의 - 탭 4와 100% 동기화)] ---
+                        calc_tp_s = current_price * (1 + k_factor * daily_vol * np.sqrt(20)) if daily_vol > 0 else current_price * 1.05
+                        conservative_bps = (bps_val * bps_discount) if bps_val > 0 else current_price * 0.8
+
                         if eps_val <= 0:
-                            conservative_tp = (bps_val * bps_discount) if bps_val > 0 else current_price * 0.9
-                            neutral_tp = current_price * (1 + k_factor * daily_vol * np.sqrt(60)) if daily_vol > 0 else current_price * 1.2
-                            aggressive_tp = current_price * (1 + k_factor * daily_vol * np.sqrt(250)) if daily_vol > 0 else current_price * 1.5
+                            calc_tp_m = current_price * (1 + k_factor * daily_vol * np.sqrt(60)) if daily_vol > 0 else current_price * 1.10
+                            calc_tp_l = current_price * (1 + k_factor * daily_vol * np.sqrt(250)) if daily_vol > 0 else current_price * 1.15
 
                             fund_target_log = (
-                                f"   - [보수적 시나리오] BPS 청산가치 방어선(할인율 {int((1-bps_discount)*100)}%): {conservative_tp:,.0f}원\n"
-                                f"   - [중립적 시나리오] 60일 기술적 상방 변동성 밴드: {neutral_tp:,.0f}원\n"
-                                f"   - [공격적 시나리오] 250일 장기 추세 돌파 밴드: {aggressive_tp:,.0f}원\n"
+                                f"   - [단기 목표가] 20일 상방 변동성 밴드: {calc_tp_s:,.0f}원\n"
+                                f"   - [중기 목표가] (적자기업 기술적 대체) 60일 상방 밴드: {calc_tp_m:,.0f}원\n"
+                                f"   - [장기 목표가] (적자기업 기술적 대체) 250일 상방 밴드: {calc_tp_l:,.0f}원\n"
+                                f"   ※ 참고: BPS 청산가치(할인율 {int((1-bps_discount)*100)}%): {conservative_bps:,.0f}원\n"
                             )
                         else:
-                            conservative_tp = (bps_val * bps_discount) if bps_val > 0 else current_price * 0.9
                             adjusted_ind_per = float_ind_per * (1 + eps_growth) if float_ind_per > 0 else 0.0
-                            base_tp = eps_val * adjusted_ind_per if adjusted_ind_per > 0 else eps_val * 10
+                            calc_tp_m = eps_val * adjusted_ind_per if adjusted_ind_per > 0 else eps_val * 10
+                            
                             required_return = 0.08
                             expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
-                            rim_tp = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
-                            aggressive_tp = max(base_tp, rim_tp)
+                            calc_tp_l = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
                             
                             fund_target_log = (
-                                f"   - [보수적 시나리오] BPS 자산가치 기준(할인율 {int((1-bps_discount)*100)}%): {conservative_tp:,.0f}원\n"
-                                f"   - [중립적 시나리오] 성장률 반영 업종PER 기준(EPS성장률 {eps_growth*100:+.1f}%): {base_tp:,.0f}원\n"
-                                f"   - [공격적 시나리오] RIM 초과이익 기준: {aggressive_tp:,.0f}원\n"
+                                f"   - [단기 목표가] 20일 상방 변동성 밴드: {calc_tp_s:,.0f}원\n"
+                                f"   - [중기 목표가] 성장률 반영 업종PER 기준: {calc_tp_m:,.0f}원\n"
+                                f"   - [장기 목표가] RIM 초과이익 기준: {calc_tp_l:,.0f}원\n"
+                                f"   ※ 참고: BPS 청산가치(할인율 {int((1-bps_discount)*100)}%): {conservative_bps:,.0f}원\n"
                             )
 
                         calc_result_log = (
                             f"▶ 리스크 분석 팩트: 일간 변동성 {daily_vol*100:.2f}% 기준 (k={k_factor:.1f})\n"
                             f"   - 단기 손절가: {calc_sl_s:,.0f}원 | 중기 손절가: {calc_sl_m:,.0f}원 | 장기 손절가: {calc_sl_l:,.0f}원\n"
-                            f"▶ 파이썬 선행연산 목표가 밴드:\n{fund_target_log}"
+                            f"▶ 파이썬 선행연산 목표가 밴드 (아래 3가지 값을 각각 단/중/장기 목표가로 채택할 것):\n{fund_target_log}"
                         )
 
                         data_str = f"현재가: {current_price:,.0f}\n"
@@ -1006,7 +1021,7 @@ with tab5:
                         prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_str}\n\n"
                                   f"당신은 리스크 관리에 철저한 애널리스트입니다.\n"
                                   f"1. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 이 종목을 지금 매수/보유/매도해야 하는가?'**에 대한 핵심 논리를 최상단에 선언하십시오.\n"
-                                  f"2. **절대 가격이나 수식을 직접 계산하여 사칙연산 오류를 내지 마십시오.** 파이썬이 선행 연산하여 제공한 3가지 목표가 시나리오 밴드 가격 중 가장 실현 타당한 가치 가격을 '선택'하십시오.\n"
+                                  f"2. **절대 가격이나 수식을 직접 계산하여 사칙연산 오류를 내지 마십시오.** 파이썬이 선행 연산하여 제공한 단기/중기/장기 목표가 가격을 그대로 채택하여 진단에 활용하십시오.\n"
                                   f"3. 낙관적 편향 제거를 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리하여 자가 검열하십시오.\n"
                                   f"4. 내 계좌 정보가 있다면 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
                                   f"=== 작성 항목 ===\n"
@@ -1015,7 +1030,7 @@ with tab5:
                                   f"**🟢 강세 논리 (Bull Case)**\n"
                                   f"**🔴 약세/위험 논리 (Bear Case)**\n"
                                   f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                                  f"- 목표가 도달 논증 (구체적 수치 인용 필수): 파이썬이 제공한 3대 목표가 시나리오 중 최종 선택한 단기/중기/장기 가격을 명시하십시오. 그리고 **반드시 본문에 제공된 팩트 수치(EPS, BPS, 평단가, 수익률, 20일 변동성, 이평선 등)를 직접 인용하여** 왜 이 목표가가 타당한지 정량적/기술적으로 증명하십시오. 두루뭉술한 표현을 배제하고 철저히 숫자로 방어하십시오.\n"
+                                  f"- 목표가 도달 논증 (구체적 수치 인용 필수): 파이썬이 제공한 단기/중기/장기 목표가 가격을 명시하십시오. 그리고 **반드시 본문에 제공된 팩트 수치(EPS, BPS, 평단가, 수익률, 20일 변동성, 이평선 등)를 직접 인용하여** 왜 이 목표가가 타당한지 정량적/기술적으로 증명하십시오. 두루뭉술한 표현을 배제하고 철저히 숫자로 방어하십시오.\n"
                                   f"※ 마지막 줄은 아래 파싱 형식으로 출력\n"
                                   f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가|단기손절가|중기손절가|장기손절가")
                     
