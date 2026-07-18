@@ -805,8 +805,7 @@ g_data = st.session_state.realtime_cache
 # =======================================================
 st.markdown("### 📊 글로벌 마켓 실시간 전광판")
 
-# [완벽 해결 패치] Script 삽입 대신 Iframe 직접 호출 방식으로 변경 (보안/렌더링 충돌 우회)
-# [완벽 해결 패치] 외부 송출이 차단된 KRX 지수를 빼고, 실시간 글로벌 매크로 지표로 최적화
+# [완벽 해결 패치] 외부 송출 차단된 KRX/기준금리 빼고, 실시간 글로벌 매크로 지표로 100% 교체
 tv_config = {
     "symbols": [
         { "proName": "FX_IDC:USDKRW", "title": "원/달러 환율" },
@@ -822,10 +821,10 @@ tv_config = {
     "colorTheme": "light",
     "locale": "kr"
 }
-# 설정값을 URL에 태워서 트레이딩뷰 자체 페이지를 직접 불러옴
+
+# 설정값을 URL에 태워서 트레이딩뷰 자체 페이지를 직접 Iframe으로 불러옴
 tv_url = f"https://s.tradingview.com/embed-widget/ticker-tape/?locale=kr#{urllib.parse.quote(json.dumps(tv_config))}"
 
-# html 대신 iframe 명령어 사용
 components.iframe(tv_url, height=80)
 
 col_title, col_refresh = st.columns([5, 1.2])
