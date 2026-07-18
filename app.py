@@ -365,39 +365,32 @@ def get_advanced_fundamental_data(code):
                     data["eps"] = float(val)
             except: pass
 
-        bps_elem = soup.find(id="_bps")
-        if bps_elem:
+        # [핵심 패치]: cop_details -> cop_analysis 테이블 클래스 수정 및 완벽한 BPS/EPS 추출
+        cop_table = soup.find("div", class_="cop_analysis")
+        if cop_table:
+            data["quarter_trend"] = "최근 실적 수집 완료"
             try:
-                val = bps_elem.get_text().strip().replace(',', '')
-                if val and val.replace('.', '', 1).replace('-', '', 1).isdigit():
-                    data["bps"] = float(val)
+                for th in cop_table.find_all("th"):
+                    text = th.get_text().strip()
+                    if "EPS" in text:
+                        valid_eps = [float(v) for td in th.find_parent("tr").find_all("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
+                        if valid_eps:
+                            if data["eps"] is None: data["eps"] = valid_eps[-1] 
+                            data["eps_history"] = valid_eps[-3:]
+                    elif "BPS" in text:
+                        valid_bps = [float(v) for td in th.find_parent("tr").find_all("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
+                        if valid_bps:
+                            if data["bps"] is None: data["bps"] = valid_bps[-1] 
+                    elif "ROE" in text:
+                        valid_roe = [float(v) for td in th.find_parent("tr").find_all("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
+                        if valid_roe: data["roe_history"] = valid_roe[-3:]
             except: pass
-        
+            
         for th in soup.find_all("th"):
             if "동일업종 PER" in th.get_text():
                 td = th.find_next("td")
                 if td: data["industry_per"] = td.get_text().strip().replace('배', '')
         
-        cop_table = soup.find("div", class_="cop_details")
-        if cop_table:
-            data["quarter_trend"] = "최근 실적 수집 완료"
-            try:
-                for th_item in cop_table.find_all("th"):
-                    text = th_item.get_text().strip()
-                    if "EPS(원)" in text:
-                        valid_eps = [float(v) for td in th_item.find_next_siblings("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
-                        if valid_eps:
-                            if data["eps"] is None: data["eps"] = valid_eps[-1] 
-                            data["eps_history"] = valid_eps[-3:]
-                    if "BPS(원)" in text:
-                        valid_bps = [float(v) for td in th_item.find_next_siblings("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
-                        if valid_bps:
-                            if data["bps"] is None: data["bps"] = valid_bps[-1] 
-                    if "ROE" in text:
-                        valid_roe = [float(v) for td in th_item.find_next_siblings("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
-                        if valid_roe: data["roe_history"] = valid_roe[-3:]
-            except: pass
-            
         url_frgn = f"https://finance.naver.com/item/frgn.naver?code={code}"
         res_frgn = session.get(url_frgn, headers=headers, timeout=5)
         soup_frgn = BeautifulSoup(res_frgn.text, "html.parser")
@@ -567,7 +560,7 @@ def fetch_realtime_data_direct():
     except: return None
 
 # =======================================================
-# 핵심 퀀트 엔진: 지주사 예외 기반 복원력(Resilience) 패치 (0.5 매직넘버 수정)
+# 핵심 퀀트 엔진: 지주사 예외 기반 복원력(Resilience) 및 오타 패치 적용 완료
 # =======================================================
 def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=False):
     ticker = re.sub(r'[^\d]', '', ticker)
@@ -627,7 +620,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         data_incomplete = True
         
     elif is_holding:
-        # [수정] 지주사 할인율 0.6 -> 0.5 변경 적용
         holding_discount = 0.5  
         effective_bps = bps_val * holding_discount
         tp_m = effective_bps
@@ -969,7 +961,7 @@ with tab4:
                         f"[시장 전체 핵심 모멘텀 분석]\n{momentum_context}\n\n"
                         f"[후보군 팩트 데이터(뉴스, 공시, 재무, 차트 포함)]\n{tech_data_str_all}\n\n"
                         f"=== ⚠️ AI 분석 지침 ===\n"
-                        f"1. 가장 종합 매력도 점수가 높은 **Top 3 종목만 엄선**하십시오.\n"
+                        f"1. 가장 매력도 점수가 높은 **Top 3 종목만 엄선**하십시오.\n"
                         f"2. 제공된 모든 데이터를 종합하여 **'종합 매력도 점수(0~100점)'**를 산정하고 최상단에 명시하십시오.\n"
                         f"3. 강세/약세 논리를 서술할 때 반드시 파이썬이 연산하여 넘겨준 팩트 데이터의 숫자를 인용하여 증명하십시오.\n"
                         f"4. 역전됨 플래그나 특수 경고 플래그가 발견된 종목은 반드시 <BEAR_CASE>에 구체적으로 경고하십시오.\n\n"
