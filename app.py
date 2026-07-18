@@ -696,7 +696,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
     except: float_ind_per = 0.0
 
-    # 1. PBR 예외처리 및 데이터 정합성 보완
+    # 1. PBR 예외처리 및 데이터 정합성 보완 (자본잠식 방어)
     if bps_val > 0 and current_price > 0:
         fund['pbr'] = f"{current_price / bps_val:.2f}"
     else:
@@ -722,44 +722,47 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     tp_s = current_price * min(1 + user_k * daily_vol * np.sqrt(20), 1.25) if daily_vol > 0 else current_price * 1.05
 
     if eps_val <= 0:
-        raw_tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
-        raw_tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
+        tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
+        tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
         fund_type = "적자 대용치 (기술적 밴드)"
     else:
         adjusted_ind_per = float_ind_per * (1 + eps_growth) if float_ind_per > 0 else 0.0
-        raw_tp_m = eps_val * adjusted_ind_per if adjusted_ind_per > 0 else eps_val * 10
+        tp_m = eps_val * adjusted_ind_per if adjusted_ind_per > 0 else eps_val * 10
         required_return = 0.08
         expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
-        raw_tp_l = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
+        tp_l = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
         fund_type = "기본 펀더멘털"
 
-    # 4. 종목 발굴 탭(is_discovery_mode=True) 전용 엄격한 절대 필터
+    # 4. 종목 발굴 탭(is_discovery_mode=True) 전용 절대 필터 (적자 꼼수 원천 차단)
     if is_discovery_mode:
-        if current_price > 0 and (raw_tp_m < current_price or raw_tp_l < current_price):
-            return "" # 기대수익률 마이너스 종목 즉시 탈락
+        if eps_val <= 0:
+            # [수정됨] 적자 기업은 보수적 청산가치조차 현재가에 못 미치면 100% 탈락
+            if current_price > 0 and conservative_bps < current_price:
+                return ""
+        else:
+            # 흑자 기업은 펀더멘털 가치가 현재가를 못 넘기면 즉시 탈락
+            if current_price > 0 and (tp_m < current_price or tp_l < current_price):
+                return "" 
 
-    # 5. 구조적 역전 현상 강제 보정 및 내부 로그 기록
+    # 5. [수정됨] 강제 정렬(max) 폐지 및 역전 현상 그대로 노출 (내부 로그 기록)
     flag_m = "정상"
     flag_l = "정상"
     
-    tp_m = max(raw_tp_m, tp_s)
-    if tp_m > raw_tp_m: 
-        flag_m = f"역전 보정됨 (원본: {raw_tp_m:,.0f}원으로 단기 모멘텀보다 낮아 장기 하향 리스크 내재)"
-    
-    tp_l = max(raw_tp_l, tp_m)
-    if tp_l > raw_tp_l: 
-        flag_l = f"역전 보정됨 (원본: {raw_tp_l:,.0f}원으로 중기 가치보다 낮아 성장성 둔화 우려)"
+    if tp_s > tp_m: 
+        flag_m = f"⚠️ 역전됨 (단기 모멘텀 {tp_s:,.0f}원 대비 펀더멘털이 낮아 장기 하향 리스크 내재)"
+    if tp_m > tp_l: 
+        flag_l = f"⚠️ 역전됨 (중기 가치 대비 장기 RIM 가치({tp_l:,.0f}원)가 낮아 성장성 둔화 우려)"
 
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
-        f"▶ [최종 채택 목표가] (출력 화면 1:1 매칭용):\n"
+        f"▶ [최종 채택 목표가] (출력 화면 1:1 매칭용 - 역전 시 역전된 그대로 인용할 것):\n"
         f"   - 단기 목표가: {tp_s:,.0f}원\n"
         f"   - 중기 목표가: {tp_m:,.0f}원\n"
         f"   - 장기 목표가: {tp_l:,.0f}원\n"
-        f"▶ [퀀트 엔진 내부 검증 로그 (수정전 원본 데이터 및 리스크 플래그)]:\n"
+        f"▶ [퀀트 엔진 내부 검증 로그 (리스크 플래그)]:\n"
         f"   - 밸류에이션 모델 타입: {fund_type}\n"
-        f"   - 중기 원본 가치 수렴치: {raw_tp_m:,.0f}원 (시그널 상태: {flag_m})\n"
-        f"   - 장기 원본 가치 수렴치: {raw_tp_l:,.0f}원 (시그널 상태: {flag_l})\n"
+        f"   - 중기 시그널 상태: {flag_m}\n"
+        f"   - 장기 시그널 상태: {flag_l}\n"
         f"   - 참고 BPS 청산가치: {conservative_bps:,.0f}원\n"
     )
 
@@ -828,7 +831,8 @@ with tab4:
                         f"1. 가장 매력적인 **Top 3 종목만 엄선**하십시오.\n"
                         f"2. 핵심 투자 아이디어(Why Buy?)를 최상단에 선언하십시오.\n"
                         f"3. 절대 주가나 수식을 임의 계산하지 마시고 파이썬이 연산한 [최종 채택 목표가]와 손절가를 그대로 인용하십시오.\n"
-                        f"4. **[매우 중요]** 데이터 내 [퀀트 엔진 내부 검증 로그]에 '역전 보정됨' 플래그가 발견된 종목을 추천할 경우, 이는 단기 수급 모멘텀으로 오버슈팅되어 펀더멘털 가치를 초과한 상태임을 의미합니다. 반드시 <BEAR_CASE> 및 최종 판단 항목에 '장기 가치 수렴 한계 및 밸류에이션 역전 리스크'를 구체적인 원본 수치와 함께 경고하십시오.\n\n"
+                        f"4. **[수치 기반 논증 강제]** 목표가의 타당성을 설명할 때는 두루뭉술한 형용사를 배제하고, 반드시 제공된 팩트 데이터(EPS, BPS, PER, 일간 변동성, 이동평균선 등)의 '숫자'를 직접 인용하여 수학적/통계적으로 논증하십시오.\n"
+                        f"5. **[매우 중요]** 목표가가 단기>중기>장기 순으로 '역전됨' 플래그가 발견된 종목은 단기 모멘텀으로 오버슈팅된 상태입니다. 반드시 <BEAR_CASE> 및 최종 판단 항목에 '장기 가치 수렴 한계 및 밸류에이션 역전 리스크'를 구체적인 원본 숫자와 함께 경고하십시오.\n\n"
                         f"=== 리포트 작성 항목 ===\n"
                         f"<ANALYSIS_티커숫자>\n"
                         f"### [종목명] (티커)\n"
@@ -836,7 +840,8 @@ with tab4:
                         f"**🟢 강세 논리 (Bull Case)**\n"
                         f"**🔴 약세/위험 논리 (Bear Case - 역전 보정 경고 포함)**\n"
                         f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                        f"- 목표가 도달 논증 (팩트 수치 인용 필수)\n"
+                        f"- 단기 목표가 논증: (일간 변동성, 이평선 등 기술적 수치를 인용하여 작성)\n"
+                        f"- 중/장기 목표가 논증: (EPS, BPS, PER 등 펀더멘털 수치를 인용하여 작성)\n"
                         f"</ANALYSIS_티커숫자>\n\n"
                         f"※ 마지막 줄은 아래 파싱 형식으로 출력\n"
                         f"[TRACKING_DATA]\n"
@@ -942,7 +947,6 @@ with tab5:
             with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
                     with st.spinner("파이썬 연산 및 수치 방어 논리 작성 중..."):
-                        # is_discovery_mode=False 적용 (엄격한 탈락 필터 없이 그대로 분석)
                         data_str_base = process_single_ticker(ticker, "단기/중기/장기 종합", k_factor, is_discovery_mode=False)
                         
                         extra_ctx = f"\n현재가: {current:,.0f}\n"
@@ -952,14 +956,16 @@ with tab5:
                                   f"당신은 리스크 관리에 철저한 애널리스트입니다.\n"
                                   f"1. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 이 종목을 지금 매수/보유/매도해야 하는가?'**에 대한 핵심 논리를 선언하십시오.\n"
                                   f"2. 파이썬이 선행 연산하여 제공한 [최종 채택 목표가] 가격을 그대로 채택하여 진단하십시오.\n"
-                                  f"3. **[매우 중요]** 데이터 내 [퀀트 엔진 내부 검증 로그]에 '역전 보정됨' 플래그가 있다면 장기 가치 수렴 한계 리스크를 <BEAR_CASE>에 반드시 원본 수치와 함께 경고하십시오.\n"
-                                  f"4. 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
+                                  f"3. **[수치 기반 논증 강제]** 목표가의 타당성을 설명할 때는 두루뭉술한 형용사를 배제하고, 반드시 제공된 팩트 데이터(EPS, BPS, PER, 평단가, 수익률, 일간 변동성 등)의 '숫자'를 직접 인용하여 수학적/통계적으로 논증하십시오.\n"
+                                  f"4. **[매우 중요]** 목표가가 단기>중기>장기 순으로 '역전됨' 플래그가 발견된 종목은 단기 모멘텀으로 오버슈팅된 상태입니다. 반드시 <BEAR_CASE> 및 최종 판단 항목에 '장기 가치 수렴 한계 및 밸류에이션 역전 리스크'를 구체적인 원본 숫자와 함께 경고하십시오.\n"
+                                  f"5. 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
                                   f"=== 작성 항목 ===\n"
                                   f"**🎯 핵심 아이디어 (Why Buy/Hold/Sell?)**\n"
                                   f"**🟢 강세 논리 (Bull Case)**\n"
                                   f"**🔴 약세/위험 논리 (Bear Case)**\n"
                                   f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                                  f"- 목표가 논증 (수치 인용 필수)\n"
+                                  f"- 단기 목표가 논증: (일간 변동성, 이평선 등 기술적 수치를 인용하여 작성)\n"
+                                  f"- 중/장기 목표가 논증: (EPS, BPS, PER 등 펀더멘털 수치를 인용하여 작성)\n"
                                   f"※ 마지막 줄은 아래 파싱 형식으로 출력\n"
                                   f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가|단기손절가|중기손절가|장기손절가")
                     
