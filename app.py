@@ -294,7 +294,6 @@ def call_gemini_stream_with_fallback(prompt):
 # =======================================================
 @st.cache_data(ttl=3600)
 def get_kospi_returns():
-    """코스피 250일 일간 수익률 반환"""
     try:
         url = "https://fchart.stock.naver.com/sise.nhn?symbol=KOSPI&timeframe=day&count=250&requestType=0"
         res = get_session().get(url, timeout=5)
@@ -313,7 +312,6 @@ def get_kospi_returns():
 
 @st.cache_data(ttl=3600)
 def get_risk_free_rate():
-    """대한민국 국고채 10년물 금리 추출 (무위험 수익률)"""
     try:
         url = "https://finance.naver.com/marketindex/interestDailyQuote.naver?marketindexCd=IRR_GOVT10Y"
         res = get_session().get(url, timeout=5)
@@ -347,7 +345,7 @@ def get_dart_filings(stock_code):
 @st.cache_data(ttl=600)
 def get_advanced_fundamental_data(code):
     data = {"per": "-", "pbr": "-", "eps": None, "bps": None, "industry_per": "-", "quarter_trend": "정보 없음", "supply_demand": "정보 없음", "eps_history": [], "roe_history": []}
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     session = get_session()
     try:
         url = f"https://finance.naver.com/item/main.naver?code={code}"
@@ -365,7 +363,6 @@ def get_advanced_fundamental_data(code):
                     data["eps"] = float(val)
             except: pass
 
-        # [핵심 패치]: cop_details -> cop_analysis 테이블 클래스 수정 및 완벽한 BPS/EPS 추출
         cop_table = soup.find("div", class_="cop_analysis")
         if cop_table:
             data["quarter_trend"] = "최근 실적 수집 완료"
@@ -480,16 +477,6 @@ def get_historical_high_low(code, start_date_str):
         return max_h, (min_l if min_l != float('inf') else 0.0)
     except: return 0.0, 0.0
 
-def parse_won(s):
-    if not s: return 0.0
-    s = str(s).strip()
-    multiplier = 1
-    if '조' in s: multiplier = 1_000_000_000_000; s = s.split('조')[0]
-    elif '억' in s: multiplier = 100_000_000; s = s.split('억')[0]
-    elif '만' in s: multiplier = 10_000; s = s.split('만')[0]
-    num_str = re.sub(r'[^\d.]', '', s)
-    return float(num_str) * multiplier if num_str else 0.0
-
 def search_stock_code(name):
     try:
         url = f"https://m.stock.naver.com/front-api/search/autoComplete?query={requests.utils.quote(name)}&target=stock,index,marketindicator,coin,ipo"
@@ -560,10 +547,10 @@ def fetch_realtime_data_direct():
     except: return None
 
 # =======================================================
-# 핵심 퀀트 엔진: 지주사 예외 기반 복원력(Resilience) 및 오타 패치 적용 완료
+# 핵심 퀀트 엔진: 퀀트/차트/뉴스 및 컨센서스 트렌드 조인
 # =======================================================
-def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=False):
-    ticker = re.sub(r'[^\d]', '', ticker)
+def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=False, analyst_data=None):
+    ticker = re.sub(r'[^\d]', '', str(ticker))
     if len(ticker) != 6: return None
     
     session = get_session()
@@ -624,7 +611,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         effective_bps = bps_val * holding_discount
         tp_m = effective_bps
         fund_type = "지주사 특수 모델 (NAV 50% 할인 앵커링)"
-        
         if eps_val is None:
             structural_warning = "⚠️ [지주사 디스카운트 & 일부 데이터 누락] 지주사 할인 0.5를 적용해 가치를 산정했습니다. 단, EPS 수집 실패로 인해 계량 리포트 작성 시 손익 서술이 제한될 수 있습니다."
         else:
@@ -649,7 +635,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
         tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
         fund_type = "적자 운영 기업 (기술적 밴드 대용)"
-        
         bps_discount = 0.8 if len(eps_history) >= 2 and eps_history[-1] < 0 and eps_history[0] < 0 and eps_history[-1] < eps_history[0] else 1.0
         conservative_bps = bps_val * bps_discount
         data_incomplete = False
@@ -688,9 +673,34 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     struct_warn_line = f"   - 구조적 분석: {structural_warning}\n" if structural_warning else ""
     bps_disp_val = f"{bps_val:,.0f}원" if bps_val is not None else "데이터 누락"
 
+    # ==========================================
+    # 🎯 [신규 기능] 컨센서스 듀얼 타겟팅 조인 및 목표가 연속 변동 트렌드 추적
+    # ==========================================
+    consensus_log = ""
+    if analyst_data:
+        matched_report = next((rep for rep in analyst_data.values() if rep.get("ticker") == ticker), None)
+        if matched_report:
+            a_target = float(matched_report.get("target_price", 0))
+            a_opinion = matched_report.get("opinion", "N/A")
+            a_broker = matched_report.get("broker", "알 수 없음")
+            a_trend = matched_report.get("tp_trend", "유지/신규") 
+            
+            if a_target > 0 and tp_m > 0:
+                divergence = (tp_m - a_target) / a_target
+                trend_text = f"시장 모멘텀: {a_trend}"
+                if abs(divergence) >= 0.15:
+                    if divergence > 0:
+                        consensus_log = f"   - ⚖️ 컨센서스 교차검증: ⚠️[퀀트 고평가] 증권사 목표가({a_target:,.0f}원 | {trend_text}) 대비 퀀트 엔진 중기 목표가({tp_m:,.0f}원)가 {abs(divergence)*100:.1f}% 과도하게 높음. (Bear Case에 반영할 것)\n"
+                    else:
+                        consensus_log = f"   - ⚖️ 컨센서스 교차검증: ⚠️[퀀트 보수적] 증권사 목표가({a_target:,.0f}원 | {trend_text}) 대비 퀀트 엔진이 {abs(divergence)*100:.1f}% 더 보수적으로 하향 조정함. (시장 기대치가 비이성적일 수 있음)\n"
+                else:
+                    consensus_log = f"   - ⚖️ 컨센서스 교차검증: ✅[수렴] 퀀트 모델({tp_m:,.0f}원)과 {a_broker} 컨센서스({a_target:,.0f}원 | {trend_text})가 오차범위 내 일치함.\n"
+            else:
+                consensus_log = f"   - ⚖️ 컨센서스 교차검증: 시장 목표가 데이터 없음 ({a_opinion})\n"
+
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
-        f"▶ [최종 채택 목표가] (출력 화면 1:1 매칭용 - 역전 시 역전된 그대로 인용할 것):\n"
+        f"▶ [최종 채택 목표가]\n"
         f"   - 단기 목표가: {tp_s:,.0f}원\n"
         f"   - 중기 목표가: {tp_m:,.0f}원\n"
         f"   - 장기 목표가: {tp_l:,.0f}원\n"
@@ -699,6 +709,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         f"{struct_warn_line}"
         f"   - 중기 시그널 상태: {flag_m}\n"
         f"   - 장기 시그널 상태: {flag_l}\n"
+        f"{consensus_log}"
         f"   - 참고 원본 BPS: {bps_disp_val}\n"
     )
 
@@ -792,6 +803,7 @@ with tab1:
 
 with tab2:
     st.subheader("핵심 경제 종합 브리핑 및 시장 심리")
+    
     c.execute("SELECT calc_date, score FROM sentiment_history ORDER BY calc_date ASC")
     if sentiment_rows := c.fetchall():
         df_sent = pd.DataFrame(sentiment_rows, columns=['date', 'score'])
@@ -809,93 +821,11 @@ with tab2:
                 st.caption("0(공포) ◀ 50(중립) ▶ 100(탐욕)\n*최근 7일 트렌드")
             with col_s2:
                 st.line_chart(df_avg_7d['score'], height=150)
+                
     st.divider()
 
-    eco_news = dedupe_news(cached_data.get("eco_news", []))
-    if st.button("거시경제 종합 분석 및 전망 생성", use_container_width=True):
-        if not eco_news: st.error("분석할 뉴스가 없습니다.")
-        else:
-            with st.spinner("Lite 요약 중..."): 
-                lite_summary = call_gemini_lite_summary("요약하라:\n" + "\n".join([f"- {n['title']}" for n in eco_news[:50]]))
-            with st.spinner("Flash 심층 분석 중..."):
-                prompt = (
-                    f"당신은 리스크 관리에 철저한 매크로 퀀트 전략가입니다.\n"
-                    f"[현재 시장 지표]\n{json.dumps(market_data)}\n"
-                    f"[거시 경제 요약]\n{lite_summary}\n\n"
-                    f"=== 리포트 작성 항목 ===\n"
-                    f"**📰 핵심 경제 종합 브리핑**\n"
-                    f"- 제공된 요약을 바탕으로 주요 거시 경제 이슈 분석.\n"
-                    f"**🔮 앞으로 주식시장은?**\n"
-                    f"- 향후 시장 전망 및 최대 하방 리스크 점검.\n"
-                    f"**🛡️ 대응 전략**\n"
-                    f"- 포트폴리오 관리 전략 제시.\n\n"
-                    f"※ 마지막 줄은 반드시 시장 심리 수치(0~100)를 아래 포맷으로 출력하십시오.\n"
-                    f"[SENTIMENT_SCORE]: 50"
-                )
-                full_report = "".join(call_gemini_stream_with_fallback(prompt))
-                clean_report_for_regex = full_report.replace('*', '').replace('#', '')
-                if score_match := re.search(r'\[SENTIMENT_SCORE\]\s*:\s*(\d+)', clean_report_for_regex):
-                    c.execute("INSERT INTO sentiment_history (calc_date, score) VALUES (?, ?)", (datetime.now().strftime("%Y-%m-%d"), float(score_match.group(1))))
-                    conn.commit()
-                st.session_state.eco_briefing = re.sub(r'\[SENTIMENT_SCORE\].*', '', full_report, flags=re.DOTALL).strip()
-                st.rerun()
-
-    if st.session_state.get('eco_briefing'):
-        with st.expander("📝 거시경제 분석 및 전망 리포트", expanded=True): 
-            st.write(st.session_state.eco_briefing)
-        
-    st.subheader("핵심 경제 뉴스 목록")
-    if eco_news:
-        for idx, n in enumerate(eco_news[:10]):
-            st.markdown(f"**[{idx+1}] {n['title']}**")
-            if st.button("개별 심층 분석", key=f"eco_an_{idx}"):
-                with st.spinner("분석 진행 중..."):
-                    l_sum = call_gemini_lite_summary(f"본 뉴스를 상세히 요약하라:\n{n['title']}")
-                    st.write(call_gemini_with_fallback(f"[뉴스 요약]\n{l_sum}\n\n파급 효과와 거시적 의미 분석."))
-    else: st.info("조회된 핵심 뉴스가 없습니다.")
-
-with tab3:
-    st.subheader("섹터별 모멘텀 분석")
-    sec_news = g_data.get("sectors") or cached_data.get("sectors") or {}
-    
-    if sec_news:
-        for sec, items in sec_news.items():
-            if not items: continue
-            
-            page_key = f"page_{sec}"
-            if page_key not in st.session_state:
-                st.session_state[page_key] = 10
-                
-            with st.expander(f"📁 {sec} ({len(items)}건)"):
-                current_limit = st.session_state[page_key]
-                for i in items[:current_limit]:
-                    score_badge = f"⭐{i.get('score', 0)}점" if 'score' in i else ""
-                    st.markdown(f"- {score_badge} [{i['title']}]({i.get('link', '#')})")
-                
-                col_m1, col_m2 = st.columns(2)
-                with col_m1:
-                    if len(items) > current_limit:
-                        if st.button("🔽 다음 10개 더보기", key=f"more_{sec}"):
-                            st.session_state[page_key] += 10
-                            st.rerun()
-                with col_m2:
-                    if st.button(f"🧠 상위 30개 핵심 분석", key=f"sec_{sec}"):
-                        with st.spinner("상위 30개 핵심 뉴스 요약 중..."):
-                            top_30_titles = "\n".join([i['title'] for i in items[:30]])
-                            l_sum = call_gemini_lite_summary(f"아래 상위 30개 뉴스를 바탕으로 {sec} 섹터의 핵심 모멘텀을 요약하라:\n{top_30_titles}")
-                            st.write(call_gemini_with_fallback(f"[{sec} 요약]\n{l_sum}\n\n위 요약을 바탕으로 해당 섹터의 주도주 흐름과 향후 모멘텀을 심층 분석하라."))
-
-with tab4:
-    st.markdown("## 🔍 멀티 스트래티지 종목 발굴 엔진")
-    st.caption("백엔드 람다 시스템에서 24시간 타임어택으로 수집 및 정제한 데이터 허브와 파이썬 퀀트 스크리닝을 결합하여 가치 자산을 발굴합니다.")
-    st.divider()
-
-    # ==========================================
-    # 0. 데이터 레이아웃 개편: 3열 독립 뉴스/리포트 허브 (중복 제거)
-    # ==========================================
     st.markdown("### 🌐 실시간 마켓 데이터 및 리포트 유니버스 상황")
     
-    # 람다 수집 데이터 로드
     analyst_universe = cached_data.get("analyst_universe", {})
     today_active_reps = cached_data.get("today_active_reports", [])
     us_news_pool = cached_data.get("us_market_news", [])
@@ -934,13 +864,9 @@ with tab4:
 
     st.divider()
 
-    # ==========================================
-    # 트랙 A: [전면 고도화] 국면 융합형 모닝 브리핑 리포트
-    # ==========================================
     st.markdown("### 🎯 초강력 국면 융합형 모닝 핫브리핑")
     st.caption("실시간 지표, 미국 빅테크 동향, 국내 거시 뉴스, 당일 새벽 발간된 애널리스트 리포트 본문 300자 요약본을 유기적으로 결합하여 시장을 관통하는 요약과 목표가가 포함된 핵심 핫픽 2종목을 산출합니다.")
     
-    # 가시성을 극대화한 전용 실행 버튼 배치
     btn_cols = st.columns([1, 4, 1])
     with btn_cols[1]:
         run_morning = st.button("🚀 당일 모닝 핫브리핑 및 추천 종목 가동", use_container_width=True, type="primary")
@@ -956,18 +882,17 @@ with tab4:
             all_news_text += "\n== 실시간 긴급 속보 ==\n" + "\n".join([n['title'] for n in realtime_news_pool[:15]])
             lite_macro_summary = call_gemini_lite_summary(f"아래 시황 뉴스 스트림을 종합하여 오늘 장에 미칠 결정적 거시적 기회와 리스크를 4문장으로 정밀 압축하라:\n{all_news_text}")
 
-        with st.spinner("2단계: 펀더멘털 리포트 매칭 및 목표가 기반 최적 핫픽 2선 구체화 중..."):
-            # 오늘 리포트가 없으면 최근 3일 내 가동된 우량 리포트 상위 30개를 타겟 풀로 지정
+        with st.spinner("2단계: 펀더멘털 리포트 매칭 및 목표가 트렌드 기반 최적 핫픽 구체화 중..."):
             target_pool = today_active_reps if today_active_reps else list(analyst_universe.values())[:30]
             compact_reports = json.dumps([{
                 "name": r["stock_name"], 
                 "ticker": r.get("ticker", ""),
                 "title": r["title"], 
                 "target_price": r.get("target_price", 0),
+                "trend": r.get("tp_trend", "유지/신규"), 
                 "opinion": r.get("opinion", "Buy"),
                 "content": r.get("content", ""),
-                "broker": r["broker"],
-                "date": r["date"]
+                "broker": r["broker"]
             } for r in target_pool], ensure_ascii=False)
             
             prompt = (
@@ -979,44 +904,81 @@ with tab4:
                 f"=== ⚠️ 작성 지침 및 데이터 스펙 ===\n"
                 f"1. 제공된 미국/국내 뉴스 요약 및 지표 상황을 융합하여 오늘 한국 증시의 자산 배분 방안과 주도 섹터 흐름을 구체적 서술로 브리핑할 것.\n"
                 f"2. 제공된 리포트 풀 중 거시 국면 수혜가 확실하고 본문에 구체적 실적/계량적 촉매가 확인되는 딱 2개의 종목만 엄선할 것.\n"
-                f"3. 엄선된 2종목 리포트 작성 시, 해당 리포트에 기재된 [증권사 목표가], [투자의견], [발간 기관(브로커)]을 절대로 빠뜨리지 말고 숫자로 명시할 것. 임의 가공은 금지함.\n"
-                f"4. 강세 논리 서술 시 본문 요약 데이터(content)를 철저히 인용하여 구체적으로 증명할 것.\n\n"
+                f"3. 엄선된 2종목 리포트 작성 시, 해당 리포트에 기재된 [증권사 목표가], [투자의견], [발간 기관]과 함께 **[연속 상향/하향 트렌드(trend)]를 반드시 명시하여 해당 종목의 시장 기대치 변화(모멘텀)를 증명할 것.**\n"
+                f"4. 강세 논리 서술 시 본문 요약 데이터(content)를 철저히 인용하여 구체적으로 증명할 것.\n"
+                f"5. 브리핑 결과를 바탕으로 오늘의 종합 시장 심리 수치(0~100)를 산출하여 반드시 마지막에 [SENTIMENT_SCORE]: 50 형식으로 출력할 것.\n\n"
                 f"=== 리포트 출력 포맷 ===\n"
                 f"## 📰 1. 글로벌 매크로 국면 및 주도 섹터 통합 브리핑\n"
                 f"(실시간 지표와 매크로 뉴스를 연결하여 오늘 장의 성격 규정 및 하방 리스크 객관적 서술)\n\n"
                 f"## 🎯 2. 당일 기관 모닝 핫픽 (Top 2)\n"
                 f"<ANALYSIS_종목명>\n"
                 f"### 📌 [종목명] ([티커])\n"
-                f"- **기관 컨센서스 개요:** [발간 증권사명] | 투자의견 [의견] | **제시 목표가: [숫자]원**\n"
+                f"- **기관 컨센서스 개요:** [발간 증권사명] | 투자의견 [의견] | **목표가: [숫자]원 (모멘텀: [트렌드])**\n"
                 f"- **거시 국면 연결고리:** (이 종목이 왜 지금 매크로 상태에서 촉매를 받는지 기계적 서술)\n"
                 f"- **펀더멘털 핵심 요약 및 강세 논리:** (리포트 본문 내용 인용 및 수치화된 촉매 서술)\n"
                 f"</ANALYSIS_종목명>\n\n"
-                f"※ 마지막 줄은 반드시 [SELECTED_NAMES]: 종목명1, 종목명2 형식으로 정확하게 종료하십시오."
+                f"※ 마지막 줄은 반드시 [SELECTED_NAMES]: 종목명1, 종목명2 형식으로 정확하게 종료하십시오.\n"
+                f"[SENTIMENT_SCORE]: (점수)"
             )
-            st.session_state.morning_report = "".join(call_gemini_stream_with_fallback(prompt))
+            full_report = "".join(call_gemini_stream_with_fallback(prompt))
+            clean_report_for_regex = full_report.replace('*', '').replace('#', '')
+            if score_match := re.search(r'\[SENTIMENT_SCORE\]\s*:\s*(\d+)', clean_report_for_regex):
+                c.execute("INSERT INTO sentiment_history (calc_date, score) VALUES (?, ?)", (datetime.now().strftime("%Y-%m-%d"), float(score_match.group(1))))
+                conn.commit()
+            st.session_state.morning_report = re.sub(r'\[SENTIMENT_SCORE\].*', '', full_report, flags=re.DOTALL).strip()
+            st.rerun()
 
     if st.session_state.get('morning_report'):
         raw_report = st.session_state.morning_report
         display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw_report.split("[SELECTED_NAMES]")[0].strip())
         with st.container(border=True):
             st.markdown(display_text)
-    
-    st.divider()
 
-    # ==========================================
-    # 트랙 B: 기간별 퀀트 종목 추천 (TOP 3 - 컨센서스 조인 패치 반영)
-    # ==========================================
-    st.markdown("### 📊 핵심 종목 추천 (기간별 퀀트/차트/뉴스 기반 TOP 3)")
+with tab3:
+    st.subheader("섹터별 모멘텀 분석")
+    sec_news = g_data.get("sectors") or cached_data.get("sectors") or {}
+    
+    if sec_news:
+        for sec, items in sec_news.items():
+            if not items: continue
+            
+            page_key = f"page_{sec}"
+            if page_key not in st.session_state:
+                st.session_state[page_key] = 10
+                
+            with st.expander(f"📁 {sec} ({len(items)}건)"):
+                current_limit = st.session_state[page_key]
+                for i in items[:current_limit]:
+                    score_badge = f"⭐{i.get('score', 0)}점" if 'score' in i else ""
+                    st.markdown(f"- {score_badge} [{i['title']}]({i.get('link', '#')})")
+                
+                col_m1, col_m2 = st.columns(2)
+                with col_m1:
+                    if len(items) > current_limit:
+                        if st.button("🔽 다음 10개 더보기", key=f"more_{sec}"):
+                            st.session_state[page_key] += 10
+                            st.rerun()
+                with col_m2:
+                    if st.button(f"🧠 상위 30개 핵심 분석", key=f"sec_{sec}"):
+                        with st.spinner("상위 30개 핵심 뉴스 요약 중..."):
+                            top_30_titles = "\n".join([i['title'] for i in items[:30]])
+                            l_sum = call_gemini_lite_summary(f"아래 상위 30개 뉴스를 바탕으로 {sec} 섹터의 핵심 모멘텀을 요약하라:\n{top_30_titles}")
+                            st.write(call_gemini_with_fallback(f"[{sec} 요약]\n{l_sum}\n\n위 요약을 바탕으로 해당 섹터의 주도주 흐름과 향후 모멘텀을 심층 분석하라."))
+
+with tab4:
+    st.subheader("종목 발굴 (멀티 스트래티지 고속 운용)")
     st.caption("리포트 유니버스 전체 풀을 대상으로 선택한 투자 기간의 퀀트 수치, 차트 지표, 실시간 뉴스 모멘텀을 분석해 매력도 최상위 3종목을 추천합니다.")
     
     investment_horizon = st.radio("포트폴리오 투자 기간", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True, key="recommend_horizon_radio")
     
+    analyst_universe = cached_data.get("analyst_universe", {})
+    realtime_news_pool = g_data.get("realtime_news", [])
+
     if st.button("핵심 종목 추천 TOP 3 발굴", use_container_width=True, key="btn_quant_top3"):
         if not analyst_universe:
             st.error("리포트 DB가 로드되지 않았습니다.")
             st.stop()
 
-        # 1단계: 애널리스트 의견과 무관하게 리포트가 존재하는 전체 검증 풀에서 1차 후보군 10개 스크리닝
         with st.spinner(f"[1단계] {investment_horizon} 전략에 부합하는 1차 후보군 10개 분석 중..."):
             safe_pool = list(analyst_universe.values())
             universe_map = [{"ticker": r.get("ticker", search_stock_code(r["stock_name"])[0]), "name": r["stock_name"]} for r in safe_pool if r.get("ticker") or search_stock_code(r["stock_name"])[0]]
@@ -1038,10 +1000,8 @@ with tab4:
             st.error("1차 후보군 추출에 실패했습니다. 다시 시도하십시오.")
             st.stop()
 
-        # 2단계: 기간별 가중치 수식 및 애널리스트 컨센서스 데이터를 파이썬 퀀트 엔진에 조인 연산
         with st.spinner(f"[2단계] 10개 후보군 퀀트/차트 연산 및 애널리스트 목표가 교차검증 연동 중..."):
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                # [업데이트 완료]: process_single_ticker 함수의 5번째 인자에 analyst_universe 데이터를 완벽히 매핑
                 futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True, analyst_universe) for t in selected_tickers]
                 valid_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
             
@@ -1049,7 +1009,6 @@ with tab4:
             st.error("기계적 리스크 필터를 통과한 종목이 존재하지 않습니다.")
             st.stop()
             
-        # 3단계: 파이썬 검증 로그(괴리율 플래그 포함) 및 뉴스, 차트 수치를 모두 인용한 종합 매력도 채점
         with st.spinner("[3단계] 퀀트 수치 정량 팩트 로그 및 컨센서스 괴리율 기반 최종 심층 리포트 컴파일 중..."):
             tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
             st.session_state.quant_results_cache = valid_results
@@ -1059,22 +1018,21 @@ with tab4:
                 f"파이썬 기계 엔진이 컨센서스 목표가 교차 검증까지 마친 아래 팩트 로그 데이터를 정밀 분석하십시오.\n\n"
                 f"[파이썬 엔진 연산 및 교차 검증 팩트 로그]:\n{tech_data_str_all}\n"
                 f"[실시간 시장 뉴스 컨텍스트]:\n{news_context}\n\n"
-                f"=== ⚠️ 리포트 심사 및 서술 지침 ===\n"
-                f"1. 퀀트 팩트 로그에 기술된 구체적 수치(차트 이격도, 변동성, 이격 지표)와 교차 검증 결과를 바탕으로 가장 매력적인 최종 Top 3 종목만 엄선하십시오.\n"
-                f"2. 각 종목에 대해 0~100점의 **[종합 매력도 점수]**를 부여하되, 파이썬 로그에 '컨센서스 교차검증: ⚠️' 경고 플래그가 확인되는 종목(목표가 괴리율 15% 이상 벌어짐)은 위험 요인을 객관적으로 판단하여 감점 요인으로 반영하십시오.\n"
-                f"3. 강세(Bull) 및 약세(Bear) 논리를 서술할 때는 파이썬이 연산하여 로그에 찍어준 숫자만 인용하고 임의 변형하거나 다른 주가를 창조하지 마십시오.\n\n"
+                f"=== ⚠️ AI 심사 및 작성 지침 ===\n"
+                f"1. **실시간 뉴스 모멘텀, 차트 수치(이평선, MACD), 그리고 퀀트 밸류에이션(EPS, BPS)**을 종합하여 매력도를 객관적으로 산출하고 Top 3 종목을 엄선하십시오.\n"
+                f"2. 각 종목에 대해 0~100점의 **[종합 매력도 점수]**를 부여하되, 파이썬 로그에 기재된 애널리스트 목표가 트렌드(연속 상향/하향) 및 '교차검증: ⚠️' 경고 플래그를 점수에 철저히 가감하십시오.\n"
+                f"3. 강세(Bull) 및 약세(Bear) 논리를 서술할 때는 파이썬이 연산하여 로그에 찍어준 숫자(목표가, 변동성, 이격도 등)만 인용하십시오.\n\n"
                 f"=== 리포트 작성 포맷 ===\n"
                 f"<ANALYSIS_종목명>\n"
                 f"### [종목명]\n"
                 f"**🎯 {investment_horizon} 종합 매력도 점수: [00]/100점**\n"
-                f"**🟢 강세 논리 (Bull Case):** (파이썬이 도출한 구체적 가치 지표, 차트 수치 및 뉴스 모멘텀 직접 연계 기술)\n"
-                f"**🔴 위험 논리 (Bear Case):** (엔진 내부 리스크 플래그, 역전 현상, 지주사 할인 및 증권사 컨센서스 대비 목표가 괴리 상태 서술)\n"
+                f"**🟢 강세 논리 (Bull Case):** (퀀트 데이터, 차트 이격 수치, 뉴스 모멘텀 및 목표가 트렌드를 융합하여 구체적 기술)\n"
+                f"**🔴 위험 논리 (Bear Case):** (엔진 내부 리스크 플래그, 가치 역전 현상, 증권사 컨센서스 오차 및 하방 리스크 서술)\n"
                 f"</ANALYSIS_종목명>\n\n"
                 f"※ 수치나 목표가 밴드를 임의로 가공하지 마십시오. 마지막 줄은 반드시 [SELECTED_NAMES]: 종목명1, 종목명2, 종목명3 형식으로 종료해야 합니다."
             )
             st.session_state.top3_report = "".join(call_gemini_stream_with_fallback(step3_prompt))
 
-    # 결과 출력 및 실시간 바이패스 듀얼 타겟팅 검증 카드 렌더링
     if st.session_state.get('top3_report'):
         raw_top3 = st.session_state.top3_report
         cached_results = st.session_state.get('quant_results_cache', [])
@@ -1102,7 +1060,6 @@ with tab4:
                         current_p = q_data['current_price']
                         q_target_mid = q_data['tp_m'] 
                         
-                        # 투자 기간에 대응하는 정량 타겟 및 손절 라인 매핑
                         if "단기" in investment_horizon:
                             active_target, active_sl = q_data['tp_s'], q_data['sl_s']
                         elif "중기" in investment_horizon:
@@ -1110,7 +1067,6 @@ with tab4:
                         else:
                             active_target, active_sl = q_data['tp_l'], q_data['sl_l']
                         
-                        # 람다 유니버스로부터 해당 종목의 정형화 리포트 팩트 매칭
                         rep_info = next((v for k, v in analyst_universe.items() if v.get("ticker") == tick_code), analyst_universe.get(matched_name, {}))
                         extracted_target = float(rep_info.get("target_price", 0))
                         
@@ -1119,7 +1075,6 @@ with tab4:
                                 st.markdown(f"#### **{matched_name}** `{tick_code}`")
                                 st.metric("실시간 현재가", f"{current_p:,.0f}원")
                                 
-                                # 애널리스트 컨센서스와 퀀트 엔진 간의 기계적 오차 추적 시스템
                                 if extracted_target > 0 and current_p > 0:
                                     divergence = abs(q_target_mid - extracted_target) / q_target_mid
                                     if divergence >= 0.05:
@@ -1150,6 +1105,7 @@ with tab4:
                                     ))
                                     conn.commit()
                                     st.success("✅ 스크랩북 저장 완료")
+
 with tab5:
     st.subheader("관심종목 진단")
     own_status = st.radio("상태", ["미보유", "보유"], horizontal=True, key="add_own_status")
@@ -1186,6 +1142,7 @@ with tab5:
                     conn.commit(); st.rerun()
 
         price_map_watch = fetch_current_prices([p[15] for p in portfolios if p[15]])
+        analyst_universe = cached_data.get("analyst_universe", {})
 
         for p in portfolios:
             p_id, name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, model_used, report_time, ticker = p
@@ -1206,7 +1163,7 @@ with tab5:
             with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
                     with st.spinner("파이썬 연산 및 수치 방어 논리 작성 중..."):
-                        data_dict = process_single_ticker(ticker, "단기/중기/장기 종합", k_factor, is_discovery_mode=False)
+                        data_dict = process_single_ticker(ticker, "단기/중기/장기 종합", k_factor, False, analyst_universe)
                         if not data_dict:
                             st.error("데이터 수집 실패")
                             continue
@@ -1216,9 +1173,9 @@ with tab5:
                         
                         prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_dict['tech_data_str']}\n{extra_ctx}\n\n"
                                   f"당신은 리스크와 기회를 종합적으로 분석하는 전문 퀀트 애널리스트입니다.\n"
-                                  f"1. **[종합 매력도 점수]** 해당 종목의 뉴스/이슈와 퀀트 수치, 차트수치를 스스로 가중치 부여하여 **'종합 매력도 점수(0~100점)'**를 산정하십시오.\n"
+                                  f"1. **[종합 매력도 점수]** 해당 종목의 뉴스/이슈와 퀀트 수치, 차트수치, 애널리스트 리비전(트렌드)을 스스로 가중치 부여하여 **'종합 매력도 점수(0~100점)'**를 산정하십시오.\n"
                                   f"2. **[논리적 근거 강제]** 현황 및 촉매제를 설명할 때는 반드시 제공된 '뉴스/공시 요약본'의 구체적 이슈를 인용하십시오.\n"
-                                  f"3. **[위험 요소]** '역전됨' 플래그나 특수 구조적 경고가 발견된 종목은 반드시 <BEAR_CASE>에 구체적인 오버슈팅 및 밸류 트랩 리스크를 서술하십시오.\n"
+                                  f"3. **[위험 요소]** '역전됨' 플래그나 목표가 컨센서스 괴리 경고가 발견된 종목은 반드시 <BEAR_CASE>에 구체적인 리스크를 서술하십시오.\n"
                                   f"4. 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
                                   f"=== 작성 항목 ===\n"
                                   f"**🎯 종합 매력도 점수: [00]/100점**\n"
@@ -1298,14 +1255,6 @@ with tab6:
             m2.metric("단기 목표 도달 / 손절", f"{(hit_count_s/total_evals)*100:.1f}% / {(stop_out_count_s/total_evals)*100:.1f}%")
             m3.metric("중기 목표 도달 / 손절", f"{(hit_count_m/total_evals)*100:.1f}% / {(stop_out_count_m/total_evals)*100:.1f}%")
             m4.metric("스크랩 포트폴리오 수익률", f"{avg_current_yield:+.2f}%")
-
-            if total_evals >= 5:
-                stop_rate_s = stop_out_count_s / total_evals
-                hit_rate_s = hit_count_s / total_evals
-                if stop_rate_s >= 0.35:
-                    st.warning(f"⚠️ 단기 손절 이탈률이 {stop_rate_s*100:.0f}%로 높은 편입니다. 현재 k={k_factor:.1f} 값이 다소 타이트할 수 있으니, 사이드바에서 k값을 조금 높여보는 것을 고려해보세요.")
-                elif hit_rate_s <= 0.2 and stop_rate_s <= 0.1:
-                    st.info(f"💡 단기 목표 도달률이 {hit_rate_s*100:.0f}%로 낮은 반면 손절 이탈은 적습니다. 목표가 밴드가 다소 보수적으로 산출되고 있을 수 있습니다.")
             
         st.divider()
 
