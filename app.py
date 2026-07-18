@@ -20,15 +20,17 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google import genai
 
+# =======================================================
+# 설정 및 모델
+# =======================================================
 MODEL_NAME = "gemini-3.5-flash"
 LITE_MODEL_NAME = "gemini-3.1-flash-lite"
+FALLBACK_MODEL_NAME = "gemini-3-flash-preview"
 
-# =======================================================
 # 스레드 안전성(Thread-Safety) 락 및 세션 관리
-# =======================================================
 db_backup_lock = threading.Lock()
-xml_parse_lock = threading.Lock()  # C-레벨 XML 파서 충돌 방지용
-thread_local = threading.local()   # 스레드별 세션 재사용 (포트 고갈 방지)
+xml_parse_lock = threading.Lock() 
+thread_local = threading.local()  
 
 def get_session():
     if not hasattr(thread_local, "session"):
@@ -38,7 +40,7 @@ def get_session():
 st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 
 # =======================================================
-# 비밀번호 기반 로그인 및 유저 식별
+# 보안 및 로그인
 # =======================================================
 def check_password():
     passwords_dict = st.secrets.get("USER_PASSWORDS", {})
@@ -78,53 +80,44 @@ NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
 # =======================================================
-# 데이터베이스 초기화
+# DB 초기화 및 컬럼 마이그레이션
 # =======================================================
 @st.cache_resource
 def init_db():
-    try:
-        connection = sqlite3.connect('market_analysis.db', check_same_thread=False, timeout=30)
-        cursor = connection.cursor()
-        cursor.execute('''CREATE TABLE IF NOT EXISTS scrapbook (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, link TEXT, summary TEXT, analysis TEXT, scrap_date TEXT)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, stock_name TEXT)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KEY AUTOINCREMENT, calc_date TEXT, score REAL)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS dart_corp_codes (corp_code TEXT, corp_name TEXT, stock_code TEXT PRIMARY KEY)''')
-        
-        cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, k_factor REAL)''')
-        connection.commit()
+    connection = sqlite3.connect('market_analysis.db', check_same_thread=False, timeout=30)
+    cursor = connection.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS scrapbook (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, link TEXT, summary TEXT, analysis TEXT, scrap_date TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, stock_name TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KEY AUTOINCREMENT, calc_date TEXT, score REAL)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS dart_corp_codes (corp_code TEXT, corp_name TEXT, stock_code TEXT PRIMARY KEY)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, k_factor REAL)''')
+    connection.commit()
 
-        columns_to_add = [
-            ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
-            ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("portfolio", "report_text", "TEXT"),
-            ("portfolio", "tp_s", "REAL DEFAULT 0.0"), ("portfolio", "tp_m", "REAL DEFAULT 0.0"), ("portfolio", "tp_l", "REAL DEFAULT 0.0"), 
-            ("portfolio", "bp", "REAL DEFAULT 0.0"),
-            ("portfolio", "sl_s", "REAL DEFAULT 0.0"), ("portfolio", "sl_m", "REAL DEFAULT 0.0"), ("portfolio", "sl_l", "REAL DEFAULT 0.0"), 
-            ("scrapbook", "stock_name", "TEXT"), ("scrapbook", "ticker", "TEXT"),
-            ("scrapbook", "saved_price", "REAL DEFAULT 0.0"), 
-            ("scrapbook", "target_price", "REAL DEFAULT 0.0"), ("scrapbook", "target_price_mid", "REAL DEFAULT 0.0"), ("scrapbook", "target_price_long", "REAL DEFAULT 0.0"),
-            ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0"), 
-            ("scrapbook", "sl_s", "REAL DEFAULT 0.0"), ("scrapbook", "sl_m", "REAL DEFAULT 0.0"), ("scrapbook", "sl_l", "REAL DEFAULT 0.0"), 
-            ("portfolio", "model_used", "TEXT"), ("portfolio", "report_time", "TEXT"), 
-            ("portfolio", "ticker", "TEXT"), ("scrapbook", "model_used", "TEXT"),
-            ("portfolio", "user_id", "TEXT DEFAULT 'dongsu'"), ("scrapbook", "user_id", "TEXT DEFAULT 'dongsu'")
-        ]
-        for table, col, dtype in columns_to_add:
-            try: 
-                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}")
-                connection.commit()
-            except Exception:
-                pass
-        return connection
-    except Exception as e:
-        return None
+    columns_to_add = [
+        ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
+        ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("portfolio", "report_text", "TEXT"),
+        ("portfolio", "tp_s", "REAL DEFAULT 0.0"), ("portfolio", "tp_m", "REAL DEFAULT 0.0"), ("portfolio", "tp_l", "REAL DEFAULT 0.0"), 
+        ("portfolio", "bp", "REAL DEFAULT 0.0"),
+        ("portfolio", "sl_s", "REAL DEFAULT 0.0"), ("portfolio", "sl_m", "REAL DEFAULT 0.0"), ("portfolio", "sl_l", "REAL DEFAULT 0.0"), 
+        ("scrapbook", "stock_name", "TEXT"), ("scrapbook", "ticker", "TEXT"),
+        ("scrapbook", "saved_price", "REAL DEFAULT 0.0"), 
+        ("scrapbook", "target_price", "REAL DEFAULT 0.0"), ("scrapbook", "target_price_mid", "REAL DEFAULT 0.0"), ("scrapbook", "target_price_long", "REAL DEFAULT 0.0"),
+        ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0"), 
+        ("scrapbook", "sl_s", "REAL DEFAULT 0.0"), ("scrapbook", "sl_m", "REAL DEFAULT 0.0"), ("scrapbook", "sl_l", "REAL DEFAULT 0.0"), 
+        ("portfolio", "model_used", "TEXT"), ("portfolio", "report_time", "TEXT"), 
+        ("portfolio", "ticker", "TEXT"), ("scrapbook", "model_used", "TEXT"),
+        ("portfolio", "user_id", "TEXT DEFAULT 'dongsu'"), ("scrapbook", "user_id", "TEXT DEFAULT 'dongsu'")
+    ]
+    for table, col, dtype in columns_to_add:
+        try: 
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}")
+            connection.commit()
+        except Exception:
+            pass
+    return connection
 
 conn = init_db()
-try:
-    c = conn.cursor()
-except sqlite3.ProgrammingError:
-    init_db.clear()
-    conn = init_db()
-    c = conn.cursor()
+c = conn.cursor()
 
 @st.cache_resource
 def initialize_dart_codes():
@@ -196,7 +189,7 @@ def restore_db_from_drive():
         except: return False
 
 # =======================================================
-# 사이드바 제어 (K값 저장)
+# 사이드바 제어
 # =======================================================
 with st.sidebar:
     st.markdown(f"**👤 접속 계정:** `{current_user}`")
@@ -227,7 +220,7 @@ with st.sidebar:
                 st.rerun()
 
 # =======================================================
-# 투 트랙 API 호출 (동시성 제어)
+# AI 통신 및 파싱 (오류 캡처 및 Fallback 고도화)
 # =======================================================
 GEMINI_CONCURRENCY_LIMIT = 3
 _gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
@@ -251,9 +244,10 @@ def call_gemini_with_fallback(prompt, model=MODEL_NAME):
         except Exception as e1:
             if model == MODEL_NAME:
                 try:
-                    return client.models.generate_content(model="gemini-3-flash-preview", contents=prompt).text
+                    fallback_res = client.models.generate_content(model=FALLBACK_MODEL_NAME, contents=prompt).text
+                    return f"[⚠️ 우회 안내] 메인 모델 에러(원인: {str(e1)})로 인해 우회 모델로 연산을 대체함:\n\n{fallback_res}"
                 except Exception as e2:
-                    return f"최종 호출 실패 (Flash 및 Preview 모두 에러): {e2}"
+                    return f"최종 실패. 1차에러: {e1} | 2차에러: {e2}"
             else:
                 return f"호출 실패: {e1}"
     except Exception as e:
@@ -272,13 +266,14 @@ def call_gemini_stream_with_fallback(prompt):
             response = client.models.generate_content_stream(model=MODEL_NAME, contents=prompt)
             for chunk in response:
                 if chunk.text: yield chunk.text
-        except Exception:
+        except Exception as e1:
             try:
-                fallback_response = client.models.generate_content_stream(model="gemini-3-flash-preview", contents=prompt)
-                yield f"\n[안내] 3.5-flash 서버 응답 지연으로 인해 3-preview 모델로 우회하여 분석을 진행합니다.\n\n"
+                yield f"\n\n---\n⚠️ **[안내] 서버 장애로 인해 보조 모델로 우회하여 분석을 재개합니다.**\n*(오류 원인: {str(e1)}*)\n---\n\n"
+                fallback_response = client.models.generate_content_stream(model=FALLBACK_MODEL_NAME, contents=prompt)
                 for chunk in fallback_response:
                     if chunk.text: yield chunk.text
-            except Exception as e2: yield f"\n최종 호출 실패: {e2}"
+            except Exception as e2: 
+                yield f"\n\n❌ [최종 호출 실패] 원인: {str(e2)}"
     finally: _gemini_semaphore.release()
 
 # =======================================================
@@ -570,7 +565,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경
 # =======================================================
 with tab1:
     st.subheader("실시간 시황 브리핑")
-    news_pool = g_data.get("realtime_news", [])
+    news_pool = dedupe_news(g_data.get("realtime_news", []))  # 버그 수정: 중복 뉴스 제거
     if news_pool:
         with st.expander(f"📰 수집된 실시간 뉴스 (최신 10건 표시 / 총 {len(news_pool)}건 누적)"):
             for idx, n in enumerate(news_pool[:10]): st.markdown(f"{idx+1}. [{n['title']}]({n['link']})")
@@ -602,7 +597,7 @@ with tab2:
                 st.line_chart(df_avg_7d['score'], height=150)
     st.divider()
 
-    eco_news = cached_data.get("eco_news", [])
+    eco_news = dedupe_news(cached_data.get("eco_news", [])) # 버그 수정: 중복 뉴스 제거
     if st.button("거시경제 종합 분석 및 전망 생성", use_container_width=True):
         if not eco_news: st.error("분석할 뉴스가 없습니다.")
         else:
@@ -696,7 +691,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
     except: float_ind_per = 0.0
 
-    # 1. PBR 예외처리 및 데이터 정합성 보완 (자본잠식 방어)
+    # 1. PBR 예외처리 및 데이터 정합성 보완
     if bps_val > 0 and current_price > 0:
         fund['pbr'] = f"{current_price / bps_val:.2f}"
     else:
@@ -713,12 +708,12 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         
     conservative_bps = (bps_val * bps_discount) if bps_val > 0 else current_price * 0.8
 
-    # 2. 손절가 캡핑 적용 (최대 하락폭 제한으로 비현실적 수치 방지)
+    # 2. 손절가 캡핑 적용 (-15%, -30%, -50% 제한)
     sl_s = current_price * (1 - min(user_k * daily_vol * np.sqrt(20), 0.15)) if daily_vol > 0 else current_price * 0.95
     sl_m = current_price * (1 - min(user_k * daily_vol * np.sqrt(60), 0.30)) if daily_vol > 0 else current_price * 0.90
     sl_l = current_price * (1 - min(user_k * daily_vol * np.sqrt(250), 0.50)) if daily_vol > 0 else current_price * 0.80
 
-    # 3. 목표가 산출 및 모멘텀 상한선(+25%) 제한
+    # 3. 목표가 산출
     tp_s = current_price * min(1 + user_k * daily_vol * np.sqrt(20), 1.25) if daily_vol > 0 else current_price * 1.05
 
     if eps_val <= 0:
@@ -733,25 +728,16 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
         fund_type = "기본 펀더멘털"
 
-    # 4. 종목 발굴 탭(is_discovery_mode=True) 전용 절대 필터 (적자 꼼수 원천 차단)
+    # 4. 종목 발굴 전용 절대 필터
     if is_discovery_mode:
         if eps_val <= 0:
-            # [수정됨] 적자 기업은 보수적 청산가치조차 현재가에 못 미치면 100% 탈락
-            if current_price > 0 and conservative_bps < current_price:
-                return ""
+            if current_price > 0 and conservative_bps < current_price: return ""
         else:
-            # 흑자 기업은 펀더멘털 가치가 현재가를 못 넘기면 즉시 탈락
-            if current_price > 0 and (tp_m < current_price or tp_l < current_price):
-                return "" 
+            if current_price > 0 and (tp_m < current_price or tp_l < current_price): return "" 
 
-    # 5. [수정됨] 강제 정렬(max) 폐지 및 역전 현상 그대로 노출 (내부 로그 기록)
-    flag_m = "정상"
-    flag_l = "정상"
-    
-    if tp_s > tp_m: 
-        flag_m = f"⚠️ 역전됨 (단기 모멘텀 {tp_s:,.0f}원 대비 펀더멘털이 낮아 장기 하향 리스크 내재)"
-    if tp_m > tp_l: 
-        flag_l = f"⚠️ 역전됨 (중기 가치 대비 장기 RIM 가치({tp_l:,.0f}원)가 낮아 성장성 둔화 우려)"
+    # 5. 역전 현상 그대로 노출 및 내부 로그 기록
+    flag_m = "정상" if tp_s <= tp_m else f"⚠️역전됨(단기 모멘텀 {tp_s:,.0f} > 중기 {tp_m:,.0f})"
+    flag_l = "정상" if tp_m <= tp_l else f"⚠️역전됨(중기 가치 대비 장기 RIM 가치({tp_l:,.0f}원)가 낮아 성장성 둔화 우려)"
 
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
@@ -791,7 +777,7 @@ with tab4:
             
             if not selected_tickers: 
                 st.error("⚠️ AI가 조건에 맞는 종목을 추출하지 못했거나 API 응답이 지연되었습니다. 잠시 후 다시 시도해주세요.")
-                st.stop()
+                st.stop() # UI 스레드 분리 완료
             
             with st.spinner("[2단계] 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
@@ -825,23 +811,25 @@ with tab4:
             else:
                 with st.spinner(f"[3단계] 최종 선별된 {len(valid_results)}개 중 Flash 기반 Top 3 보고서 작성 중..."):
                     step3_prompt = (
-                        f"당신은 리스크 관리를 최우선으로 하는 퀀트 애널리스트입니다.\n"
-                        f"[후보군 팩트 데이터]\n{tech_data_str}\n\n"
-                        f"=== ⚠️ AI 분석 및 목표가 선택 지침 ===\n"
-                        f"1. 모든 요소를 고려해 가장 매력적인 **Top 3 종목만 엄선**하십시오.\n"
-                        f"2. 핵심 투자 아이디어(Why Buy?)를 최상단에 선언하십시오.\n"
+                        f"당신은 리스크와 기회를 종합적으로 분석하는 전문 퀀트 애널리스트입니다.\n"
+                        f"[후보군 팩트 데이터(뉴스, 공시, 재무, 차트 포함)]\n{tech_data_str}\n\n"
+                        f"=== ⚠️ AI 분석 지침 ===\n"
+                        f"1. 가장 매력적인, 종합매력도 점수가 가장 높은 **Top 3 종목만 엄선**하십시오.\n"
+                        f"2. **[종합 분석 및 스코어링]** 제공된 모든 데이터(뉴스 모멘텀, 수급, 펀더멘털)를 당신의 역량으로 종합하여 **'종합 매력도 점수(0~100점)'**를 1순위로 산정하고 최상단에 명시하십시오.\n"
                         f"3. 절대 주가나 수식을 임의 계산하지 마시고 파이썬이 연산한 [최종 채택 목표가]와 손절가를 그대로 인용하십시오.\n"
-                        f"4. **[수치 기반 논증 강제]** 목표가의 타당성을 설명할 때는 두루뭉술한 형용사를 배제하고, 반드시 제공된 팩트 데이터(EPS, BPS, PER, 일간 변동성, 이동평균선 등)의 '숫자'를 직접 인용하여 수학적/통계적으로 논증하십시오. 다만, 분석과 리포트에 있어 뉴스와 모멘텀을 배제해서는 안됩니다.\n"
-                        f"5. **[매우 중요]** 목표가가 단기>중기>장기 순으로 '역전됨' 플래그가 발견된 종목은 단기 모멘텀으로 오버슈팅된 상태입니다. 반드시 <BEAR_CASE> 및 최종 판단 항목에 '장기 가치 수렴 한계 및 밸류에이션 역전 리스크'를 구체적인 원본 숫자와 함께 경고하십시오.\n\n"
+                        f"4. **[논리적 근거 강제]** 강세/약세 논리를 서술할 때 반드시 뉴스/공시 이슈를 서술하고, 목표가의 타당성을 논증할 때는 파이썬이 제공한 팩트 데이터의 숫자를 직접 인용하여 증명하십시오.\n"
+                        f"5. **[매우 중요]** 목표가가 기간별로 '역전됨' 플래그가 발견된 종목은 단기 오버슈팅 상태입니다. 반드시 <BEAR_CASE>에 '장기 가치 수렴 한계 리스크'를 구체적으로 경고하십시오.\n\n"
                         f"=== 리포트 작성 항목 ===\n"
                         f"<ANALYSIS_티커숫자>\n"
                         f"### [종목명] (티커)\n"
-                        f"**🎯 핵심 투자 아이디어 (Why Buy?)**\n"
+                        f"**🎯 종합 매력도 점수: [00]/100점**\n"
+                        f"**🎯 핵심 투자 아이디어 및 모멘텀 (Why Buy?)**\n"
+                        f"- (뉴스/공시와 데이터를 결합한 종합적 의견)\n"
                         f"**🟢 강세 논리 (Bull Case)**\n"
                         f"**🔴 약세/위험 논리 (Bear Case - 역전 보정 경고 포함)**\n"
                         f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                        f"- 단기 목표가 논증: (일간 변동성, 이평선 등 기술적 수치를 인용하여 작성)\n"
-                        f"- 중/장기 목표가 논증: (EPS, BPS, PER 등 펀더멘털 수치를 인용하여 작성)\n"
+                        f"- 단기 목표가 논증: (기술적/수급 수치 인용)\n"
+                        f"- 중/장기 목표가 논증: (펀더멘털 수치 인용)\n"
                         f"</ANALYSIS_티커숫자>\n\n"
                         f"※ 마지막 줄은 아래 파싱 형식으로 출력\n"
                         f"[TRACKING_DATA]\n"
@@ -948,24 +936,24 @@ with tab5:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
                     with st.spinner("파이썬 연산 및 수치 방어 논리 작성 중..."):
                         data_str_base = process_single_ticker(ticker, "단기/중기/장기 종합", k_factor, is_discovery_mode=False)
-                        
                         extra_ctx = f"\n현재가: {current:,.0f}\n"
                         if is_owned and avg_price > 0: extra_ctx += f"[내 계좌 정보] 평단가: {avg_price:,.0f} | 현재 수익률: {((current - avg_price) / avg_price * 100):+.1f}%\n"
                         
                         prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_str_base}\n{extra_ctx}\n\n"
-                                  f"당신은 리스크 관리에 철저한 애널리스트입니다.\n"
-                                  f"1. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 이 종목을 지금 매수/보유/매도해야 하는가?'**에 대한 핵심 논리를 선언하십시오.\n"
-                                  f"2. 파이썬이 선행 연산하여 제공한 [최종 채택 목표가] 가격을 그대로 채택하여 진단하십시오.\n"
-                                  f"3. **[수치 기반 논증 강제]** 목표가의 타당성을 설명할 때는 두루뭉술한 형용사를 배제하고, 반드시 제공된 팩트 데이터(EPS, BPS, PER, 평단가, 수익률, 일간 변동성 등)의 '숫자'를 직접 인용하여 수학적/통계적으로 논증하십시오.\n"
-                                  f"4. **[매우 중요]** 목표가가 단기>중기>장기 순으로 '역전됨' 플래그가 발견된 종목은 단기 모멘텀으로 오버슈팅된 상태입니다. 반드시 <BEAR_CASE> 및 최종 판단 항목에 '장기 가치 수렴 한계 및 밸류에이션 역전 리스크'를 구체적인 원본 숫자와 함께 경고하십시오.\n"
-                                  f"5. 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
+                                  f"당신은 리스크와 기회를 종합적으로 분석하는 전문 퀀트 애널리스트입니다.\n"
+                                  f"1. 파이썬이 선행 연산하여 제공한 [최종 채택 목표가] 가격을 그대로 채택하여 진단하십시오.\n"
+                                  f"2. **[종합 매력도 점수]** 해당 종목의 뉴스/이슈와 퀀트 수치, 그리고 차트수치를 스스로 가중치 부여하여 **'종합 매력도 점수(0~100점)'**를 산정하십시오.\n"
+                                  f"3. **[논리적 근거 강제]** 현황 및 촉매제를 설명할 때는 반드시 제공된 '뉴스/공시 요약본'의 구체적 이슈를 인용하고, '목표가의 타당성'을 논증할 때는 제공된 팩트 데이터(EPS, BPS, 변동성 등)의 '숫자'를 직접 인용하여 방어하십시오.\n"
+                                  f"4. **[위험 요소]** '역전됨' 플래그가 발견된 종목은 반드시 <BEAR_CASE>에 구체적인 오버슈팅 리스크를 서술하십시오.\n"
+                                  f"5. 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 제시하십시오.\n\n"
                                   f"=== 작성 항목 ===\n"
-                                  f"**🎯 핵심 아이디어 (Why Buy/Hold/Sell?)**\n"
+                                  f"**🎯 종합 매력도 점수: [00]/100점**\n"
+                                  f"**🎯 핵심 투자 아이디어 (Why Buy/Hold/Sell?)**\n"
                                   f"**🟢 강세 논리 (Bull Case)**\n"
                                   f"**🔴 약세/위험 논리 (Bear Case)**\n"
                                   f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                                  f"- 단기 목표가 논증: (일간 변동성, 이평선 등 기술적 수치를 인용하여 작성)\n"
-                                  f"- 중/장기 목표가 논증: (EPS, BPS, PER 등 펀더멘털 수치를 인용하여 작성)\n"
+                                  f"- 단기 목표가 논증: (기술적 수치를 인용하여 작성)\n"
+                                  f"- 중/장기 목표가 논증: (펀더멘털 수치를 인용하여 작성)\n"
                                   f"※ 마지막 줄은 아래 파싱 형식으로 출력\n"
                                   f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가|단기손절가|중기손절가|장기손절가")
                     
@@ -1009,7 +997,6 @@ with tab5:
 # =======================================================
 with tab6:
     st.subheader("저장된 분석 리포트 및 모델 검증")
-    
     c.execute("""
         SELECT id, title, stock_name, ticker, scrap_date, analysis, model_used, 
                saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, 
@@ -1023,7 +1010,6 @@ with tab6:
     if scraps:
         tickers = [row[3] for row in scraps if row[3]]
         price_map_scrap = fetch_current_prices(tickers)
-        
         total_evals = len(scraps)
         hit_count_s, hit_count_m = 0, 0
         stop_out_count_s, stop_out_count_m = 0, 0
@@ -1093,7 +1079,6 @@ with tab6:
                     if current_p > 0 and tp_s > 0:
                         pct_s = (current_p / tp_s) * 100
                         st.progress(min(int(pct_s), 100), text=f"단기 목표가 대비 진행률: **{pct_s:.1f}%**")
-                        
                         if min_low > 0 and min_low <= sl_s and sl_s > 0:
                             st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 현재 반등했더라도 시스템 룰에 따른 리뷰가 필요합니다.")
                         elif current_p <= sl_s and sl_s > 0:
