@@ -805,8 +805,20 @@ g_data = st.session_state.realtime_cache
 # =======================================================
 st.markdown("### 📊 글로벌 마켓 실시간 전광판")
 
+# 트레이딩뷰 실시간 티커 테이프 위젯 (강제 렌더링 및 CSS 최적화 패치)
 components.html(
     """
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <style>
+        /* Streamlit iframe 내부의 여백을 없애고 강제로 꽉 채움 */
+        body { margin: 0; padding: 0; overflow: hidden; background-color: #ffffff; }
+        .tradingview-widget-container { width: 100%; height: 100%; }
+    </style>
+    </head>
+    <body>
     <div class="tradingview-widget-container">
       <div class="tradingview-widget-container__widget"></div>
       <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/tv-widget-ticker-tape.js" async>
@@ -821,14 +833,16 @@ components.html(
       ],
       "showSymbolLogo": true,
       "isTransparent": false,
-      "displayMode": "adaptive",
+      "displayMode": "regular",
       "colorTheme": "light",
       "locale": "kr"
       }
       </script>
     </div>
+    </body>
+    </html>
     """,
-    height=100
+    height=85
 )
 
 col_title, col_refresh = st.columns([5, 1.2])
