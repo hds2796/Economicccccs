@@ -317,9 +317,13 @@ def get_risk_free_rate():
         url = "https://finance.naver.com/marketindex/interestDailyQuote.naver?marketindexCd=IRR_GOVT10Y"
         res = get_session().get(url, timeout=5)
         soup = BeautifulSoup(res.text, "html.parser")
-        val = soup.find("td", class_="num").text.strip()
-        return float(val) / 100
-    except: return 0.032 
+        val = soup.select_one("div.head_info > span.value").text.strip()
+        rf_rate = float(val) / 100
+        if rf_rate > 0.10 or rf_rate <= 0: 
+            return 0.032
+        return rf_rate
+    except: 
+        return 0.032 
 
 # =======================================================
 # 데이터 가공 및 팩트 추출 유틸
@@ -345,7 +349,7 @@ def get_dart_filings(stock_code):
 
 @st.cache_data(ttl=600)
 def get_advanced_fundamental_data(code):
-    data = {"per": "-", "pbr": "-", "eps": None, "bps": None, "industry_per": "-", "quarter_trend": "정보 없음", "supply_demand": "정보 없음", "eps_history": [], "roe_history": []}
+    data = {"per": "-", "pbr": "-", "eps": None, "bps": None, "industry_per": "-", "quarter_trend": "정보 없음", "supply_demand": "수급 정보 없음", "sales_history": [], "op_history": [], "eps_history": [], "roe_history": []}
     headers = {'User-Agent': 'Mozilla/5.0'}
     session = get_session()
     try:
@@ -370,7 +374,13 @@ def get_advanced_fundamental_data(code):
             try:
                 for th in cop_table.find_all("th"):
                     text = th.get_text().strip()
-                    if "EPS" in text:
+                    if "매출액" in text:
+                        valid_sales = [float(v) for td in th.find_parent("tr").find_all("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
+                        if valid_sales: data["sales_history"] = valid_sales[-3:]
+                    elif "영업이익" in text:
+                        valid_op = [float(v) for td in th.find_parent("tr").find_all("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
+                        if valid_op: data["op_history"] = valid_op[-3:]
+                    elif "EPS" in text:
                         valid_eps = [float(v) for td in th.find_parent("tr").find_all("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
                         if valid_eps:
                             if data["eps"] is None: data["eps"] = valid_eps[-1] 
@@ -393,17 +403,25 @@ def get_advanced_fundamental_data(code):
         res_frgn = session.get(url_frgn, headers=headers, timeout=5)
         soup_frgn = BeautifulSoup(res_frgn.text, "html.parser")
         
-        inst_sum, fore_sum, count = 0, 0, 0
+        inst_sum_5, fore_sum_5 = 0, 0
+        inst_sum_20, fore_sum_20 = 0, 0
+        count = 0
         for tr in soup_frgn.find_all("tr", {"onmouseover": "mouseOver(this)"}):
-            if count >= 5: break
+            if count >= 20: break
             tds = tr.find_all("td")
             if len(tds) >= 7:
                 try:
-                    inst_sum += int(tds[5].get_text().strip().replace(',', '') or 0)
-                    fore_sum += int(tds[6].get_text().strip().replace(',', '') or 0)
+                    i_vol = int(tds[5].get_text().strip().replace(',', '') or 0)
+                    f_vol = int(tds[6].get_text().strip().replace(',', '') or 0)
+                    if count < 5:
+                        inst_sum_5 += i_vol
+                        fore_sum_5 += f_vol
+                    inst_sum_20 += i_vol
+                    fore_sum_20 += f_vol
                     count += 1
                 except: pass
-        data["supply_demand"] = f"최근 {count}일 누적 -> 기관: {inst_sum:+,}주 / 외국인: {fore_sum:+,}주" if count > 0 else "수급 데이터 수집 불가"
+        if count > 0:
+            data["supply_demand"] = f"[수급 동향] 최근 5일(기관 {inst_sum_5:+,}주 / 외인 {fore_sum_5:+,}주) | 최근 20일(기관 {inst_sum_20:+,}주 / 외인 {fore_sum_20:+,}주)"
     except: pass
     return data
 
@@ -455,7 +473,11 @@ def fetch_stock_news(query, display=5):
         url = f"https://naverapihub.apigw.ntruss.com/search/v1/news?query={urllib.parse.quote(query)}&display={display}&sort=date&format=json"
         req = urllib.request.Request(url, headers={"X-NCP-APIGW-API-KEY-ID": NAVER_CLIENT_ID, "X-NCP-APIGW-API-KEY": NAVER_CLIENT_SECRET})
         with urllib.request.urlopen(req, timeout=3) as response:
-            return [{"title": BeautifulSoup(i['title'], "html.parser").get_text(), "link": i['link']} for i in json.loads(response.read().decode('utf-8')).get("items", [])]
+            return [{
+                "title": BeautifulSoup(i['title'], "html.parser").get_text(), 
+                "link": i['link'],
+                "summary": BeautifulSoup(i.get('description', ''), "html.parser").get_text()
+            } for i in json.loads(response.read().decode('utf-8')).get("items", [])]
     except: return []
 
 @st.cache_data(ttl=1800)
@@ -564,7 +586,9 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     fund = get_advanced_fundamental_data(ticker)
     dart_info = get_dart_filings(ticker)
     news_raw = fetch_stock_news(name, display=4)
-    lite_summary = call_gemini_lite_summary(f"뉴스/공시 요약:\n{dart_info}\n{chr(10).join([n['title'] for n in news_raw])}")
+    
+    news_text = "\n".join([f"- 제목: {n['title']}\n  내용: {n.get('summary', '요약 없음')}" for n in news_raw])
+    lite_summary = call_gemini_lite_summary(f"뉴스/공시 요약:\n{dart_info}\n{news_text}")
     
     current_price = tech['current'] if tech else 0.0
     daily_vol = tech['daily_volatility'] if tech else 0.0
@@ -586,7 +610,10 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     eps_growth = 0.0
     if len(eps_history) >= 2 and eps_history[0] != 0:
         eps_growth = (eps_history[-1] - eps_history[0]) / abs(eps_history[0])
-        eps_growth = min(max(eps_growth, -0.5), 1.0)
+        if eps_history[0] < 0 and eps_history[-1] > 0:
+            eps_growth = min(eps_growth, 0.2) 
+        else:
+            eps_growth = min(max(eps_growth, -0.5), 1.0)
 
     sl_s = current_price * (1 - min(user_k * daily_vol * np.sqrt(20), 0.15)) if daily_vol > 0 else current_price * 0.95
     sl_m = current_price * (1 - min(user_k * daily_vol * np.sqrt(60), 0.30)) if daily_vol > 0 else current_price * 0.90
@@ -603,7 +630,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
         tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
         fund_type = "BPS 데이터 누락 (기술적 밴드 대체)"
-        structural_warning = "⚠️ [핵심 데이터 누락] 가치 산정의 기본인 BPS가 누락되어 기술적 밴드로 대체 연산했습니다."
+        structural_warning = "⚠️ [핵심 데이터 누락] BPS 누락으로 기술적 밴드 연산."
         conservative_bps = 0.0
         data_incomplete = True
         
@@ -613,14 +640,14 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         tp_m = effective_bps
         fund_type = "지주사 특수 모델 (NAV 50% 할인 앵커링)"
         if eps_val is None:
-            structural_warning = "⚠️ [지주사 디스카운트 & 일부 데이터 누락] 지주사 할인 0.5를 적용해 가치를 산정했습니다. 단, EPS 수집 실패로 인해 계량 리포트 작성 시 손익 서술이 제한될 수 있습니다."
+            structural_warning = "⚠️ [지주사 디스카운트] 지주사 할인 0.5 적용. EPS 누락."
         else:
-            structural_warning = f"⚠️ [지주사 디스카운트] 지주회사 구조적 할인을 반영하여 타겟 PBR 0.5 수준(목표가 {tp_m:,.0f}원)으로 강제 앵커링함."
+            structural_warning = f"⚠️ [지주사 디스카운트] 타겟 PBR 0.5 수준({tp_m:,.0f}원) 앵커링."
             
         required_return = rf + (beta * 0.06) 
         expected_roe = (roe_history[-1] / 100) if (roe_history and roe_history[-1] > 0) else 0.05
         tp_l = effective_bps + (effective_bps * (expected_roe - required_return) / required_return)
-        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, ERP 6.0%)"
+        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f})"
         conservative_bps = effective_bps
         data_incomplete = False
         
@@ -628,7 +655,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
         tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
         fund_type = "EPS 데이터 누락 (기술적 밴드 대체)"
-        structural_warning = "⚠️ [실적 데이터 누락] 일반 사업회사의 EPS가 수집되지 않아 상대 가치 추정이 불가능하므로 기술적 밴드로 연산했습니다."
+        structural_warning = "⚠️ [실적 데이터 누락] 일반 사업회사 EPS 미수집."
         conservative_bps = bps_val
         data_incomplete = True
         
@@ -641,20 +668,27 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         data_incomplete = False
         
     else:
-        adjusted_ind_per = float_ind_per * (1 + eps_growth) if float_ind_per > 0 else 0.0
+        growth_pct = max(eps_growth * 100, 5.0) 
+        dynamic_per_cap = max(8.0, min(growth_pct * 1.2, 40.0)) 
+
+        adjusted_ind_per = float_ind_per * (1 + eps_growth) if float_ind_per > 0 else dynamic_per_cap
         current_per = (current_price / eps_val)
         
-        tp_m = eps_val * adjusted_ind_per if adjusted_ind_per > 0 else eps_val * 10
-        if current_per > 0 and (adjusted_ind_per / current_per) >= 3.0:
-            fund_type = "상대 가치 (Value Trap 위험)"
-            structural_warning = "⚠️ [단순 PER 컨버전스 부적합] 업종 PER과 3배 이상 괴리가 발생했습니다. 일시적 저평가인지 구조적 결함(특수관계자, 저배당 등)인지 AI가 보수적으로 검증할 것."
+        if float_ind_per > (dynamic_per_cap * 1.5):
+            fund_type = "상대 가치 (PEG 동적 캡 적용)"
+            structural_warning = f"⚠️ [Value Trap 방어] 업종 PER({float_ind_per:.1f}배)이 기업의 이익성장력(PEG 한계치 {dynamic_per_cap:.1f}배) 대비 비정상적으로 높아 동적 상한선을 강제 적용했습니다."
+            
+            safe_per_cap = min(current_per * 1.5, dynamic_per_cap)
+            tp_m = eps_val * safe_per_cap
+            tp_m = max(tp_m, current_price * 1.05) 
         else:
             fund_type = "기본 상대 가치 (업종 평균 수렴)"
+            tp_m = eps_val * adjusted_ind_per
             
         required_return = rf + (beta * 0.06) 
         expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / required_return)
-        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, ERP 6.0%)"
+        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f})"
         conservative_bps = bps_val
         data_incomplete = False
 
@@ -674,9 +708,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     struct_warn_line = f"   - 구조적 분석: {structural_warning}\n" if structural_warning else ""
     bps_disp_val = f"{bps_val:,.0f}원" if bps_val is not None else "데이터 누락"
 
-    # ==========================================
-    # 🎯 [신규 기능] 컨센서스 듀얼 타겟팅 조인 및 목표가 연속 변동 트렌드 추적
-    # ==========================================
     consensus_log = ""
     if analyst_data:
         matched_report = next((rep for rep in analyst_data.values() if rep.get("ticker") == ticker), None)
@@ -719,7 +750,12 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 
     tech_data_str = f"[{name} ({ticker})]\n"
     if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | Beta {beta:.2f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(일간) {daily_vol*100:.2f}%\n"
-    if fund: tech_data_str += f"- 재무 비율: PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']} | EPS {eps_str} | BPS {bps_str}\n"
+    
+    fund_str = f"- 재무 비율: PER {fund.get('per', '-')} (업종PER {fund.get('industry_per', '-')}) | PBR {fund.get('pbr', '-')} | EPS {eps_str} | BPS {bps_str}\n"
+    fund_str += f"- 분기 실적 추세: 매출액 {fund.get('sales_history', [])} | 영업이익 {fund.get('op_history', [])} | EPS {fund.get('eps_history', [])} | ROE {fund.get('roe_history', [])}\n"
+    fund_str += f"- {fund.get('supply_demand', '수급 정보 없음')}\n"
+    
+    tech_data_str += fund_str
     tech_data_str += f"{calc_result_log}\n- 뉴스/공시 요약본:\n{lite_summary}\n\n"
     
     return {
@@ -798,14 +834,13 @@ with tab1:
     if st.button("브리핑 생성", key="btn_briefing"):
         if not news_pool: st.error("분석할 뉴스가 없습니다.")
         else:
-            news_str = "\n".join([f"- {n['title']}: {n.get('description', '')}" for n in news_pool[:50]])
+            news_str = "\n".join([f"- {n['title']}: {n.get('summary', '')}" for n in news_pool[:50]])
             with st.spinner("Lite 모델 압축 중..."): lite_summary = call_gemini_lite_summary(f"다음 뉴스를 요약하라:\n\n{news_str}")
             with st.spinner("Flash 모델 분석 중..."): st.write_stream(call_gemini_stream_with_fallback(f"지표:\n{json.dumps(market_data)}\n\n요약:\n{lite_summary}\n\n시장 흐름 심층 분석 서술."))
 
 with tab2:
     st.subheader("핵심 경제 종합 브리핑 및 시장 심리")
     
-    # [시장 심리 차트]
     c.execute("SELECT calc_date, score FROM sentiment_history ORDER BY calc_date ASC")
     if sentiment_rows := c.fetchall():
         df_sent = pd.DataFrame(sentiment_rows, columns=['date', 'score'])
@@ -826,9 +861,6 @@ with tab2:
                 
     st.divider()
 
-    # ==========================================
-    # 3열 독립 뉴스/리포트 허브 (+더보기 기능 추가)
-    # ==========================================
     st.markdown("### 🌐 실시간 마켓 데이터 및 리포트 유니버스 상황")
     
     analyst_universe = cached_data.get("analyst_universe", {})
@@ -837,7 +869,6 @@ with tab2:
     eco_news_pool = cached_data.get("eco_news", [])
     realtime_news_pool = g_data.get("realtime_news", [])
 
-    # 페이징 상태 변수 초기화
     if "us_news_limit" not in st.session_state: st.session_state.us_news_limit = 6
     if "kr_news_limit" not in st.session_state: st.session_state.kr_news_limit = 6
 
@@ -881,9 +912,6 @@ with tab2:
 
     st.divider()
 
-    # ==========================================
-    # 국면 융합형 모닝 브리핑 (퀀트 엔진 조인 완벽 적용)
-    # ==========================================
     st.markdown("### 🎯 초강력 국면 융합형 모닝 핫브리핑")
     st.caption("단순 뉴스 나열을 넘어, 파이썬 퀀트 엔진의 목표가(tp_m)와 애널리스트 컨센서스를 정면으로 비교/교차검증하여 시장을 관통하는 핫픽 2종목을 도출합니다.")
     
@@ -897,17 +925,15 @@ with tab2:
             st.stop()
             
         with st.spinner("1단계: 시황 뉴스 심층 분석 및 매크로 국면 압축 중..."):
-            all_news_text = "== 미국 증시/빅테크 ==\n" + "\n".join([n['title'] for n in us_news_pool[:15]])
-            all_news_text += "\n== 국내 매크로/증시 ==\n" + "\n".join([n['title'] for n in eco_news_pool[:15]])
-            all_news_text += "\n== 실시간 긴급 속보 ==\n" + "\n".join([n['title'] for n in realtime_news_pool[:15]])
+            all_news_text = "== 미국 증시/빅테크 ==\n" + "\n".join([f"- 제목: {n['title']}\n  내용: {n.get('summary', '')}" for n in us_news_pool[:15]])
+            all_news_text += "\n== 국내 매크로/증시 ==\n" + "\n".join([f"- 제목: {n['title']}\n  내용: {n.get('summary', '')}" for n in eco_news_pool[:15]])
+            all_news_text += "\n== 실시간 긴급 속보 ==\n" + "\n".join([f"- 제목: {n['title']}\n  내용: {n.get('summary', '')}" for n in realtime_news_pool[:15]])
             
-            # 요약 프롬프트 강화: 4문장 제한 해제, 심층 맥락 요구
             macro_prompt = (f"아래 뉴스 스트림과 실시간 지표를 종합하여 오늘 장을 지배할 '3가지 핵심 매크로 이슈'와 "
                             f"'주도 섹터에 미칠 파급 효과'를 매우 구체적이고 전문적인 리서치 수준으로 풍부하게 작성하라:\n{all_news_text}")
             lite_macro_summary = call_gemini_lite_summary(macro_prompt)
 
         with st.spinner("2단계: 퀀트 엔진 가동 및 컨센서스 목표가 교차 검증 중... (약 10~15초 소요)"):
-            # 단순 텍스트가 아닌, 실제 퀀트 엔진에 넣을 티커 10개 선별
             target_pool = today_active_reps if today_active_reps else list(analyst_universe.values())[:30]
             tickers_to_process = []
             for r in target_pool:
@@ -916,7 +942,6 @@ with tab2:
                 if t and t not in tickers_to_process: tickers_to_process.append(t)
                 if len(tickers_to_process) >= 10: break
 
-            # 탭 4와 동일하게 파이썬 엔진 병렬 가동
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 futures = [executor.submit(process_single_ticker, t, "중기 (3~6개월)", k_factor, False, analyst_universe) for t in tickers_to_process]
                 valid_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
@@ -995,7 +1020,7 @@ with tab3:
                             st.write(call_gemini_with_fallback(f"[{sec} 요약]\n{l_sum}\n\n위 요약을 바탕으로 해당 섹터의 주도주 흐름과 향후 모멘텀을 심층 분석하라."))
 
 with tab4:
-    st.subheader("종목 발굴 (병렬 고속 분석)")
+    st.subheader("종목 발굴 (시니어 애널리스트 퀀트 분석)")
     investment_horizon = st.radio("투자기간", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
 
     if st.button("추천 종목 발굴", use_container_width=True, key="btn_recommend"):
@@ -1023,14 +1048,21 @@ with tab4:
 
             with st.spinner("[2단계] 추출된 모멘텀 기반으로 1차 후보군 발굴 중..."):
                 t2 = time.time()
-                prompt = f"투자 [{investment_horizon}] 모멘텀 종목 10개 6자리 JSON 배열 출력.\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"000000\", \"111111\"] 형태의 배열만 출력하시오."
+                prompt = f"투자 [{investment_horizon}] 모멘텀 수혜가 예상되는 종목 15개의 '종목명'만 JSON 배열로 출력하라.\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"삼성전자\", \"현대차\"] 형태의 배열만 출력하시오."
                 res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
-                print(f"[TIMING] 1차 티커 추출: {time.time()-t2:.1f}초")
+                print(f"[TIMING] 1차 종목 추출: {time.time()-t2:.1f}초")
 
                 selected_tickers = []
-                matches = re.findall(r'"(\d{6})"', res)
-                if matches:
-                    selected_tickers = list(dict.fromkeys(matches))[:10]
+                try:
+                    match = re.search(r'\[(.*?)\]', res, re.DOTALL)
+                    if match:
+                        names = json.loads(f"[{match.group(1)}]")
+                        for name in names:
+                            code, _ = search_stock_code(name.strip())
+                            if code and code not in selected_tickers:
+                                selected_tickers.append(code)
+                            if len(selected_tickers) >= 10: break
+                except: pass
 
             if not selected_tickers:
                 st.error("⚠️ AI가 조건에 맞는 종목을 추출하지 못했거나 API 응답이 지연되었습니다. 잠시 후 다시 시도해주세요.")
@@ -1039,7 +1071,7 @@ with tab4:
             with st.spinner("[3단계] 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
                 t3 = time.time()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                    futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in selected_tickers]
+                    futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True, analyst_universe) for t in selected_tickers]
                     results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
                     valid_results = results
                 print(f"[TIMING] 3단계 병렬 크롤링({len(selected_tickers)}종목): {time.time()-t3:.1f}초")
@@ -1052,19 +1084,26 @@ with tab4:
                 with st.spinner(f"[보충 단계] 부족분 보충 중 (시도 {retry_count+1}/{max_retry})..."):
                     t_retry = time.time()
                     deficit = 10 - len(valid_results)
-                    extra_prompt = f"다음 티커들을 제외하고, 투자 [{investment_horizon}] 모멘텀 종목 {deficit}개 6자리 JSON 배열 출력.\n(제외: {', '.join(tried_tickers)})\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"000000\", \"111111\"] 형태의 배열만 출력하시오."
+                    extra_prompt = f"다음 코드를 제외하고, 투자 [{investment_horizon}] 모멘텀 수혜 예상 종목 {deficit}개의 '종목명'만 JSON 배열로 출력하라.\n(제외: {', '.join(tried_tickers)})\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"SK하이닉스\", \"LG에너지솔루션\"] 형태의 배열만 출력하시오."
                     extra_res = call_gemini_with_fallback(extra_prompt, model=LITE_MODEL_NAME)
 
                     extra_tickers = []
-                    ex_matches = re.findall(r'"(\d{6})"', extra_res)
-                    if ex_matches:
-                        extra_tickers = [t for t in list(dict.fromkeys(ex_matches)) if t not in tried_tickers][:deficit]
+                    try:
+                        ex_match = re.search(r'\[(.*?)\]', extra_res, re.DOTALL)
+                        if ex_match:
+                            names = json.loads(f"[{ex_match.group(1)}]")
+                            for name in names:
+                                code, _ = search_stock_code(name.strip())
+                                if code and code not in tried_tickers and code not in extra_tickers:
+                                    extra_tickers.append(code)
+                                if len(extra_tickers) >= deficit: break
+                    except: pass
 
                     if not extra_tickers: break
                     tried_tickers.update(extra_tickers)
 
                     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                        futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in extra_tickers]
+                        futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True, analyst_universe) for t in extra_tickers]
                         extra_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
                         valid_results += extra_results
                     retry_count += 1
@@ -1078,27 +1117,42 @@ with tab4:
                 tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
                 st.session_state.valid_results_cache = valid_results
 
-                with st.spinner(f"[4단계] 최종 선별된 {len(valid_results)}개 중 Flash 기반 Top 3 보고서 작성 중..."):
+                with st.spinner(f"[4단계] 최종 선별된 {len(valid_results)}개 중 시니어 애널리스트 방식 Top 3 보고서 작성 중..."):
                     t4 = time.time()
+                    
+                    # [패치 완료] 전수 검증 의무화 및 스크리닝 표 작성 지시 추가
                     step3_prompt = (
-                        f"당신은 리스크와 기회를 종합적으로 분석하는 전문 퀀트 애널리스트입니다.\n"
+                        f"당신은 월스트리트 헤지펀드의 시니어 퀀트 애널리스트입니다.\n"
                         f"[시장 전체 핵심 모멘텀 분석]\n{momentum_context}\n\n"
-                        f"[후보군 팩트 데이터(뉴스, 공시, 재무, 차트 포함)]\n{tech_data_str_all}\n\n"
-                        f"=== ⚠️ AI 분석 지침 ===\n"
-                        f"1. 가장 매력적인 **Top 3 종목만 엄선**하십시오.\n"
-                        f"2. 제공된 모든 데이터를 종합하여 **'종합 매력도 점수(0~100점)'**를 산정하고 최상단에 명시하십시오.\n"
-                        f"3. 강세/약세 논리를 서술할 때 반드시 파이썬이 연산하여 넘겨준 팩트 데이터의 숫자를 인용하여 증명하십시오.\n"
-                        f"4. 역전됨 플래그나 특수 경고 플래그가 발견된 종목은 반드시 <BEAR_CASE>에 구체적으로 경고하십시오.\n\n"
-                        f"=== 리포트 작성 항목 ===\n"
+                        f"[후보군 팩트 데이터(실적 추세, 최근 20일 수급 동향, 밸류에이션, 차트)]\n{tech_data_str_all}\n\n"
+                        f"=== ⚠️ 시니어 애널리스트 분석 지침 ===\n"
+                        f"1. [전수 평가 및 선별] 전달받은 전체 후보군(최대 10개) 데이터를 모두 비교 평가하여 각각의 '종합 매력도 점수'를 매기십시오. 그 후 가장 점수가 높은 **최상위 Top 3 종목만 엄선**하여 심층 리포트를 작성하십시오.\n"
+                        f"2. [스토리텔링] 파편화된 데이터(뉴스, 수급, 밸류에이션, 실적 추이)를 단순 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
+                        f"3. [추세 변화] 실적(매출/영업이익)의 분기별 증감 추세와 외국인/기관의 '최근 5일 vs 20일 수급 변화'를 바탕으로 모멘텀을 분석하십시오.\n"
+                        f"4. [자기 검증] 긍정적 편향을 깨기 위해, 스스로 도출한 결론이 틀릴 가능성(반대 논리 및 Value Trap 리스크) 3가지를 반드시 서술하십시오.\n"
+                        f"5. [액션 플랜] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 확인해야 할 이벤트를 반드시 요약하십시오.\n\n"
+                        f"=== 리포트 작성 포맷 ===\n"
+                        f"### 🏆 1차 후보군 스크리닝 요약 (전체 평가)\n"
+                        f"(검토한 전체 후보군의 종목명, 매력도 점수, 핵심 이유 1줄을 간단한 표나 리스트로 먼저 제시할 것)\n\n"
+                        f"---\n\n"
                         f"<ANALYSIS_티커숫자>\n"
                         f"### [종목명] (티커)\n"
-                        f"**🎯 종합 매력도 점수: [00]/100점**\n"
-                        f"**🎯 핵심 투자 아이디어 및 모멘텀 (Why Buy?)**\n"
-                        f"- (뉴스/공시 모멘텀을 기반으로 핵심 매수 이유 작성)\n"
-                        f"**🟢 강세 논리 (Bull Case)**\n"
-                        f"**🔴 약세/위험 논리 (Bear Case - 구조적 경고 포함)**\n"
+                        f"**📖 핵심 투자 스토리 (Investment Story)**\n"
+                        f"(수급, 실적 추세, 뉴스, 밸류에이션을 하나로 엮은 심층 분석)\n\n"
+                        f"**📊 실적 및 수급 추세 분석**\n"
+                        f"(분기별 성장성 및 기관/외인 수급 변화 분석)\n\n"
+                        f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n"
+                        f"1. \n2. \n3. \n\n"
+                        f"---\n"
+                        f"**🏁 최종 투자 의사결정 (Action Plan)**\n"
+                        f"- **현재 투자의견:** [매수 / 관망 / 비중축소] (신뢰도: 00%)\n"
+                        f"- **적정 매수가:** [000원 이하]\n"
+                        f"- **목표가:** [단기 00원 / 중기 00원]\n"
+                        f"- **손절가:** [00원]\n"
+                        f"- **의사결정 핵심 근거 Top 3:** (1, 2, 3)\n"
+                        f"- **향후 반드시 확인해야 할 트리거 이벤트:** (예: 다음 분기 영업이익률 회복 여부 등)\n"
                         f"</ANALYSIS_티커숫자>\n\n"
-                        f"※ 절대 목표가나 손절가 수치를 임의로 작성하지 마십시오. 마지막 줄에 선정된 3개 종목의 티커를 콤마로 구분하여 아래 형식으로 반드시 출력하십시오.\n"
+                        f"※ 마지막 줄에 선정된 3개 종목의 티커를 콤마로 구분하여 아래 형식으로 반드시 출력하십시오.\n"
                         f"[SELECTED_TICKERS]: 000000, 111111, 222222"
                     )
                     st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step3_prompt))
@@ -1150,7 +1204,7 @@ with tab4:
                                     st.success(f"✅ 리포트 스크랩 완료!")
 
 with tab5:
-    st.subheader("관심종목 진단")
+    st.subheader("관심종목 진단 (보유종목 정밀 평가)")
     own_status = st.radio("상태", ["미보유", "보유"], horizontal=True, key="add_own_status")
     
     if "input_stock_name" not in st.session_state: st.session_state["input_stock_name"] = ""
@@ -1216,16 +1270,27 @@ with tab5:
                         
                         prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_dict['tech_data_str']}\n{extra_ctx}\n\n"
                                   f"당신은 리스크와 기회를 종합적으로 분석하는 전문 퀀트 애널리스트입니다.\n"
-                                  f"1. **[종합 매력도 점수]** 해당 종목의 뉴스/이슈와 퀀트 수치, 차트수치, 애널리스트 리비전(트렌드)을 스스로 가중치 부여하여 **'종합 매력도 점수(0~100점)'**를 산정하십시오.\n"
-                                  f"2. **[논리적 근거 강제]** 현황 및 촉매제를 설명할 때는 반드시 제공된 '뉴스/공시 요약본'의 구체적 이슈를 인용하십시오.\n"
-                                  f"3. **[위험 요소]** '역전됨' 플래그나 목표가 컨센서스 괴리 경고가 발견된 종목은 반드시 <BEAR_CASE>에 구체적인 리스크를 서술하십시오.\n"
-                                  f"4. 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
-                                  f"=== 작성 항목 ===\n"
-                                  f"**🎯 종합 매력도 점수: [00]/100점**\n"
-                                  f"**🎯 핵심 투자 아이디어 (Why Buy/Hold/Sell?)**\n"
-                                  f"**🟢 강세 논리 (Bull Case)**\n"
-                                  f"**🔴 약세/위험 논리 (Bear Case)**\n"
-                                  f"**⚖️ 최종 판단 및 리스크 평가**")
+                                  f"=== ⚠️ AI 분석 지침 ===\n"
+                                  f"1. [스토리텔링] 파편화된 데이터를 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
+                                  f"2. [추세 변화] 실적의 분기별 증감 추세와 외국인/기관의 '최근 5일 vs 20일 수급 변화'를 바탕으로 분석하십시오.\n"
+                                  f"3. [계좌 진단] 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 판단하십시오.\n"
+                                  f"4. [자기 검증] 스스로 도출한 결론이 틀릴 가능성(반대 논리 및 Value Trap 리스크) 3가지를 반드시 서술하십시오.\n"
+                                  f"5. [액션 플랜] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 확인해야 할 이벤트를 요약하십시오.\n\n"
+                                  f"=== 리포트 작성 포맷 ===\n"
+                                  f"**📖 핵심 투자 스토리 (Investment Story)**\n"
+                                  f"(수급, 실적 추세, 뉴스, 밸류에이션을 하나로 엮은 심층 분석)\n\n"
+                                  f"**📊 실적 및 수급 추세 분석**\n"
+                                  f"(분기별 성장성 및 기관/외인 수급 변화 분석)\n\n"
+                                  f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n"
+                                  f"1. \n2. \n3. \n\n"
+                                  f"---\n"
+                                  f"**🏁 최종 투자 의사결정 (Action Plan)**\n"
+                                  f"- **현재 투자의견:** [매수 / 유지 / 비중축소 / 손절] (신뢰도: 00%)\n"
+                                  f"- **적정 매수가:** [000원 이하]\n"
+                                  f"- **목표가:** [단기 00원 / 중기 00원 / 장기 00원]\n"
+                                  f"- **시스템 손절가:** [00원]\n"
+                                  f"- **의사결정 핵심 근거 Top 3:** (1, 2, 3)\n"
+                                  f"- **향후 반드시 확인해야 할 트리거 이벤트:** (예: 다음 분기 영업이익률 회복 여부 등)\n")
                         
                         report = call_gemini_with_fallback(prompt)
                         
