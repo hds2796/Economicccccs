@@ -886,167 +886,210 @@ with tab3:
                             st.write(call_gemini_with_fallback(f"[{sec} 요약]\n{l_sum}\n\n위 요약을 바탕으로 해당 섹터의 주도주 흐름과 향후 모멘텀을 심층 분석하라."))
 
 with tab4:
-    st.subheader("종목 발굴 (모닝 브리핑 & 퀀트 종목 추천)")
+    st.markdown("## 🔍 멀티 스트래티지 종목 발굴 엔진")
+    st.caption("백엔드 람다 시스템에서 24시간 타임어택으로 수집 및 정제한 데이터 허브와 파이썬 퀀트 스크리닝을 결합하여 가치 자산을 발굴합니다.")
+    st.divider()
+
+    # ==========================================
+    # 0. 데이터 레이아웃 개편: 3열 독립 뉴스/리포트 허브 (중복 제거)
+    # ==========================================
+    st.markdown("### 🌐 실시간 마켓 데이터 및 리포트 유니버스 상황")
     
-    # 람다 데이터 허브 로드
+    # 람다 수집 데이터 로드
     analyst_universe = cached_data.get("analyst_universe", {})
     today_active_reps = cached_data.get("today_active_reports", [])
     us_news_pool = cached_data.get("us_market_news", [])
     eco_news_pool = cached_data.get("eco_news", [])
     realtime_news_pool = g_data.get("realtime_news", [])
+
+    c_us_news, c_kr_news, c_rep_news = st.columns(3)
     
-    with st.expander("🌐 24h 글로벌 매크로 및 미국 증시 시황 (람다 수집본)", expanded=False):
-        c_us, c_kr = st.columns(2)
-        with c_us:
-            st.markdown("**🇺🇸 미국 증시 및 빅테크 (24h)**")
-            for n in us_news_pool[:7]: st.markdown(f"- [{n['title']}]({n['link']})")
-        with c_kr:
-            st.markdown("**🇰🇷 국내 거시 및 수급 (24h)**")
-            for n in eco_news_pool[:7]: st.markdown(f"- [{n['title']}]({n['link']})")
-    
+    with c_us_news:
+        with st.container(border=True):
+            st.markdown("🇺🇸 **미국 증시 및 빅테크 (24h)**")
+            if us_news_pool:
+                for idx, n in enumerate(us_news_pool[:6]):
+                    st.markdown(f"{idx+1}. [{n['title']}]({n['link']})")
+            else:
+                st.info("수집된 미국 증시 뉴스가 없습니다.")
+
+    with c_kr_news:
+        with st.container(border=True):
+            st.markdown("🇰🇷 **국내 거시 및 증시 (24h)**")
+            if eco_news_pool:
+                for idx, n in enumerate(eco_news_pool[:6]):
+                    st.markdown(f"{idx+1}. [{n['title']}]({n['link']})")
+            else:
+                st.info("수집된 국내 거시 뉴스가 없습니다.")
+
+    with c_rep_news:
+        with st.container(border=True):
+            st.markdown("🔥 **당일 신규 애널리스트 리포트**")
+            if today_active_reps:
+                st.success(f"오늘자 신규/수정 리포트 **{len(today_active_reps)}건** 적재됨")
+                for idx, r in enumerate(today_active_reps[:5]):
+                    st.markdown(f"- **{r['stock_name']}** ({r['broker']})<br>&nbsp;&nbsp;{r['title']}", unsafe_allow_html=True)
+            else:
+                st.info("오늘 자 신규 리포트 없음 (가장 최근 발간된 100% 리포트 유니버스 풀 자동 대기 중)")
+
     st.divider()
 
     # ==========================================
-    # 트랙 A: 오늘 아침 모닝 브리핑 (Top 2)
+    # 트랙 A: [전면 고도화] 국면 융합형 모닝 브리핑 리포트
     # ==========================================
-    st.markdown("### ☀️ 당일 모닝 브리핑 (단기 뉴스/리포트 핫픽)")
-    st.caption("오늘 아침 9시에 새로 발간된 애널리스트 리포트의 본문 요약과 밤사이 미국 시황을 1:1 매칭해 가장 촉매가 강력한 2종목을 픽합니다.")
+    st.markdown("### 🎯 초강력 국면 융합형 모닝 핫브리핑")
+    st.caption("실시간 지표, 미국 빅테크 동향, 국내 거시 뉴스, 당일 새벽 발간된 애널리스트 리포트 본문 300자 요약본을 유기적으로 결합하여 시장을 관통하는 요약과 목표가가 포함된 핵심 핫픽 2종목을 산출합니다.")
     
-    if today_active_reps:
-        st.success(f"🔥 오늘 9시 신규 발간/수정된 애널리스트 리포트 **{len(today_active_reps)}건** 대기 중")
-    else:
-        st.info("💡 오늘 자 신규 리포트가 없습니다. 최근 3일 내 강한 의견이 나온 리포트 유니버스로 대체합니다.")
+    # 가시성을 극대화한 전용 실행 버튼 배치
+    btn_cols = st.columns([1, 4, 1])
+    with btn_cols[1]:
+        run_morning = st.button("🚀 당일 모닝 핫브리핑 및 추천 종목 가동", use_container_width=True, type="primary")
 
-    if st.button("🚀 모닝 브리핑 실행", use_container_width=True):
+    if run_morning:
         if not analyst_universe:
-            st.error("람다 서버에서 리포트 DB를 로드하지 못했습니다.")
+            st.error("람다 파일 시스템에서 리포트 유니버스 DB를 로드하지 못했습니다.")
             st.stop()
             
-        with st.spinner("미국 증시 및 매크로 요약 압축 중..."):
-            all_news_text = "== 미국 증시 ==\n" + "\n".join([n['title'] for n in us_news_pool[:15]])
-            all_news_text += "\n== 국내 매크로 ==\n" + "\n".join([n['title'] for n in eco_news_pool[:15]])
-            lite_macro_summary = call_gemini_lite_summary(f"시황 뉴스 묶음을 바탕으로 오늘 증시에 미칠 기회와 리스크를 3문장으로 압축하라:\n{all_news_text}")
+        with st.spinner("1단계: 미국 시황 및 국내 매크로 뉴스 스트림 압축 중..."):
+            all_news_text = "== 미국 증시/빅테크 ==\n" + "\n".join([n['title'] for n in us_news_pool[:15]])
+            all_news_text += "\n== 국내 매크로/증시 ==\n" + "\n".join([n['title'] for n in eco_news_pool[:15]])
+            all_news_text += "\n== 실시간 긴급 속보 ==\n" + "\n".join([n['title'] for n in realtime_news_pool[:15]])
+            lite_macro_summary = call_gemini_lite_summary(f"아래 시황 뉴스 스트림을 종합하여 오늘 장에 미칠 결정적 거시적 기회와 리스크를 4문장으로 정밀 압축하라:\n{all_news_text}")
 
-        with st.spinner("AI가 팩트 기반 매칭 및 리포트 작성 중..."):
+        with st.spinner("2단계: 펀더멘털 리포트 매칭 및 목표가 기반 최적 핫픽 2선 구체화 중..."):
+            # 오늘 리포트가 없으면 최근 3일 내 가동된 우량 리포트 상위 30개를 타겟 풀로 지정
             target_pool = today_active_reps if today_active_reps else list(analyst_universe.values())[:30]
             compact_reports = json.dumps([{
                 "name": r["stock_name"], 
+                "ticker": r.get("ticker", ""),
                 "title": r["title"], 
                 "target_price": r.get("target_price", 0),
                 "opinion": r.get("opinion", "Buy"),
                 "content": r.get("content", ""),
-                "broker": r["broker"]
+                "broker": r["broker"],
+                "date": r["date"]
             } for r in target_pool], ensure_ascii=False)
             
             prompt = (
-                f"당신은 증권사 리서치 센터장입니다. 주관적 사전 지식은 배제하십시오.\n"
-                f"제공된 [매크로 시황]과 [오늘의 리포트 상세 데이터] 내용만 매칭하여 브리핑을 작성하십시오.\n\n"
-                f"[24h 매크로 시황 요약]: {lite_macro_summary}\n"
-                f"[오늘의 애널리스트 리포트 상세 데이터]:\n{compact_reports}\n\n"
-                f"지침 1. 매크로 시황을 반영해 오늘 증시 향방을 브리핑할 것.\n"
-                f"지침 2. 투자의견이 강력하고 본문에 명확한 촉매제가 확인되는 딱 2개의 종목만 엄선할 것.\n\n"
-                f"## 📰 당일 글로벌 매크로 시황 브리핑\n...\n"
-                f"## 🎯 오늘의 핫픽 Top 2\n"
+                f"당신은 엄격한 숫자의 지배를 받는 대형 자산운용사 리서치 센터장입니다. 아부나 감정적 서술, 근거 없는 낙관론은 철저히 배제하고 객관적 수치로만 증명하십시오.\n"
+                f"제공된 [거시 마켓 시황 요약]과 [애널리스트 리포트 상세 데이터] 내용만을 결합하여 오늘 아침 최고 등급의 모닝 브리핑 보고서를 컴파일하십시오.\n\n"
+                f"[현재 실시간 지표 상황]: {json.dumps(market_data, ensure_ascii=False)}\n"
+                f"[거시 경제 및 미국 시황 요약 팩트]: {lite_macro_summary}\n"
+                f"[대상 애널리스트 리포트 풀 데이터]:\n{compact_reports}\n\n"
+                f"=== ⚠️ 작성 지침 및 데이터 스펙 ===\n"
+                f"1. 제공된 미국/국내 뉴스 요약 및 지표 상황을 융합하여 오늘 한국 증시의 자산 배분 방안과 주도 섹터 흐름을 구체적 서술로 브리핑할 것.\n"
+                f"2. 제공된 리포트 풀 중 거시 국면 수혜가 확실하고 본문에 구체적 실적/계량적 촉매가 확인되는 딱 2개의 종목만 엄선할 것.\n"
+                f"3. 엄선된 2종목 리포트 작성 시, 해당 리포트에 기재된 [증권사 목표가], [투자의견], [발간 기관(브로커)]을 절대로 빠뜨리지 말고 숫자로 명시할 것. 임의 가공은 금지함.\n"
+                f"4. 강세 논리 서술 시 본문 요약 데이터(content)를 철저히 인용하여 구체적으로 증명할 것.\n\n"
+                f"=== 리포트 출력 포맷 ===\n"
+                f"## 📰 1. 글로벌 매크로 국면 및 주도 섹터 통합 브리핑\n"
+                f"(실시간 지표와 매크로 뉴스를 연결하여 오늘 장의 성격 규정 및 하방 리스크 객관적 서술)\n\n"
+                f"## 🎯 2. 당일 기관 모닝 핫픽 (Top 2)\n"
                 f"<ANALYSIS_종목명>\n"
-                f"### [종목명]\n"
-                f"* **증권사 코멘트 및 본문 요약:** (content 및 title 인용 서술)\n"
-                f"</ANALYSIS_종목명>\n"
-                f"※ 마지막 줄은 반드시 [SELECTED_NAMES]: 종목명1, 종목명2 형식으로 출력."
+                f"### 📌 [종목명] ([티커])\n"
+                f"- **기관 컨센서스 개요:** [발간 증권사명] | 투자의견 [의견] | **제시 목표가: [숫자]원**\n"
+                f"- **거시 국면 연결고리:** (이 종목이 왜 지금 매크로 상태에서 촉매를 받는지 기계적 서술)\n"
+                f"- **펀더멘털 핵심 요약 및 강세 논리:** (리포트 본문 내용 인용 및 수치화된 촉매 서술)\n"
+                f"</ANALYSIS_종목명>\n\n"
+                f"※ 마지막 줄은 반드시 [SELECTED_NAMES]: 종목명1, 종목명2 형식으로 정확하게 종료하십시오."
             )
             st.session_state.morning_report = "".join(call_gemini_stream_with_fallback(prompt))
 
     if st.session_state.get('morning_report'):
         raw_report = st.session_state.morning_report
         display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw_report.split("[SELECTED_NAMES]")[0].strip())
-        with st.expander("📝 오늘의 모닝 브리핑 리포트", expanded=True):
+        with st.container(border=True):
             st.markdown(display_text)
     
     st.divider()
 
     # ==========================================
-    # 트랙 B: 기간별 퀀트 종목 추천 (TOP 3)
+    # 트랙 B: 기간별 퀀트 종목 추천 (TOP 3 - 컨센서스 조인 패치 반영)
     # ==========================================
     st.markdown("### 📊 핵심 종목 추천 (기간별 퀀트/차트/뉴스 기반 TOP 3)")
-    st.caption("리포트가 존재하는 전체 풀을 대상으로, 선택한 투자 기간의 퀀트/차트 수치와 실시간 뉴스 모멘텀을 분석해 매력도 최상위 3종목을 추천합니다.")
+    st.caption("리포트 유니버스 전체 풀을 대상으로 선택한 투자 기간의 퀀트 수치, 차트 지표, 실시간 뉴스 모멘텀을 분석해 매력도 최상위 3종목을 추천합니다.")
     
-    # 투자 기간 선택 라디오 버튼 (단기, 중기, 장기)
-    investment_horizon = st.radio("포트폴리오 투자 기간", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
+    investment_horizon = st.radio("포트폴리오 투자 기간", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True, key="recommend_horizon_radio")
     
-    if st.button("핵심 종목 추천 TOP 3 발굴", use_container_width=True):
+    if st.button("핵심 종목 추천 TOP 3 발굴", use_container_width=True, key="btn_quant_top3"):
         if not analyst_universe:
             st.error("리포트 DB가 로드되지 않았습니다.")
             st.stop()
 
-        # 1단계: 애널리스트 의견과 무관하게 리포트가 있는 전체 풀에서 1차 10개 추출
-        with st.spinner(f"[1단계] {investment_horizon} 전략에 맞춘 1차 후보군 10개 스크리닝 중..."):
+        # 1단계: 애널리스트 의견과 무관하게 리포트가 존재하는 전체 검증 풀에서 1차 후보군 10개 스크리닝
+        with st.spinner(f"[1단계] {investment_horizon} 전략에 부합하는 1차 후보군 10개 분석 중..."):
             safe_pool = list(analyst_universe.values())
-            universe_map = [{"ticker": search_stock_code(r["stock_name"])[0], "name": r["stock_name"]} for r in safe_pool if search_stock_code(r["stock_name"])[0]]
+            universe_map = [{"ticker": r.get("ticker", search_stock_code(r["stock_name"])[0]), "name": r["stock_name"]} for r in safe_pool if r.get("ticker") or search_stock_code(r["stock_name"])[0]]
             
-            universe_context = json.dumps(universe_map[:300], ensure_ascii=False)
+            universe_context = json.dumps(universe_map[:250], ensure_ascii=False)
             news_context = "\n".join([n['title'] for n in realtime_news_pool[:30]])
             
             prompt1 = (
-                f"당신은 헤지펀드 트레이더입니다. 오직 제공된 리스트 내에서만 선택하십시오.\n"
-                f"[오늘의 시장 뉴스]:\n{news_context}\n\n"
-                f"[대상 종목 목록]:\n{universe_context}\n\n"
-                f"위 목록 중 현재 시장 뉴스와 모멘텀을 고려하여 **{investment_horizon}** 투자에 가장 적합한 후보 종목 10개를 선별하십시오.\n"
-                f"※ 어떠한 설명도 없이 10개 종목의 'ticker'만 [\"000000\", \"111111\"] 형태의 JSON 배열로만 출력하십시오."
+                f"당신은 감정이 배제된 헤지펀드 계량 트레이더입니다. 오직 주어진 자산 풀 목록 내에서만 종목을 선정하십시오.\n"
+                f"[실시간 뉴스 모멘텀 데이터]:\n{news_context}\n\n"
+                f"[심사 대상 종목 풀 목록]:\n{universe_context}\n\n"
+                f"위 목록 중 현재 시장 뉴스와 매크로 모멘텀을 고려하여 **{investment_horizon}** 투진에 가장 최적화된 기계적 후보 종목 10개를 선별하십시오.\n"
+                f"※ 어떠한 설명 문구도 생략하고 10개 종목의 'ticker'만 [\"000000\", \"111111\"] 형태의 JSON 배열 구조로만 정확하게 출력하십시오."
             )
             res = call_gemini_with_fallback(prompt1, model=LITE_MODEL_NAME)
             selected_tickers = list(dict.fromkeys(re.findall(r'"(\d{6})"', res)))[:10]
 
         if not selected_tickers:
-            st.error("1차 후보군 추출 실패")
+            st.error("1차 후보군 추출에 실패했습니다. 다시 시도하십시오.")
             st.stop()
 
-        # 2단계: 사용자가 선택한 기간에 맞춘 파이썬 퀀트 연산 (차트, 밸류에이션, 변동성)
-        with st.spinner(f"[2단계] 10개 후보군 퀀트/차트 연산 ({investment_horizon} 기준)..."):
+        # 2단계: 기간별 가중치 수식 및 애널리스트 컨센서스 데이터를 파이썬 퀀트 엔진에 조인 연산
+        with st.spinner(f"[2단계] 10개 후보군 퀀트/차트 연산 및 애널리스트 목표가 교차검증 연동 중..."):
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in selected_tickers]
+                # [업데이트 완료]: process_single_ticker 함수의 5번째 인자에 analyst_universe 데이터를 완벽히 매핑
+                futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True, analyst_universe) for t in selected_tickers]
                 valid_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
             
         if not valid_results:
-            st.error("퀀트 필터를 통과한 종목이 없습니다.")
+            st.error("기계적 리스크 필터를 통과한 종목이 존재하지 않습니다.")
             st.stop()
             
-        # 3단계: 뉴스, 차트 수치, 퀀트 로그를 모두 포함한 매력도 채점
-        with st.spinner("[3단계] 퀀트 수치 및 뉴스 모멘텀 기반 매력도 채점 중..."):
+        # 3단계: 파이썬 검증 로그(괴리율 플래그 포함) 및 뉴스, 차트 수치를 모두 인용한 종합 매력도 채점
+        with st.spinner("[3단계] 퀀트 수치 정량 팩트 로그 및 컨센서스 괴리율 기반 최종 심층 리포트 컴파일 중..."):
             tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
             st.session_state.quant_results_cache = valid_results
             
             step3_prompt = (
-                f"당신은 전문 퀀트 애널리스트입니다. 투자 기준은 **{investment_horizon}**입니다.\n"
-                f"[파이썬 엔진 연산 팩트 로그 (차트/가치/리스크)]:\n{tech_data_str_all}\n"
-                f"[관련 시장 뉴스]:\n{news_context}\n\n"
-                f"=== ⚠️ 리포트 작성 및 채점 지침 ===\n"
-                f"1. 퀀트 팩트 로그(수치, 검증 플래그)와 실시간 뉴스 모멘텀, 차트 수치를 종합하여 모든 종목에 대해 매력도 점수를 부여하고, TOP3를 정하십시오.\n"
-                f"2. 논리를 작성할 때는 반드시 파이썬이 제공한 구체적인 숫자(차트 이격도, 변동성, 재무 수치등)와 뉴스를 직접 인용하여 증명하십시오.\n\n"
-                f"=== 리포트 작성 항목 ===\n"
+                f"당신은 전문 매크로 퀀트 애널리스트입니다. 투자 판단 기간 국면은 **{investment_horizon}**입니다.\n"
+                f"파이썬 기계 엔진이 컨센서스 목표가 교차 검증까지 마친 아래 팩트 로그 데이터를 정밀 분석하십시오.\n\n"
+                f"[파이썬 엔진 연산 및 교차 검증 팩트 로그]:\n{tech_data_str_all}\n"
+                f"[실시간 시장 뉴스 컨텍스트]:\n{news_context}\n\n"
+                f"=== ⚠️ 리포트 심사 및 서술 지침 ===\n"
+                f"1. 퀀트 팩트 로그에 기술된 구체적 수치(차트 이격도, 변동성, 이격 지표)와 교차 검증 결과를 바탕으로 가장 매력적인 최종 Top 3 종목만 엄선하십시오.\n"
+                f"2. 각 종목에 대해 0~100점의 **[종합 매력도 점수]**를 부여하되, 파이썬 로그에 '컨센서스 교차검증: ⚠️' 경고 플래그가 확인되는 종목(목표가 괴리율 15% 이상 벌어짐)은 위험 요인을 객관적으로 판단하여 감점 요인으로 반영하십시오.\n"
+                f"3. 강세(Bull) 및 약세(Bear) 논리를 서술할 때는 파이썬이 연산하여 로그에 찍어준 숫자만 인용하고 임의 변형하거나 다른 주가를 창조하지 마십시오.\n\n"
+                f"=== 리포트 작성 포맷 ===\n"
                 f"<ANALYSIS_종목명>\n"
                 f"### [종목명]\n"
-                f"**🎯 {investment_horizon} 종합 매력도: [00]/100점**\n"
-                f"**🟢 강세 논리 (Bull Case):** (차트 수치, 퀀트 데이터, 뉴스 모멘텀 상세 인용)\n"
-                f"**🔴 위험 논리 (Bear Case):** (퀀트 내부 검증 플래그 및 뉴스, 한계점 서술)\n"
+                f"**🎯 {investment_horizon} 종합 매력도 점수: [00]/100점**\n"
+                f"**🟢 강세 논리 (Bull Case):** (파이썬이 도출한 구체적 가치 지표, 차트 수치 및 뉴스 모멘텀 직접 연계 기술)\n"
+                f"**🔴 위험 논리 (Bear Case):** (엔진 내부 리스크 플래그, 역전 현상, 지주사 할인 및 증권사 컨센서스 대비 목표가 괴리 상태 서술)\n"
                 f"</ANALYSIS_종목명>\n\n"
-                f"※ 목표가나 수치를 임의로 지어내지 마십시오. 마지막 줄은 반드시 [SELECTED_NAMES]: 종목명1, 종목명2, 종목명3 형식으로 종료하십시오."
+                f"※ 수치나 목표가 밴드를 임의로 가공하지 마십시오. 마지막 줄은 반드시 [SELECTED_NAMES]: 종목명1, 종목명2, 종목명3 형식으로 종료해야 합니다."
             )
             st.session_state.top3_report = "".join(call_gemini_stream_with_fallback(step3_prompt))
 
-    # 결과 출력 및 듀얼 타겟팅 결합 렌더링
+    # 결과 출력 및 실시간 바이패스 듀얼 타겟팅 검증 카드 렌더링
     if st.session_state.get('top3_report'):
         raw_top3 = st.session_state.top3_report
         cached_results = st.session_state.get('quant_results_cache', [])
         
-        with st.expander("📝 퀀트/차트/뉴스 종합 TOP 3 매력도 리포트", expanded=True):
+        with st.container(border=True):
+            st.markdown("### 📝 퀀트-모멘텀 컨센서스 통합 TOP 3 리포트")
             display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw_top3.split("[SELECTED_NAMES]")[0].strip())
-            st.write(display_text)
+            st.markdown(display_text)
             
             if "[SELECTED_NAMES]" in raw_top3:
                 match = re.search(r'\[SELECTED_NAMES\]\s*:\s*([^%\n\r]+)', raw_top3)
                 if match:
                     selected_names = [n.strip() for n in match.group(1).split(',')]
                     st.markdown("---")
-                    st.markdown(f"### 📊 퀀트 vs 애널리스트 듀얼 타겟팅 검증 ({investment_horizon} 기준)")
+                    st.markdown(f"### 📊 퀀트 vs 애널리스트 컨센서스 실시간 트래킹 ({investment_horizon[:2]} 운용)")
                     
                     cols_rec = st.columns(3)
                     for idx, s_name in enumerate(selected_names[:3]):
@@ -1057,9 +1100,9 @@ with tab4:
                         if not q_data: continue
                         
                         current_p = q_data['current_price']
-                        q_target_mid = q_data['tp_m'] # 애널리스트 비교용 중기 적정가
+                        q_target_mid = q_data['tp_m'] 
                         
-                        # 선택된 기간에 따른 UI 표시용 타겟 지정
+                        # 투자 기간에 대응하는 정량 타겟 및 손절 라인 매핑
                         if "단기" in investment_horizon:
                             active_target, active_sl = q_data['tp_s'], q_data['sl_s']
                         elif "중기" in investment_horizon:
@@ -1067,7 +1110,8 @@ with tab4:
                         else:
                             active_target, active_sl = q_data['tp_l'], q_data['sl_l']
                         
-                        rep_info = analyst_universe.get(matched_name, {})
+                        # 람다 유니버스로부터 해당 종목의 정형화 리포트 팩트 매칭
+                        rep_info = next((v for k, v in analyst_universe.items() if v.get("ticker") == tick_code), analyst_universe.get(matched_name, {}))
                         extracted_target = float(rep_info.get("target_price", 0))
                         
                         with cols_rec[idx % 3]:
@@ -1075,21 +1119,21 @@ with tab4:
                                 st.markdown(f"#### **{matched_name}** `{tick_code}`")
                                 st.metric("실시간 현재가", f"{current_p:,.0f}원")
                                 
-                                # 애널리스트 vs 퀀트 중기 오차 검증
+                                # 애널리스트 컨센서스와 퀀트 엔진 간의 기계적 오차 추적 시스템
                                 if extracted_target > 0 and current_p > 0:
                                     divergence = abs(q_target_mid - extracted_target) / q_target_mid
                                     if divergence >= 0.05:
                                         st.warning(f"⚠️ **목표가 괴리율 ({divergence*100:.1f}%)**")
-                                        st.markdown(f"- **퀀트 중기 적정가:** {q_target_mid:,.0f}원")
+                                        st.markdown(f"- **퀀트 적정가(중기):** {q_target_mid:,.0f}원")
                                         st.markdown(f"- **애널리스트 목표가:** {extracted_target:,.0f}원")
                                     else:
-                                        st.success(f"✅ **통합 적정가 수렴:** {q_target_mid:,.0f}원")
+                                        st.success(f"✅ **통합 적정가 컨센서스 수렴:** {q_target_mid:,.0f}원")
                                 
                                 st.divider()
-                                st.markdown(f"🎯 **운용 목표가 ({investment_horizon[:2]}):** **{active_target:,.0f}원**")
-                                st.markdown(f"🔴 **손절선 ({investment_horizon[:2]}):** <span style='color:red; font-weight:bold;'>{active_sl:,.0f}원</span>", unsafe_allow_html=True)
+                                st.markdown(f"🎯 **시스템 운용 목표가:** **{active_target:,.0f}원**")
+                                st.markdown(f"🔴 **시스템 기계 손절선:** <span style='color:red; font-weight:bold;'>{active_sl:,.0f}원</span>", unsafe_allow_html=True)
                                 
-                                if st.button("이 리포트 스크랩", key=f"t3_scr_{tick_code}", use_container_width=True):
+                                if st.button("이 리포트 스크랩북 저장", key=f"t3_scr_{tick_code}", use_container_width=True):
                                     analysis_match = re.search(f"<ANALYSIS_{matched_name}>(.*?)</ANALYSIS_{matched_name}>", raw_top3, re.DOTALL)
                                     specific_analysis = analysis_match.group(1).strip() if analysis_match else display_text
                                     
