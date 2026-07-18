@@ -886,10 +886,11 @@ with tab3:
                             st.write(call_gemini_with_fallback(f"[{sec} 요약]\n{l_sum}\n\n위 요약을 바탕으로 해당 섹터의 주도주 흐름과 향후 모멘텀을 심층 분석하라."))
 
 with tab4:
-    st.subheader("종목 발굴 (병렬 고속 분석)")
+    st.subheader("종목 발굴 (멀티 스트래티지 고속 운용)")
     investment_horizon = st.radio("투자기간", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
 
     if st.button("추천 종목 발굴", use_container_width=True, key="btn_recommend"):
+        # 1. 뉴스 풀 구성 (장기 투자 모드일 때는 노이즈 뉴스를 배제하고 AI 자율 퀀트 스크리닝으로 우회)
         all_raw_news = (g_data.get("realtime_news", []) if g_data else []) + (cached_data.get("eco_news", []) if cached_data else [])
         sec_data = g_data.get("sectors") or cached_data.get("sectors") or {}
         for sec, items in sec_data.items():
@@ -897,93 +898,140 @@ with tab4:
             
         rec_news = dedupe_news(all_raw_news)
         
-        if not rec_news: 
-            st.error("분석 대상 뉴스 풀이 비어있습니다.")
+        # [데이터 분리 1단계]: 장기 투자는 뉴스를 보지 않고 재무 선행(Bottom-Up Base)으로 출발
+        if "장기" in investment_horizon:
+            with st.spinner("[1단계] 장기 가치 투자 모드 활성화: 시장 뉴스를 배제하고 글로벌 매크로 및 밸류에이션 프레임워크 구축 중..."):
+                momentum_context = "장기 투자 모드: 단기 실시간 시황 뉴스 스트림을 차단하고 기업의 영구적 자산 가치(BPS) 및 주주환원(Value-Up) 매크로 국면 위주로 분석 환경 세팅 완료."
         else:
             with st.spinner("[1단계] Lite 모델이 수집된 핵심 뉴스를 바탕으로 시장 전체 모멘텀을 추출 중..."):
                 news_str = "\n".join([f"- {n.get('title', '')}: {n.get('summary', '')}" for n in rec_news])
                 momentum_context = call_gemini_lite_summary(f"다음은 현재 시장의 실시간, 거시경제, 섹터별 핵심 뉴스 목록이다. 분량 제한 없이 시장을 지배하는 가장 강력한 테마와 모멘텀을 상세히 분석하라:\n\n{news_str}")
 
-            with st.spinner("[2단계] 추출된 모멘텀 기반으로 1차 후보군 발굴 중..."):
-                prompt = f"투자 [{investment_horizon}] 모멘텀 종목 10개 6자리 JSON 배열 출력.\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"000000\", \"111111\"] 형태의 배열만 출력하시오."
-                res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
+        # [데이터 분리 2단계]: 기간별 가중치 수식 및 발굴 프롬프트 이원화 패치
+        with st.spinner("[2단계] 투자 기간별 가중치 로직 적용 및 최적 후보군 추출 중..."):
+            if "단기" in investment_horizon:
+                # 가중치: 뉴스 50% + 차트 30% + 퀀트 20%
+                strategy_guide = (
+                    "당신은 헤지펀드 단기 모멘텀 운용역입니다. 가중치는 [뉴스 50%, 차트/수급 30%, 펀더멘털 20%]입니다.\n"
+                    "가장 강력한 의문인 '이미 폭등해서 꼭대기에 물릴 위험이 있는 종목(설거지)'을 원천 차단해야 합니다.\n"
+                    "호재 뉴스가 나왔음에도 불구하고, 차트상 20일 이동평균선과의 상방 괴리율이 너무 크거나 52주 신고가에 도달해 단기 매물 벽에 갇힌 오버슈팅 종목은 무조건 제외하십시오.\n"
+                    "반드시 재료(뉴스)는 살아있되, 차트상 바닥권에서 정배열 초입으로 고개를 들기 시작했거나 일시적 낙폭과대 후 수급(기관/외국인) 유입으로 기술적 돌파 시그널(MACD 양전)이 발생하는 '진입 타점 최적 주도주' 10개를 발굴하십시오."
+                )
+                input_context = f"[시장 모멘텀 및 뉴스 분석 Context]\n{momentum_context}"
                 
-                selected_tickers = []
-                matches = re.findall(r'"(\d{6})"', res)
-                if matches:
-                    selected_tickers = list(dict.fromkeys(matches))[:10]
+            elif "중기" in investment_horizon:
+                # 가중치: 뉴스 40% + 퀀트 40% + 차트 20%
+                strategy_guide = (
+                    "당신은 중기 GARP(합리적 가격의 성장주) 운용역입니다. 가중치는 [뉴스 40%, 재무 퀀트 40%, 차트 20%]입니다.\n"
+                    "단순 지라시성 테마를 배제하고, 향후 3~6개월 내 실적(EPS)의 턴어라운드가 재무제표에 숫자로 찍힐 명확한 근거가 있는 기업이어야 합니다.\n"
+                    "업종 평균 대비 PER/PBR 메리트가 확실하면서 수급 모멘텀이 뒷받침되는 밸런스 종목 10개를 발굴하십시오."
+                )
+                input_context = f"[시장 모멘텀 분석 Context]\n{momentum_context}"
+                
+            else: # 장기
+                # 가중치: 재무 퀀트 80% + 매크로 20% (뉴스 배제)
+                strategy_guide = (
+                    "당신은 정통 가치 투자(Deep Value) 부서의 리서치 센터장입니다. 가중치는 [재무 퀀트 80%, 매크로 변수 20%]입니다. 실시간 시장 뉴스는 노이즈이므로 철저히 무시하십시오.\n"
+                    "반드시 '재무제표 선행 확인' 철학을 따릅니다. 본인의 내부 지식 지식(Knowledge Base)을 총동원하여 대한민국 증시(KOSPI/KOSDAQ) 기업 중 다음 조건을 만족하는 '진성 저평가 우량 자산'을 먼저 스크리닝하십시오.\n"
+                    "조건 1: 최근 3년 연속 확실한 순이익 흑자 유지 (EPS가 양수일 것)\n"
+                    "조건 2: 자기자본이익률(ROE)이 10% 이상으로 유지되거나 구조적으로 우상향 중일 것\n"
+                    "조건 3: 자산 청산가치(BPS) 대비 주가가 극심하게 저평가되어 있으며 주주환원(자사주 소각, 배당 증가) 여력이 풍부할 것\n"
+                    "위 퀀트 요건을 충족하여 하방 경직성이 완벽히 확보된 종목 중, 향후 장기적인 국가 정책 및 글로벌 매크로 공급망 재편의 수혜를 입을 수 있는 장기 밸류 종목 10개를 선별하십시오."
+                )
+                input_context = "[장기 퀀트 베이스 백그라운드 모델 가동 완료]"
+
+            prompt = (
+                f"당신의 투자 판단 기간은 [{investment_horizon}]입니다.\n"
+                f"아래 가중치 지침에 부합하는 주식들을 고도의 계량 기법으로 엄선하십시오.\n\n"
+                f"[기간별 가중치 운용 지침]\n{strategy_guide}\n\n"
+                f"{input_context}\n\n"
+                f"※ 어떠한 서술이나 텍스트도 덧붙이지 말고, 조건과 가중치에 완벽하게 부합하는 한국 증시 상장 종목 10개를 선정하여 [\"000000\", \"111111\"] 형태의 6자리 숫자 문자열 배열로만 즉시 출력하십시오."
+            )
+            res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
             
-            if not selected_tickers: 
-                st.error("⚠️ AI가 조건에 맞는 종목을 추출하지 못했거나 API 응답이 지연되었습니다. 잠시 후 다시 시도해주세요.")
-                st.stop()
-            
-            with st.spinner("[3단계] 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
+            selected_tickers = []
+            matches = re.findall(r'"(\d{6})"', res)
+            if matches:
+                selected_tickers = list(dict.fromkeys(matches))[:10]
+        
+        if not selected_tickers: 
+            st.error("⚠️ AI가 지정된 기간별 가중치 조건에 맞는 종목 티커를 추출하지 못했습니다. 잠시 후 다시 시도해주세요.")
+            st.stop()
+        
+        with st.spinner("[3단계] 선별된 자산 후보군 동시 병렬 크롤링 및 리스크/할인 가치 연산 중..."):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in selected_tickers]
+                results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
+                valid_results = results
+
+        tried_tickers = set(selected_tickers)
+        max_retry = 2
+        retry_count = 0
+        
+        while len(valid_results) < 10 and retry_count < max_retry:
+            with st.spinner(f"[보충 단계] 밸류에이션 심사 통과 항목 부족으로 예비 후보군 스크리닝 중 (시도 {retry_count+1}/{max_retry})..."):
+                deficit = 10 - len(valid_results)
+                extra_prompt = (
+                    f"투자 기간 [{investment_horizon}] 운용 지침에 맞춰 다음 티커들을 제외하고 보충 종목 {deficit}개를 JSON 배열로 출력하십시오.\n"
+                    f"지침 가중치 규칙을 엄격히 적용할 것.\n"
+                    f"(제외 목록: {', '.join(tried_tickers)})\n\n"
+                    f"{input_context}\n\n"
+                    f"※ 다른 설명 없이 [\"000000\", \"111111\"] 형태의 배열만 출력하시오."
+                )
+                extra_res = call_gemini_with_fallback(extra_prompt, model=LITE_MODEL_NAME)
+                
+                extra_tickers = []
+                ex_matches = re.findall(r'"(\d{6})"', extra_res)
+                if ex_matches:
+                    extra_tickers = [t for t in list(dict.fromkeys(ex_matches)) if t not in tried_tickers][:deficit]
+                    
+                if not extra_tickers: break
+                tried_tickers.update(extra_tickers)
+                
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                    futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in selected_tickers]
-                    results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
-                    valid_results = results
+                    futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in extra_tickers]
+                    extra_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
+                    valid_results += extra_results
+                retry_count += 1
 
-            tried_tickers = set(selected_tickers)
-            max_retry = 2
-            retry_count = 0
+        if len(valid_results) == 0:
+            st.warning("⚠️ 지정된 펀더멘털 및 리스크 윈도우를 통과한 종목이 시장에 존재하지 않습니다. 리스크 관리 계수(k) 조정을 고려하십시오.")
+            st.session_state.today_recommendation = ""
+            st.session_state.valid_results_cache = []
+        else:
+            tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
+            st.session_state.valid_results_cache = valid_results
             
-            while len(valid_results) < 10 and retry_count < max_retry:
-                with st.spinner(f"[보충 단계] 부족분 보충 중 (시도 {retry_count+1}/{max_retry})..."):
-                    deficit = 10 - len(valid_results)
-                    extra_prompt = f"다음 티커들을 제외하고, 투자 [{investment_horizon}] 모멘텀 종목 {deficit}개 6자리 JSON 배열 출력.\n(제외: {', '.join(tried_tickers)})\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"000000\", \"111111\"] 형태의 배열만 출력하시오."
-                    extra_res = call_gemini_with_fallback(extra_prompt, model=LITE_MODEL_NAME)
-                    
-                    extra_tickers = []
-                    ex_matches = re.findall(r'"(\d{6})"', extra_res)
-                    if ex_matches:
-                        extra_tickers = [t for t in list(dict.fromkeys(ex_matches)) if t not in tried_tickers][:deficit]
-                        
-                    if not extra_tickers: break
-                    tried_tickers.update(extra_tickers)
-                    
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                        futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in extra_tickers]
-                        extra_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
-                        valid_results += extra_results
-                    retry_count += 1
-
-            if len(valid_results) == 0:
-                st.warning("⚠️ 2회 재시도 보충을 진행했으나, 후보군 전부 밸류에이션상 상승여력이 없어 추천에서 제외되었습니다.")
-                st.session_state.today_recommendation = ""
-                st.session_state.valid_results_cache = []
-            else:
-                tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
-                st.session_state.valid_results_cache = valid_results
-                
-                with st.spinner(f"[4단계] 최종 선별된 {len(valid_results)}개 중 Flash 기반 Top 3 보고서 작성 중..."):
-                    step3_prompt = (
-                        f"당신은 리스크와 기회를 종합적으로 분석하는 전문 퀀트 애널리스트입니다.\n"
-                        f"[시장 전체 핵심 모멘텀 분석]\n{momentum_context}\n\n"
-                        f"[후보군 팩트 데이터(뉴스, 공시, 재무, 차트 포함)]\n{tech_data_str_all}\n\n"
-                        f"=== ⚠️ AI 분석 지침 ===\n"
-                        f"1. 가장 매력도 점수가 높은 **Top 3 종목만 엄선**하십시오.\n"
-                        f"2. 제공된 모든 데이터를 종합하여 **'종합 매력도 점수(0~100점)'**를 산정하고 최상단에 명시하십시오.\n"
-                        f"3. 강세/약세 논리를 서술할 때 반드시 파이썬이 연산하여 넘겨준 팩트 데이터의 숫자를 인용하여 증명하십시오.\n"
-                        f"4. 역전됨 플래그나 특수 경고 플래그가 발견된 종목은 반드시 <BEAR_CASE>에 구체적으로 경고하십시오.\n\n"
-                        f"=== 리포트 작성 항목 ===\n"
-                        f"<ANALYSIS_티커숫자>\n"
-                        f"### [종목명] (티커)\n"
-                        f"**🎯 종합 매력도 점수: [00]/100점**\n"
-                        f"**🎯 핵심 투자 아이디어 및 모멘텀 (Why Buy?)**\n"
-                        f"- (뉴스/공시 모멘텀을 기반으로 핵심 매수 이유 작성)\n"
-                        f"**🟢 강세 논리 (Bull Case)**\n"
-                        f"**🔴 약세/위험 논리 (Bear Case - 구조적 경고 포함)**\n"
-                        f"</ANALYSIS_티커숫자>\n\n"
-                        f"※ 절대 목표가나 손절가 수치를 임의로 작성하지 마십시오. 마지막 줄에 선정된 3개 종목의 티커를 콤마로 구분하여 아래 형식으로 반드시 출력하십시오.\n"
-                        f"[SELECTED_TICKERS]: 000000, 111111, 222222"
-                    )
-                    st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step3_prompt))
+            with st.spinner(f"[4단계] 계량 검증 완료된 {len(valid_results)}개 중 최종 투자 포트폴리오 Top 3 심층 보고서 작성 중..."):
+                step3_prompt = (
+                    f"당신은 리스크 관리 및 자산 배분을 총괄하는 전문 퀀트 애널리스트입니다.\n"
+                    f"투자 분석 기간 가중치 룰에 따라 파이썬 엔진이 연산한 아래 후보 데이터를 심사하십시오.\n\n"
+                    f"[투자 기간 국면]: {investment_horizon}\n"
+                    f"[후보군 계량 데이터 팩트]\n{tech_data_str_all}\n\n"
+                    f"=== ⚠️ AI 심사 지침 ===\n"
+                    f"1. 해당 투자 기간 국면에 '가장 완벽하게 자산 방어력과 상승 촉매를 증명하여, 투자매력도 가장 높은 ' **Top 3 종목만 최종 엄선**하십시오.\n"
+                    f"2. 종합 매력도 점수는 파이썬이 넘겨준 기술적 변동성과 구조적 위험 요인을 본인의 통찰과 가중 결합하여 엄격하게 산정하십시오.\n"
+                    f"3. 절대로 주가나 수식, 목표가 밴드를 임의로 가공하거나 수정하지 마십시오.\n"
+                    f"4. 데이터 누락 경고 플래그나 구조적 디스카운트(지주사, 가치 함정)가 명시된 종목은 반드시 <BEAR_CASE>에 그 리스크 파급력을 직설적으로 기술하십시오.\n\n"
+                    f"=== 리포트 작성 항목 ===\n"
+                    f"<ANALYSIS_티커숫자>\n"
+                    f"### [종목명] (티커)\n"
+                    f"**🎯 종합 매력도 점수: [00]/100점**\n"
+                    f"**🎯 핵심 투자 아이디어 및 모멘텀 (Why Buy?)**\n"
+                    f"- (지정된 기간 가중치 룰의 관점에서 합당한 매수 이유 기술)\n"
+                    f"**🟢 강세 논리 (Bull Case)**\n"
+                    f"**🔴 약세/위험 논리 (Bear Case - 엔진 구조적 경고 반영)**\n"
+                    f"</ANALYSIS_티커숫자>\n\n"
+                    f"※ 마지막 줄은 선정된 3개 종목의 6자리 티커만 콤마로 구분하여 아래 포맷으로 대괄호를 닫아 완결하십시오.\n"
+                    f"[SELECTED_TICKERS]: 000000, 111111, 222222"
+                )
+                st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step3_prompt))
 
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
         cached_results = st.session_state.get('valid_results_cache', [])
         
-        with st.expander("추천 리포트"):
+        with st.expander("📝 퀀트-모멘텀 통합 발굴 리포트", expanded=True):
             display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw.split("[SELECTED_TICKERS]")[0].strip())
             st.write(display_text)
             
@@ -992,6 +1040,8 @@ with tab4:
                 if match:
                     selected_ticks = [t.strip() for t in match.group(1).split(',') if len(t.strip()) == 6]
                     price_map = fetch_current_prices(selected_ticks)
+                    st.markdown("---")
+                    st.markdown("### 📊 실시간 바이패스 트래킹 카드")
                     cols_rec = st.columns(3)
                     
                     for idx, tick in enumerate(selected_ticks):
@@ -1013,14 +1063,14 @@ with tab4:
                                 c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}<br>장: {tp_l:,.0f}", unsafe_allow_html=True)
                                 c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
                                 
-                                if st.button("스크랩", key=f"rec_s_{tick}", use_container_width=True):
+                                if st.button("스크랩북 보관", key=f"rec_s_{tick}", use_container_width=True):
                                     analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw, re.DOTALL)
                                     specific_analysis = analysis_match.group(1).strip() if analysis_match else display_text
                                     
                                     c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                              (f"{name} 퀀트 심층분석", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, current, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user))
+                                              (f"{name} 퀀트 심층분석 ({investment_horizon})", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, current, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user))
                                     conn.commit()
-                                    st.success(f"✅ 리포트 스크랩 완료!")
+                                    st.success(f"✅ {name} 스크랩북 저장 완료")
 
 with tab5:
     st.subheader("관심종목 진단")
