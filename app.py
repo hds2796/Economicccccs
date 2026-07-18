@@ -23,8 +23,17 @@ from google import genai
 MODEL_NAME = "gemini-3.5-flash"
 LITE_MODEL_NAME = "gemini-3.1-flash-lite"
 
-# DB 백업/복구 시 다른 세션의 접근을 막기 위한 락
+# =======================================================
+# 스레드 안전성(Thread-Safety) 락 및 세션 관리
+# =======================================================
 db_backup_lock = threading.Lock()
+xml_parse_lock = threading.Lock()  # C-레벨 XML 파서 충돌 방지용
+thread_local = threading.local()   # 스레드별 세션 재사용 (포트 고갈 방지)
+
+def get_session():
+    if not hasattr(thread_local, "session"):
+        thread_local.session = requests.Session()
+    return thread_local.session
 
 st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 
@@ -187,7 +196,7 @@ def restore_db_from_drive():
         except: return False
 
 # =======================================================
-# 사이드바 제어 (K값 저장 및 백업/복구 통합)
+# 사이드바 제어 (K값 저장)
 # =======================================================
 with st.sidebar:
     st.markdown(f"**👤 접속 계정:** `{current_user}`")
@@ -285,7 +294,8 @@ def get_dart_filings(stock_code):
         
         bgn_de = (datetime.now() - pd.Timedelta(days=90)).strftime("%Y%m%d")
         url = f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={row[0]}&bgn_de={bgn_de}&page_count=5"
-        res = requests.get(url, timeout=5).json()
+        session = get_session()
+        res = session.get(url, timeout=5).json()
         if res.get("status") == "000": return "\n".join([f"- [{i['rcept_dt']}] {i['report_nm']}" for i in res.get("list", [])])
         return "최근 3개월 주요 공시 없음"
     except: return "DART 조회 실패"
@@ -294,16 +304,14 @@ def get_dart_filings(stock_code):
 def get_advanced_fundamental_data(code):
     data = {"per": "-", "pbr": "-", "eps": 0, "bps": 0, "industry_per": "-", "quarter_trend": "정보 없음", "supply_demand": "정보 없음", "eps_history": [], "roe_history": []}
     headers = {'User-Agent': 'Mozilla/5.0'}
+    session = get_session()
     try:
         url = f"https://finance.naver.com/item/main.naver?code={code}"
-        res = requests.get(url, headers=headers, timeout=5)
+        res = session.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, "html.parser")
         
         per_elem = soup.find(id="_per")
         if per_elem: data["per"] = per_elem.get_text().strip()
-            
-        pbr_elem = soup.find(id="_pbr")
-        if pbr_elem: data["pbr"] = pbr_elem.get_text().strip()
             
         eps_elem = soup.find(id="_eps")
         if eps_elem:
@@ -348,7 +356,7 @@ def get_advanced_fundamental_data(code):
             except: pass
             
         url_frgn = f"https://finance.naver.com/item/frgn.naver?code={code}"
-        res_frgn = requests.get(url_frgn, headers=headers, timeout=5)
+        res_frgn = session.get(url_frgn, headers=headers, timeout=5)
         soup_frgn = BeautifulSoup(res_frgn.text, "html.parser")
         
         inst_sum, fore_sum, count = 0, 0, 0
@@ -369,11 +377,13 @@ def get_advanced_fundamental_data(code):
 def get_technical_data(code):
     try:
         url = f"https://fchart.stock.naver.com/sise.nhn?symbol={code}&timeframe=day&count=250&requestType=0"
-        res = requests.get(url, timeout=5)
+        session = get_session()
+        res = session.get(url, timeout=5)
         
-        # XML 파서 교체 (경고 해결)
-        root = ET.fromstring(res.text)
-        items = root.findall('.//item')
+        with xml_parse_lock:
+            root = ET.fromstring(res.text)
+            items = root.findall('.//item')
+            
         if not items: return None
         
         df_data = [float(item.attrib['data'].split('|')[4]) for item in items]
@@ -409,9 +419,9 @@ def get_historical_high_low(code, start_date_str):
         url = f"https://fchart.stock.naver.com/sise.nhn?symbol={code}&timeframe=day&count=250&requestType=0"
         res = requests.get(url, timeout=5)
         
-        # XML 파서 교체 (경고 해결)
-        root = ET.fromstring(res.text)
-        items = root.findall('.//item')
+        with xml_parse_lock:
+            root = ET.fromstring(res.text)
+            items = root.findall('.//item')
         
         start_date = datetime.strptime(start_date_str.split()[0], "%Y-%m-%d")
         max_h, min_l = 0.0, float('inf')
@@ -556,7 +566,7 @@ st.divider()
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["실시간 브리핑", "핵심 경제", "섹터 뉴스", "종목 발굴", "관심종목 진단", "스크랩북"])
 
 # =======================================================
-# 탭 1: 실시간 브리핑
+# 탭 1 ~ 3: 브리핑 및 경제 뉴스
 # =======================================================
 with tab1:
     st.subheader("실시간 시황 브리핑")
@@ -571,26 +581,18 @@ with tab1:
             with st.spinner("Lite 모델 압축 중..."): lite_summary = call_gemini_lite_summary(f"다음 뉴스를 요약하라:\n\n{news_str}")
             with st.spinner("Flash 모델 분석 중..."): st.write_stream(call_gemini_stream_with_fallback(f"지표:\n{json.dumps(market_data)}\n\n요약:\n{lite_summary}\n\n시장 흐름 심층 분석 서술."))
 
-# =======================================================
-# 탭 2: 핵심 경제
-# =======================================================
 with tab2:
     st.subheader("핵심 경제 종합 브리핑 및 시장 심리")
-    
-    # 심리 지수 일간 평균 추출 및 최근 7일(일주일) 시각화 적용
     c.execute("SELECT calc_date, score FROM sentiment_history ORDER BY calc_date ASC")
     if sentiment_rows := c.fetchall():
         df_sent = pd.DataFrame(sentiment_rows, columns=['date', 'score'])
         df_sent['date'] = pd.to_datetime(df_sent['date']).dt.strftime('%Y-%m-%d')
         df_avg = df_sent.groupby('date')['score'].mean().reset_index().set_index('date')
-        
         df_avg_7d = df_avg.tail(7)
-        
         today_str = datetime.now().strftime('%Y-%m-%d')
         if not df_avg.empty:
             today_score = df_avg.loc[today_str, 'score'] if today_str in df_avg.index else df_avg.iloc[-1]['score']
             prev_score = df_avg.iloc[-2]['score'] if len(df_avg) > 1 else today_score
-            
             col_s1, col_s2 = st.columns([2, 8])
             with col_s1:
                 diff = today_score - prev_score
@@ -598,7 +600,6 @@ with tab2:
                 st.caption("0(공포) ◀ 50(중립) ▶ 100(탐욕)\n*최근 7일 트렌드")
             with col_s2:
                 st.line_chart(df_avg_7d['score'], height=150)
-                
     st.divider()
 
     eco_news = cached_data.get("eco_news", [])
@@ -614,21 +615,19 @@ with tab2:
                     f"[거시 경제 요약]\n{lite_summary}\n\n"
                     f"=== 리포트 작성 항목 ===\n"
                     f"**📰 핵심 경제 종합 브리핑**\n"
-                    f"- 제공된 [거시 경제 요약]을 바탕으로 현재 시장에 큰 영향을 미치는 주요 경제/증시 뉴스 3~5가지를 구체적 사실과 함께 상세히 브리핑하십시오.\n"
+                    f"- 제공된 요약을 바탕으로 주요 거시 경제 이슈 분석.\n"
                     f"**🔮 앞으로 주식시장은?**\n"
-                    f"- (향후 시장 전망 및 최대 하방 리스크 점검)\n"
+                    f"- 향후 시장 전망 및 최대 하방 리스크 점검.\n"
                     f"**🛡️ 대응 전략**\n"
-                    f"- (현재 거시 지표에 기반한 포트폴리오 관리 전략)\n\n"
-                    f"※ 필수 지침: 리포트 맨 마지막 줄에는 반드시 현재 시장 심리를 0에서 100 사이의 숫자로 평가하여 아래와 같은 정확한 포맷으로 출력하십시오. 볼드체나 다른 수식어를 절대 붙이지 마십시오.\n"
+                    f"- 포트폴리오 관리 전략 제시.\n\n"
+                    f"※ 마지막 줄은 반드시 시장 심리 수치(0~100)를 아래 포맷으로 출력하십시오.\n"
                     f"[SENTIMENT_SCORE]: 50"
                 )
                 full_report = "".join(call_gemini_stream_with_fallback(prompt))
-                
                 clean_report_for_regex = full_report.replace('*', '').replace('#', '')
                 if score_match := re.search(r'\[SENTIMENT_SCORE\]\s*:\s*(\d+)', clean_report_for_regex):
                     c.execute("INSERT INTO sentiment_history (calc_date, score) VALUES (?, ?)", (datetime.now().strftime("%Y-%m-%d"), float(score_match.group(1))))
                     conn.commit()
-                
                 st.session_state.eco_briefing = re.sub(r'\[SENTIMENT_SCORE\].*', '', full_report, flags=re.DOTALL).strip()
                 st.rerun()
 
@@ -641,14 +640,11 @@ with tab2:
         for idx, n in enumerate(eco_news[:10]):
             st.markdown(f"**[{idx+1}] {n['title']}**")
             if st.button("개별 심층 분석", key=f"eco_an_{idx}"):
-                with st.spinner("Lite 전처리 및 Flash 의미론적 분석 진행 중..."):
-                    l_sum = call_gemini_lite_summary(f"본 뉴스의 핵심적 사실을 왜곡 없이 상세히 요약하라:\n{n['title']}")
-                    st.write(call_gemini_with_fallback(f"[뉴스 요약]\n{l_sum}\n\n이 사실이 거시 경제 및 관련 주식 섹터에 파급 효과와 거시적 변화 의의를 분석하라."))
-    else: st.info("조회된 핵심 경제 뉴스가 없습니다.")
+                with st.spinner("분석 진행 중..."):
+                    l_sum = call_gemini_lite_summary(f"본 뉴스를 상세히 요약하라:\n{n['title']}")
+                    st.write(call_gemini_with_fallback(f"[뉴스 요약]\n{l_sum}\n\n파급 효과와 거시적 의미 분석."))
+    else: st.info("조회된 핵심 뉴스가 없습니다.")
 
-# =======================================================
-# 탭 3: 섹터 뉴스
-# =======================================================
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
     sec_news = g_data.get("sectors") or cached_data.get("sectors") or g_data.get("sector_news", {})
@@ -660,7 +656,7 @@ with tab3:
                 if st.button(f"분석", key=f"sec_{sec}"): st.write(call_gemini_with_fallback(f"[{sec} 요약]\n" + call_gemini_lite_summary("\n".join([i['title'] for i in items])) + "\n\n주도주 흐름 분석."))
 
 # =======================================================
-# 탭 4: 종목 발굴 헬퍼 함수
+# 탭 4, 5 공통: 종목 분석 퀀트 코어 로직
 # =======================================================
 def fetch_candidate_tickers(rec_news, investment_horizon, exclude_tickers, need_count):
     articles_str = "\n".join([f"- {n.get('title', '')}: {n.get('description', n.get('summary', ''))}" for n in rec_news[:50]])
@@ -668,21 +664,19 @@ def fetch_candidate_tickers(rec_news, investment_horizon, exclude_tickers, need_
     prompt = f"투자 [{investment_horizon}] 모멘텀 종목 {need_count}개 6자리 JSON 배열 출력.{exclude_str}\n\n{articles_str}"
     res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
     tickers = []
-    
     match = re.search(r'\[.*\]', res, re.DOTALL)
     if match:
-        try: 
-            tickers = json.loads(match.group(0))[:need_count]
-        except: 
-            pass
+        try: tickers = json.loads(match.group(0))[:need_count]
+        except: pass
     return tickers
 
-def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
+def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=False):
     ticker = re.sub(r'[^\d]', '', ticker)
     if len(ticker) != 6: return ""
     
+    session = get_session()
     try:
-        res = requests.get(f"https://m.stock.naver.com/api/stock/{ticker}/basic", timeout=3).json()
+        res = session.get(f"https://m.stock.naver.com/api/stock/{ticker}/basic", timeout=3).json()
         name = res.get("stockName", ticker)
     except: name = ticker
     
@@ -690,7 +684,7 @@ def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     fund = get_advanced_fundamental_data(ticker)
     dart_info = get_dart_filings(ticker)
     news_raw = fetch_stock_news(name, display=4)
-    lite_summary = call_gemini_lite_summary(f"뉴스 및 공시 요약:\n{dart_info}\n{chr(10).join([n['title'] for n in news_raw])}")
+    lite_summary = call_gemini_lite_summary(f"뉴스/공시 요약:\n{dart_info}\n{chr(10).join([n['title'] for n in news_raw])}")
     
     current_price = tech['current'] if tech else 0.0
     daily_vol = tech['daily_volatility'] if tech else 0.0
@@ -701,6 +695,12 @@ def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     
     try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
     except: float_ind_per = 0.0
+
+    # 1. PBR 예외처리 및 데이터 정합성 보완
+    if bps_val > 0 and current_price > 0:
+        fund['pbr'] = f"{current_price / bps_val:.2f}"
+    else:
+        fund['pbr'] = "-"
 
     eps_growth = 0.0
     if len(eps_history) >= 2 and eps_history[0] != 0:
@@ -713,61 +713,65 @@ def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
         
     conservative_bps = (bps_val * bps_discount) if bps_val > 0 else current_price * 0.8
 
-    # --- [손절가 산출 (시간 제곱근 법칙)] ---
-    sl_s = current_price * (1 - user_k * daily_vol * np.sqrt(20)) if daily_vol > 0 else 0.0
-    sl_m = current_price * (1 - user_k * daily_vol * np.sqrt(60)) if daily_vol > 0 else 0.0
-    sl_l = current_price * (1 - user_k * daily_vol * np.sqrt(250)) if daily_vol > 0 else 0.0
+    # 2. 손절가 캡핑 적용 (최대 하락폭 제한으로 비현실적 수치 방지)
+    sl_s = current_price * (1 - min(user_k * daily_vol * np.sqrt(20), 0.15)) if daily_vol > 0 else current_price * 0.95
+    sl_m = current_price * (1 - min(user_k * daily_vol * np.sqrt(60), 0.30)) if daily_vol > 0 else current_price * 0.90
+    sl_l = current_price * (1 - min(user_k * daily_vol * np.sqrt(250), 0.50)) if daily_vol > 0 else current_price * 0.80
 
-    # --- [목표가 산출 (타임프레임 재정의)] ---
-    tp_s = current_price * (1 + user_k * daily_vol * np.sqrt(20)) if daily_vol > 0 else current_price * 1.05
+    # 3. 목표가 산출 및 모멘텀 상한선(+25%) 제한
+    tp_s = current_price * min(1 + user_k * daily_vol * np.sqrt(20), 1.25) if daily_vol > 0 else current_price * 1.05
 
     if eps_val <= 0:
-        tp_m = current_price * (1 + user_k * daily_vol * np.sqrt(60)) if daily_vol > 0 else current_price * 1.10
-        tp_l = current_price * (1 + user_k * daily_vol * np.sqrt(250)) if daily_vol > 0 else current_price * 1.15
-        
-        max_fund_target = conservative_bps
-        
-        fund_target_log = (
-            f"   - [중기 목표가] (적자기업 기술적 대체) 60일 상방 밴드: {tp_m:,.0f}원\n"
-            f"   - [장기 목표가] (적자기업 기술적 대체) 250일 상방 밴드: {tp_l:,.0f}원\n"
-            f"   ※ 참고: BPS 청산가치(할인율 {int((1-bps_discount)*100)}%): {conservative_bps:,.0f}원\n"
-        )
+        raw_tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
+        raw_tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
+        fund_type = "적자 대용치 (기술적 밴드)"
     else:
         adjusted_ind_per = float_ind_per * (1 + eps_growth) if float_ind_per > 0 else 0.0
-        tp_m = eps_val * adjusted_ind_per if adjusted_ind_per > 0 else eps_val * 10
-        
+        raw_tp_m = eps_val * adjusted_ind_per if adjusted_ind_per > 0 else eps_val * 10
         required_return = 0.08
         expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
-        tp_l = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
-        
-        max_fund_target = max(tp_m, tp_l)
-        
-        fund_target_log = (
-            f"   - [중기 목표가] 성장률 반영 업종PER 기준: {tp_m:,.0f}원\n"
-            f"   - [장기 목표가] RIM 초과이익 기준: {tp_l:,.0f}원\n"
-            f"   ※ 참고: BPS 청산가치(할인율 {int((1-bps_discount)*100)}%): {conservative_bps:,.0f}원\n"
-        )
+        raw_tp_l = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
+        fund_type = "기본 펀더멘털"
 
-    # [고평가 필터 (펀더멘털 최대치가 현재가를 못 넘으면 커트)]
-    if current_price > 0 and max_fund_target > 0 and max_fund_target < current_price:
-        return ""
+    # 4. 종목 발굴 탭(is_discovery_mode=True) 전용 엄격한 절대 필터
+    if is_discovery_mode:
+        if current_price > 0 and (raw_tp_m < current_price or raw_tp_l < current_price):
+            return "" # 기대수익률 마이너스 종목 즉시 탈락
+
+    # 5. 구조적 역전 현상 강제 보정 및 내부 로그 기록
+    flag_m = "정상"
+    flag_l = "정상"
+    
+    tp_m = max(raw_tp_m, tp_s)
+    if tp_m > raw_tp_m: 
+        flag_m = f"역전 보정됨 (원본: {raw_tp_m:,.0f}원으로 단기 모멘텀보다 낮아 장기 하향 리스크 내재)"
+    
+    tp_l = max(raw_tp_l, tp_m)
+    if tp_l > raw_tp_l: 
+        flag_l = f"역전 보정됨 (원본: {raw_tp_l:,.0f}원으로 중기 가치보다 낮아 성장성 둔화 우려)"
 
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
-        f"▶ 파이썬 선행연산 목표가 (아래 3가지 값을 각각 단기/중기/장기 목표가로 1:1 채택할 것):\n"
-        f"   - [단기 목표가] 20일 상방 변동성 밴드: {tp_s:,.0f}원\n"
-        f"{fund_target_log}"
+        f"▶ [최종 채택 목표가] (출력 화면 1:1 매칭용):\n"
+        f"   - 단기 목표가: {tp_s:,.0f}원\n"
+        f"   - 중기 목표가: {tp_m:,.0f}원\n"
+        f"   - 장기 목표가: {tp_l:,.0f}원\n"
+        f"▶ [퀀트 엔진 내부 검증 로그 (수정전 원본 데이터 및 리스크 플래그)]:\n"
+        f"   - 밸류에이션 모델 타입: {fund_type}\n"
+        f"   - 중기 원본 가치 수렴치: {raw_tp_m:,.0f}원 (시그널 상태: {flag_m})\n"
+        f"   - 장기 원본 가치 수렴치: {raw_tp_l:,.0f}원 (시그널 상태: {flag_l})\n"
+        f"   - 참고 BPS 청산가치: {conservative_bps:,.0f}원\n"
     )
 
     tech_data_str = f"[{name} ({ticker})]\n"
     if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(일간) {daily_vol*100:.2f}%\n"
     if fund: tech_data_str += f"- 재무 비율: PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']} | EPS {eps_val:,}원 | BPS {bps_val:,}원\n"
-    tech_data_str += f"{calc_result_log}\n- 요약본:\n{lite_summary}\n\n"
+    tech_data_str += f"{calc_result_log}\n- 뉴스/공시 요약본:\n{lite_summary}\n\n"
     
     return tech_data_str
 
 # =======================================================
-# 탭 4: 종목 발굴 메인 블록
+# 탭 4: 종목 발굴 (병렬 고속 분석)
 # =======================================================
 with tab4:
     st.subheader("종목 발굴 (병렬 고속 분석)")
@@ -782,14 +786,13 @@ with tab4:
             with st.spinner("[1단계] 1차 후보군 10개 추출 중..."):
                 selected_tickers = fetch_candidate_tickers(rec_news, investment_horizon, set(), 10)
             
-            # 스피너가 종료된 후(바깥에서) 중단 명령을 내려야 무한 로딩이 걸리지 않습니다.
             if not selected_tickers: 
                 st.error("⚠️ AI가 조건에 맞는 종목을 추출하지 못했거나 API 응답이 지연되었습니다. 잠시 후 다시 시도해주세요.")
                 st.stop()
             
             with st.spinner("[2단계] 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                    futures = [executor.submit(process_single_ticker_for_tab4, t, investment_horizon, k_factor) for t in selected_tickers]
+                    futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in selected_tickers]
                     results = [future.result() for future in concurrent.futures.as_completed(futures)]
                     valid_results = [r for r in results if r and r.strip()]
 
@@ -797,52 +800,45 @@ with tab4:
             max_retry = 2
             retry_count = 0
             
-            # 10개가 안 되면 최대 2번까지 무조건 보충
             while len(valid_results) < 10 and retry_count < max_retry:
-                with st.spinner(f"[보충 단계] 현재 {len(valid_results)}개 확보. 총 10개 분석을 위해 부족분 보충 중 (시도 {retry_count+1}/{max_retry})..."):
+                with st.spinner(f"[보충 단계] 현재 {len(valid_results)}개 확보. 부족분 보충 중 (시도 {retry_count+1}/{max_retry})..."):
                     deficit = 10 - len(valid_results)
                     extra_tickers = fetch_candidate_tickers(rec_news, investment_horizon, tried_tickers, deficit)
                     extra_tickers = [t for t in extra_tickers if t not in tried_tickers]
-                    
-                    if not extra_tickers: 
-                        break
-                        
+                    if not extra_tickers: break
                     tried_tickers.update(extra_tickers)
                     
                     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                        futures = [executor.submit(process_single_ticker_for_tab4, t, investment_horizon, k_factor) for t in extra_tickers]
+                        futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True) for t in extra_tickers]
                         extra_results = [f.result() for f in concurrent.futures.as_completed(futures)]
                         valid_results += [r for r in extra_results if r and r.strip()]
-                        
                     retry_count += 1
 
             tech_data_str = "".join(valid_results)
 
             if len(valid_results) == 0:
-                st.warning("⚠️ 2회 재시도 보충을 진행했으나, 후보군 전부 밸류에이션상 상승여력(목표가 > 현재가)이 없어 추천에서 제외되었습니다. 잠시 후 다시 시도해보세요.")
+                st.warning("⚠️ 2회 재시도 보충을 진행했으나, 후보군 전부 밸류에이션상 상승여력이 없어 추천에서 제외되었습니다.")
                 st.session_state.today_recommendation = ""
             else:
                 with st.spinner(f"[3단계] 최종 선별된 {len(valid_results)}개 중 Flash 기반 Top 3 보고서 작성 중..."):
                     step3_prompt = (
                         f"당신은 리스크 관리를 최우선으로 하는 퀀트 애널리스트입니다.\n"
                         f"[후보군 팩트 데이터]\n{tech_data_str}\n\n"
-                        f"=== ⚠️ AI 분석 및 목표가 선택 지침 (환각 금지 및 수치 인용 필수) ===\n"
-                        f"1. 가장 매력적인 **Top 3 종목만 엄선**하십시오. (제공된 데이터가 3개 미만이면 제공된 종목만 작성하십시오.)\n"
-                        f"2. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 굳이 이 종목을 지금 사야 하는가?'**에 대한 핵심 투자 아이디어(Why Buy?)를 최상단에 선언하십시오.\n"
-                        f"3. **절대 주가나 목표가를 직접 사칙연산하여 임의의 값을 창조하지 마십시오.** 파이썬이 제공한 단기/중기/장기 목표가 가격을 그대로 채택/명시하십시오.\n"
-                        f"4. 편향을 제거하기 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리 작성하여 자가 검열하십시오.\n"
-                        f"5. 파이썬이 연산한 '단기/중기/장기 손절가' 데이터를 그대로 신뢰하여 대응 전략을 제시하십시오.\n\n"
+                        f"=== ⚠️ AI 분석 및 목표가 선택 지침 ===\n"
+                        f"1. 가장 매력적인 **Top 3 종목만 엄선**하십시오.\n"
+                        f"2. 핵심 투자 아이디어(Why Buy?)를 최상단에 선언하십시오.\n"
+                        f"3. 절대 주가나 수식을 임의 계산하지 마시고 파이썬이 연산한 [최종 채택 목표가]와 손절가를 그대로 인용하십시오.\n"
+                        f"4. **[매우 중요]** 데이터 내 [퀀트 엔진 내부 검증 로그]에 '역전 보정됨' 플래그가 발견된 종목을 추천할 경우, 이는 단기 수급 모멘텀으로 오버슈팅되어 펀더멘털 가치를 초과한 상태임을 의미합니다. 반드시 <BEAR_CASE> 및 최종 판단 항목에 '장기 가치 수렴 한계 및 밸류에이션 역전 리스크'를 구체적인 원본 수치와 함께 경고하십시오.\n\n"
                         f"=== 리포트 작성 항목 ===\n"
                         f"<ANALYSIS_티커숫자>\n"
                         f"### [종목명] (티커)\n"
                         f"**🎯 핵심 투자 아이디어 (Why Buy?)**\n"
-                        f"- (가장 강력하고 결정적인 이유 1~2줄 명시)\n"
                         f"**🟢 강세 논리 (Bull Case)**\n"
-                        f"**🔴 약세/위험 논리 (Bear Case)**\n"
+                        f"**🔴 약세/위험 논리 (Bear Case - 역전 보정 경고 포함)**\n"
                         f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                        f"- 목표가 도달 논증 (구체적 수치 인용 필수): 파이썬이 제공한 단기/중기/장기 목표가 가격을 명시하십시오. 그리고 **반드시 본문에 제공된 팩트 수치(EPS, BPS, PER, 20일선, MACD 등)를 직접 인용하여** 왜 이 목표가가 타당한지 정량적/기술적으로 증명하십시오.\n"
+                        f"- 목표가 도달 논증 (팩트 수치 인용 필수)\n"
                         f"</ANALYSIS_티커숫자>\n\n"
-                        f"※ 마지막 줄은 아래 파싱 형식으로 출력 (손절가 필수)\n"
+                        f"※ 마지막 줄은 아래 파싱 형식으로 출력\n"
                         f"[TRACKING_DATA]\n"
                         f"종목명|티커|단기목표가|중기목표가|장기목표가|진입타점|단기손절가|중기손절가|장기손절가"
                     )
@@ -945,98 +941,31 @@ with tab5:
                 if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
             with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
-                    with st.spinner("파이썬 타임프레임 연산 및 수치 방어 논리 작성 중..."):
-                        tech = get_technical_data(code)
-                        fund = get_advanced_fundamental_data(code)
-                        news_raw = fetch_stock_news(name, display=5)
-                        dart_raw = get_dart_filings(code)
+                    with st.spinner("파이썬 연산 및 수치 방어 논리 작성 중..."):
+                        # is_discovery_mode=False 적용 (엄격한 탈락 필터 없이 그대로 분석)
+                        data_str_base = process_single_ticker(ticker, "단기/중기/장기 종합", k_factor, is_discovery_mode=False)
                         
-                        lite_summary = call_gemini_lite_summary(f"뉴스 및 공시:\n{chr(10).join([n['title'] for n in news_raw])}\n{dart_raw}")
+                        extra_ctx = f"\n현재가: {current:,.0f}\n"
+                        if is_owned and avg_price > 0: extra_ctx += f"[내 계좌 정보] 평단가: {avg_price:,.0f} | 현재 수익률: {((current - avg_price) / avg_price * 100):+.1f}%\n"
                         
-                        current_price = tech['current'] if tech else current
-                        daily_vol = tech['daily_volatility'] if tech else 0.0
-                        eps_val = fund.get('eps', 0.0)
-                        bps_val = fund.get('bps', 0.0)
-                        roe_history = fund.get('roe_history', [])
-                        eps_history = fund.get('eps_history', [])
-                        
-                        try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
-                        except: float_ind_per = 0.0
-
-                        eps_growth = 0.0
-                        if len(eps_history) >= 2 and eps_history[0] != 0:
-                            eps_growth = (eps_history[-1] - eps_history[0]) / abs(eps_history[0])
-                            eps_growth = min(max(eps_growth, -0.5), 1.0)
-
-                        bps_discount = 1.0
-                        if len(eps_history) >= 2 and eps_history[-1] < 0 and eps_history[0] < 0 and eps_history[-1] < eps_history[0]:
-                            bps_discount = 0.8
-                        
-                        # --- [손절가 산출 (시간 제곱근 법칙)] ---
-                        calc_sl_s = current_price * (1 - k_factor * daily_vol * np.sqrt(20)) if daily_vol > 0 else 0.0
-                        calc_sl_m = current_price * (1 - k_factor * daily_vol * np.sqrt(60)) if daily_vol > 0 else 0.0
-                        calc_sl_l = current_price * (1 - k_factor * daily_vol * np.sqrt(250)) if daily_vol > 0 else 0.0
-
-                        # --- [목표가 산출 (타임프레임 재정의 - 탭 4와 100% 동기화)] ---
-                        calc_tp_s = current_price * (1 + k_factor * daily_vol * np.sqrt(20)) if daily_vol > 0 else current_price * 1.05
-                        conservative_bps = (bps_val * bps_discount) if bps_val > 0 else current_price * 0.8
-
-                        if eps_val <= 0:
-                            calc_tp_m = current_price * (1 + k_factor * daily_vol * np.sqrt(60)) if daily_vol > 0 else current_price * 1.10
-                            calc_tp_l = current_price * (1 + k_factor * daily_vol * np.sqrt(250)) if daily_vol > 0 else current_price * 1.15
-
-                            fund_target_log = (
-                                f"   - [단기 목표가] 20일 상방 변동성 밴드: {calc_tp_s:,.0f}원\n"
-                                f"   - [중기 목표가] (적자기업 기술적 대체) 60일 상방 밴드: {calc_tp_m:,.0f}원\n"
-                                f"   - [장기 목표가] (적자기업 기술적 대체) 250일 상방 밴드: {calc_tp_l:,.0f}원\n"
-                                f"   ※ 참고: BPS 청산가치(할인율 {int((1-bps_discount)*100)}%): {conservative_bps:,.0f}원\n"
-                            )
-                        else:
-                            adjusted_ind_per = float_ind_per * (1 + eps_growth) if float_ind_per > 0 else 0.0
-                            calc_tp_m = eps_val * adjusted_ind_per if adjusted_ind_per > 0 else eps_val * 10
-                            
-                            required_return = 0.08
-                            expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
-                            calc_tp_l = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
-                            
-                            fund_target_log = (
-                                f"   - [단기 목표가] 20일 상방 변동성 밴드: {calc_tp_s:,.0f}원\n"
-                                f"   - [중기 목표가] 성장률 반영 업종PER 기준: {calc_tp_m:,.0f}원\n"
-                                f"   - [장기 목표가] RIM 초과이익 기준: {calc_tp_l:,.0f}원\n"
-                                f"   ※ 참고: BPS 청산가치(할인율 {int((1-bps_discount)*100)}%): {conservative_bps:,.0f}원\n"
-                            )
-
-                        calc_result_log = (
-                            f"▶ 리스크 분석 팩트: 일간 변동성 {daily_vol*100:.2f}% 기준 (k={k_factor:.1f})\n"
-                            f"   - 단기 손절가: {calc_sl_s:,.0f}원 | 중기 손절가: {calc_sl_m:,.0f}원 | 장기 손절가: {calc_sl_l:,.0f}원\n"
-                            f"▶ 파이썬 선행연산 목표가 밴드 (아래 3가지 값을 각각 단/중/장기 목표가로 채택할 것):\n{fund_target_log}"
-                        )
-
-                        data_str = f"현재가: {current_price:,.0f}\n"
-                        if is_owned and avg_price > 0: data_str += f"[내 계좌 정보] 평단가: {avg_price:,.0f} | 현재 수익률: {((current_price - avg_price) / avg_price * 100):+.1f}%\n"
-                        if tech: data_str += f"[차트/리스크] 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(일간) {daily_vol*100:.2f}%\n"
-                        if fund: data_str += f"[재무 비율] PER {fund['per']} (업종PER {fund['industry_per']}) | PBR {fund['pbr']} | EPS {eps_val:,}원 | BPS {bps_val:,}원\n"
-                        data_str += f"{calc_result_log}\n[요약]\n{lite_summary}"
-                        
-                        prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_str}\n\n"
+                        prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_str_base}\n{extra_ctx}\n\n"
                                   f"당신은 리스크 관리에 철저한 애널리스트입니다.\n"
-                                  f"1. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 이 종목을 지금 매수/보유/매도해야 하는가?'**에 대한 핵심 논리를 최상단에 선언하십시오.\n"
-                                  f"2. **절대 가격이나 수식을 직접 계산하여 사칙연산 오류를 내지 마십시오.** 파이썬이 선행 연산하여 제공한 단기/중기/장기 목표가 가격을 그대로 채택하여 진단에 활용하십시오.\n"
-                                  f"3. 낙관적 편향 제거를 위해 반드시 <BULL_CASE>와 <BEAR_CASE>를 분리하여 자가 검열하십시오.\n"
-                                  f"4. 내 계좌 정보가 있다면 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
+                                  f"1. 기계적인 장단점 나열에 앞서, **'왜 수많은 주식 중 이 종목을 지금 매수/보유/매도해야 하는가?'**에 대한 핵심 논리를 선언하십시오.\n"
+                                  f"2. 파이썬이 선행 연산하여 제공한 [최종 채택 목표가] 가격을 그대로 채택하여 진단하십시오.\n"
+                                  f"3. **[매우 중요]** 데이터 내 [퀀트 엔진 내부 검증 로그]에 '역전 보정됨' 플래그가 있다면 장기 가치 수렴 한계 리스크를 <BEAR_CASE>에 반드시 원본 수치와 함께 경고하십시오.\n"
+                                  f"4. 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 제시하십시오.\n\n"
                                   f"=== 작성 항목 ===\n"
                                   f"**🎯 핵심 아이디어 (Why Buy/Hold/Sell?)**\n"
-                                  f"- (현재 시점에서 이 종목을 매수/보유/매도해야 하는 가장 강력하고 결정적인 한 가지 이유)\n"
                                   f"**🟢 강세 논리 (Bull Case)**\n"
                                   f"**🔴 약세/위험 논리 (Bear Case)**\n"
                                   f"**⚖️ 최종 판단 및 리스크 평가**\n"
-                                  f"- 목표가 도달 논증 (구체적 수치 인용 필수): 파이썬이 제공한 단기/중기/장기 목표가 가격을 명시하십시오. 그리고 **반드시 본문에 제공된 팩트 수치(EPS, BPS, 평단가, 수익률, 20일 변동성, 이평선 등)를 직접 인용하여** 왜 이 목표가가 타당한지 정량적/기술적으로 증명하십시오. 두루뭉술한 표현을 배제하고 철저히 숫자로 방어하십시오.\n"
+                                  f"- 목표가 논증 (수치 인용 필수)\n"
                                   f"※ 마지막 줄은 아래 파싱 형식으로 출력\n"
                                   f"TARGET_PRICE: 단기목표가|중기목표가|장기목표가|매수추천가|단기손절가|중기손절가|장기손절가")
                     
                     report = call_gemini_with_fallback(prompt)
-                    
                     tp_match = re.search(r'TARGET_PRICE:\s*([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|([^|\n]+)\|(.*)', report)
+                    
                     n_tp_s = parse_won(tp_match.group(1)) if tp_match else 0.0
                     n_tp_m = parse_won(tp_match.group(2)) if tp_match else 0.0
                     n_tp_l = parse_won(tp_match.group(3)) if tp_match else 0.0
@@ -1098,7 +1027,6 @@ with tab6:
             s_saved_p, s_tp_s, s_tp_m, s_sl_s, s_sl_m, s_date = row[7], row[8], row[9], row[12], row[13], row[4]
             c_code = re.sub(r'[^\d]', '', row[3] or "")
             c_price = price_map_scrap.get(c_code, {}).get("current", 0.0)
-            
             max_high, min_low = get_historical_high_low(c_code, s_date)
             
             if s_saved_p > 0 and c_price > 0:
@@ -1138,10 +1066,8 @@ with tab6:
         for row in scraps:
             s_id, title, s_name, ticker, s_date, analysis, m_used, saved_p, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l = row
             code = re.sub(r'[^\d]', '', ticker or "")
-            
             price_info = price_map_scrap.get(code, {})
             current_p = price_info.get("current", 0.0)
-            
             max_high, min_low = get_historical_high_low(code, s_date)
             
             col_sel_s, col_exp_s = st.columns([0.5, 9.5])
