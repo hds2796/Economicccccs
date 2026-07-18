@@ -23,6 +23,9 @@ from google import genai
 MODEL_NAME = "gemini-3.5-flash"
 LITE_MODEL_NAME = "gemini-3.1-flash-lite"
 
+# DB 백업/복구(커넥션 close/reopen) 시 다른 세션의 접근을 막기 위한 락
+db_backup_lock = threading.Lock()
+
 st.set_page_config(page_title="Project2_Stock", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 
 # =======================================================
@@ -71,7 +74,7 @@ DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 @st.cache_resource
 def init_db():
     try:
-        connection = sqlite3.connect('market_analysis.db', check_same_thread=False)
+        connection = sqlite3.connect('market_analysis.db', check_same_thread=False, timeout=30)
         cursor = connection.cursor()
         cursor.execute('''CREATE TABLE IF NOT EXISTS scrapbook (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, link TEXT, summary TEXT, analysis TEXT, scrap_date TEXT)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, stock_name TEXT)''')
@@ -148,38 +151,40 @@ def get_drive_service_for_file():
     return build('drive', 'v3', credentials=creds)
 
 def backup_db_to_drive():
-    try:
-        conn.commit()
-        drive_service = get_drive_service_for_file()
-        folder_id = st.secrets.get("GOOGLE_BACKUP_FOLDER_ID", "").strip()
-        if not folder_id: return False
-        query = f"'{folder_id}' in parents and name = 'market_analysis.db' and trashed = false"
-        results = drive_service.files().list(q=query, fields="files(id)").execute()
-        files = results.get('files', [])
-        if files:
-            media = MediaFileUpload('market_analysis.db', mimetype='application/octet-stream', resumable=True)
-            drive_service.files().update(fileId=files[0]['id'], media_body=media).execute()
-            return True
-        return False
-    except: return False
+    with db_backup_lock:
+        try:
+            conn.commit()
+            drive_service = get_drive_service_for_file()
+            folder_id = st.secrets.get("GOOGLE_BACKUP_FOLDER_ID", "").strip()
+            if not folder_id: return False
+            query = f"'{folder_id}' in parents and name = 'market_analysis.db' and trashed = false"
+            results = drive_service.files().list(q=query, fields="files(id)").execute()
+            files = results.get('files', [])
+            if files:
+                media = MediaFileUpload('market_analysis.db', mimetype='application/octet-stream', resumable=True)
+                drive_service.files().update(fileId=files[0]['id'], media_body=media).execute()
+                return True
+            return False
+        except: return False
 
 def restore_db_from_drive():
-    try:
-        drive_service = get_drive_service_for_file()
-        folder_id = st.secrets.get("GOOGLE_BACKUP_FOLDER_ID", "").strip()
-        query = f"'{folder_id}' in parents and name = 'market_analysis.db' and trashed = false"
-        results = drive_service.files().list(q=query, fields="files(id)").execute()
-        files = results.get('files', [])
-        if not files: return False
-        request = drive_service.files().get_media(fileId=files[0]['id'])
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done: status, done = downloader.next_chunk()
-        conn.close() 
-        with open('market_analysis.db', 'wb') as f: f.write(fh.getvalue())
-        return True
-    except: return False
+    with db_backup_lock:
+        try:
+            drive_service = get_drive_service_for_file()
+            folder_id = st.secrets.get("GOOGLE_BACKUP_FOLDER_ID", "").strip()
+            query = f"'{folder_id}' in parents and name = 'market_analysis.db' and trashed = false"
+            results = drive_service.files().list(q=query, fields="files(id)").execute()
+            files = results.get('files', [])
+            if not files: return False
+            request = drive_service.files().get_media(fileId=files[0]['id'])
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done: status, done = downloader.next_chunk()
+            conn.close() 
+            with open('market_analysis.db', 'wb') as f: f.write(fh.getvalue())
+            return True
+        except: return False
 
 # =======================================================
 # 사이드바 제어 (K값 저장 및 백업/복구 통합)
@@ -671,33 +676,47 @@ def process_single_ticker_for_tab4(ticker, investment_horizon, user_k):
     eps_val = fund.get('eps', 0.0)
     bps_val = fund.get('bps', 0.0)
     roe_history = fund.get('roe_history', [])
+    eps_history = fund.get('eps_history', [])
     
     try: float_per = float(fund['per'].replace(',', '')) if fund['per'] != '-' else 0.0
     except: float_per = 0.0
     try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
     except: float_ind_per = 0.0
+
+    # [PEG] 최근 EPS 추세 기반 성장률 (-50%~+100% 범위로 클램핑하여 극단값 방어)
+    eps_growth = 0.0
+    if len(eps_history) >= 2 and eps_history[0] != 0:
+        eps_growth = (eps_history[-1] - eps_history[0]) / abs(eps_history[0])
+        eps_growth = min(max(eps_growth, -0.5), 1.0)
+
+    # [PBR 하한선 방어] 적자가 지속되며 확대되는 추세면 BPS 청산가치에 할인 적용
+    bps_discount = 1.0
+    if len(eps_history) >= 2 and eps_history[-1] < 0 and eps_history[0] < 0 and eps_history[-1] < eps_history[0]:
+        bps_discount = 0.8
     
     sl_s = current_price * (1 - user_k * daily_vol * np.sqrt(20)) if daily_vol > 0 else 0.0
     sl_m = current_price * (1 - user_k * daily_vol * np.sqrt(60)) if daily_vol > 0 else 0.0
     sl_l = current_price * (1 - user_k * daily_vol * np.sqrt(250)) if daily_vol > 0 else 0.0
 
     if eps_val <= 0:
+        conservative_tp = (bps_val * bps_discount) if bps_val > 0 else current_price * 0.8
         fund_target_log = (
-            f"   - [보수적 시나리오] BPS 자산가치 기준: {bps_val:,.0f}원\n" if bps_val > 0 else f"   - [보수적 시나리오] BPS 자산가치 기준: {current_price * 0.8:,.0f}원\n"
+            f"   - [보수적 시나리오] BPS 자산가치 기준(할인율 {int((1-bps_discount)*100)}%): {conservative_tp:,.0f}원\n"
             "   - [중립적 시나리오] 적자 기업으로 이익 기반 퀀트 밴드 산출 불가 (차트/모멘텀 기준 기술적 밴드로 대체 요망)\n"
             "   - [공격적 시나리오] 적자 기업으로 이익 기반 퀀트 밴드 산출 불가 (차트/모멘텀 기준 기술적 밴드로 대체 요망)\n"
         )
     else:
-        conservative_tp = bps_val if bps_val > 0 else current_price * 0.9
-        base_tp = eps_val * float_ind_per if float_ind_per > 0 else eps_val * 10
+        conservative_tp = (bps_val * bps_discount) if bps_val > 0 else current_price * 0.9
+        adjusted_ind_per = float_ind_per * (1 + eps_growth) if float_ind_per > 0 else 0.0
+        base_tp = eps_val * adjusted_ind_per if adjusted_ind_per > 0 else eps_val * 10
         required_return = 0.08
         expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
         rim_tp = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
         aggressive_tp = max(base_tp, rim_tp)
         
         fund_target_log = (
-            f"   - [보수적 시나리오] BPS 자산가치 기준: {conservative_tp:,.0f}원\n"
-            f"   - [중립적 시나리오] 업종평균 PER 기준: {base_tp:,.0f}원\n"
+            f"   - [보수적 시나리오] BPS 자산가치 기준(할인율 {int((1-bps_discount)*100)}%): {conservative_tp:,.0f}원\n"
+            f"   - [중립적 시나리오] 성장률 반영 업종PER 기준(EPS성장률 {eps_growth*100:+.1f}%): {base_tp:,.0f}원\n"
             f"   - [공격적 시나리오] RIM 초과이익 기준: {aggressive_tp:,.0f}원\n"
         )
 
@@ -732,7 +751,7 @@ with tab4:
             
             with st.spinner("[2단계] 10개 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
                 tech_data_str = ""
-                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                     futures = [executor.submit(process_single_ticker_for_tab4, t, investment_horizon, k_factor) for t in selected_tickers]
                     for future in concurrent.futures.as_completed(futures):
                         tech_data_str += future.result()
@@ -869,37 +888,50 @@ with tab5:
                         eps_val = fund.get('eps', 0.0)
                         bps_val = fund.get('bps', 0.0)
                         roe_history = fund.get('roe_history', [])
+                        eps_history = fund.get('eps_history', [])
                         
                         try: float_per = float(fund['per'].replace(',', '')) if fund['per'] != '-' else 0.0
                         except: float_per = 0.0
                         try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
                         except: float_ind_per = 0.0
+
+                        # [PEG] 최근 EPS 추세 기반 성장률 (-50%~+100% 범위로 클램핑하여 극단값 방어)
+                        eps_growth = 0.0
+                        if len(eps_history) >= 2 and eps_history[0] != 0:
+                            eps_growth = (eps_history[-1] - eps_history[0]) / abs(eps_history[0])
+                            eps_growth = min(max(eps_growth, -0.5), 1.0)
+
+                        # [PBR 하한선 방어] 적자가 지속되며 확대되는 추세면 BPS 청산가치에 할인 적용
+                        bps_discount = 1.0
+                        if len(eps_history) >= 2 and eps_history[-1] < 0 and eps_history[0] < 0 and eps_history[-1] < eps_history[0]:
+                            bps_discount = 0.8
                         
                         calc_sl_s = current_price * (1 - k_factor * daily_vol * np.sqrt(20)) if daily_vol > 0 else 0.0
                         calc_sl_m = current_price * (1 - k_factor * daily_vol * np.sqrt(60)) if daily_vol > 0 else 0.0
                         calc_sl_l = current_price * (1 - k_factor * daily_vol * np.sqrt(250)) if daily_vol > 0 else 0.0
 
                         if eps_val <= 0:
-                            conservative_tp = bps_val if bps_val > 0 else current_price * 0.9
+                            conservative_tp = (bps_val * bps_discount) if bps_val > 0 else current_price * 0.9
                             neutral_tp = current_price * (1 + k_factor * daily_vol * np.sqrt(60)) if daily_vol > 0 else current_price * 1.2
                             aggressive_tp = current_price * (1 + k_factor * daily_vol * np.sqrt(250)) if daily_vol > 0 else current_price * 1.5
 
                             fund_target_log = (
-                                f"   - [보수적 시나리오] BPS 청산가치 방어선: {conservative_tp:,.0f}원\n"
+                                f"   - [보수적 시나리오] BPS 청산가치 방어선(할인율 {int((1-bps_discount)*100)}%): {conservative_tp:,.0f}원\n"
                                 f"   - [중립적 시나리오] 60일 기술적 상방 변동성 밴드: {neutral_tp:,.0f}원\n"
                                 f"   - [공격적 시나리오] 250일 장기 추세 돌파 밴드: {aggressive_tp:,.0f}원\n"
                             )
                         else:
-                            conservative_tp = bps_val if bps_val > 0 else current_price * 0.9
-                            base_tp = eps_val * float_ind_per if float_ind_per > 0 else eps_val * 10
+                            conservative_tp = (bps_val * bps_discount) if bps_val > 0 else current_price * 0.9
+                            adjusted_ind_per = float_ind_per * (1 + eps_growth) if float_ind_per > 0 else 0.0
+                            base_tp = eps_val * adjusted_ind_per if adjusted_ind_per > 0 else eps_val * 10
                             required_return = 0.08
                             expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
                             rim_tp = bps_val + (bps_val * (expected_roe - required_return) / required_return) if bps_val > 0 else current_price * 1.1
                             aggressive_tp = max(base_tp, rim_tp)
                             
                             fund_target_log = (
-                                f"   - [보수적 시나리오] BPS 자산가치 기준: {conservative_tp:,.0f}원\n"
-                                f"   - [중립적 시나리오] 업종평균 PER 기준: {base_tp:,.0f}원\n"
+                                f"   - [보수적 시나리오] BPS 자산가치 기준(할인율 {int((1-bps_discount)*100)}%): {conservative_tp:,.0f}원\n"
+                                f"   - [중립적 시나리오] 성장률 반영 업종PER 기준(EPS성장률 {eps_growth*100:+.1f}%): {base_tp:,.0f}원\n"
                                 f"   - [공격적 시나리오] RIM 초과이익 기준: {aggressive_tp:,.0f}원\n"
                             )
 
@@ -1013,6 +1045,15 @@ with tab6:
             m2.metric("단기 목표 도달 / 손절", f"{(hit_count_s/total_evals)*100:.1f}% / {(stop_out_count_s/total_evals)*100:.1f}%")
             m3.metric("중기 목표 도달 / 손절", f"{(hit_count_m/total_evals)*100:.1f}% / {(stop_out_count_m/total_evals)*100:.1f}%")
             m4.metric("스크랩 포트폴리오 수익률", f"{avg_current_yield:+.2f}%")
+
+            # [k값 튜닝 힌트] 스크랩북 성과 데이터 기반 참고용 제안 (자동 반영 아님)
+            if total_evals >= 5:
+                stop_rate_s = stop_out_count_s / total_evals
+                hit_rate_s = hit_count_s / total_evals
+                if stop_rate_s >= 0.35:
+                    st.warning(f"⚠️ 단기 손절 이탈률이 {stop_rate_s*100:.0f}%로 높은 편입니다. 현재 k={k_factor:.1f} 값이 다소 타이트할 수 있으니, 사이드바에서 k값을 조금 높여보는 것을 고려해보세요.")
+                elif hit_rate_s <= 0.2 and stop_rate_s <= 0.1:
+                    st.info(f"💡 단기 목표 도달률이 {hit_rate_s*100:.0f}%로 낮은 반면 손절 이탈은 적습니다. 목표가 밴드가 다소 보수적으로 산출되고 있을 수 있습니다.")
             
         st.divider()
 
