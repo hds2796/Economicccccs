@@ -836,6 +836,17 @@ with col_refresh:
 with col_title: 
     st.caption(f"🧠 AI 백엔드 동기화 시점: {g_data.get('updated_at', '대기 중')} (뉴스는 수동 갱신, 지수는 자동 실시간)")
 
+st.divider()
+
+col_title, col_refresh = st.columns([5, 1.2])
+with col_refresh:
+    if st.button("뉴스/리포트 갱신", use_container_width=True):
+        with st.spinner("AI 서버와 동기화 중..."):
+            if new_data := fetch_realtime_data_direct(): merge_realtime_data(new_data)
+            st.rerun()
+with col_title: 
+    st.caption(f"🧠 AI 백엔드 동기화 시점: {g_data.get('updated_at', '대기 중')} (뉴스는 수동 갱신, 지수는 자동 실시간)")
+
 # 기존 파이썬 람다 동기화 컨트롤러
 
 col_title, col_refresh = st.columns([5, 1.2])
