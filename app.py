@@ -752,7 +752,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | Beta {beta:.2f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(일간) {daily_vol*100:.2f}%\n"
     
     fund_str = f"- 재무 비율: PER {fund.get('per', '-')} (업종PER {fund.get('industry_per', '-')}) | PBR {fund.get('pbr', '-')} | EPS {eps_str} | BPS {bps_str}\n"
-    fund_str += f"- 분기 실적 추세: 매출액 {fund.get('sales_history', [])} | 영업이익 {fund.get('op_history', [])} | EPS {fund.get('eps_history', [])} | ROE {fund.get('roe_history', [])}\n"
+    fund_str += f"- 분기 실적 추세(단위: 억원, %): 매출액 {fund.get('sales_history', [])} | 영업이익 {fund.get('op_history', [])} | EPS {fund.get('eps_history', [])} | ROE {fund.get('roe_history', [])}\n"
     fund_str += f"- {fund.get('supply_demand', '수급 정보 없음')}\n"
     
     tech_data_str += fund_str
@@ -956,7 +956,7 @@ with tab2:
                 f"=== ⚠️ 작성 지침 및 데이터 스펙 ===\n"
                 f"1. 제공된 [매크로 요약 팩트]를 바탕으로 오늘 한국 증시의 자산 배분 방안과 주도 섹터 흐름을 매우 상세하고 풍부하게 서술하십시오.\n"
                 f"2. 제공된 [퀀트 엔진 로그]를 분석하여 가장 매력적인 핫픽 2종목을 엄선하십시오.\n"
-                f"3. 핫픽 종목 작성 시 로그에 찍힌 **[현재가], [증권사 목표가 및 트렌드], [우리의 시스템 퀀트 중기 목표가(tp_m)]**를 반드시 모두 숫자로 명시하십시오.\n"
+                f"3. [숫자 일치 강제 - 매우 중요] 핫픽 종목 작성 시 로그에 찍힌 **[현재가], [증권사 목표가 및 트렌드], [단기/중기/장기 목표가 및 손절가] 수치를 단 1원도 틀리지 말고 100% 똑같이 복사**하여 기재하십시오. 임의 창조나 반올림은 절대 금지합니다.\n"
                 f"4. 두 목표가 간의 괴리율(+-5% 기준)을 바탕으로 수렴/과대평가 여부를 객관적으로 평가하십시오.\n"
                 f"5. 강세/약세 논리 서술 시 차트 데이터(이평선)와 밸류에이션(EPS, PER) 숫자를 철저히 인용하십시오.\n"
                 f"6. 브리핑 결과를 바탕으로 오늘의 종합 시장 심리 수치(0~100)를 산출하여 반드시 마지막에 [SENTIMENT_SCORE]: 50 형식으로 출력할 것.\n\n"
@@ -967,11 +967,12 @@ with tab2:
                 f"<ANALYSIS_종목명>\n"
                 f"### 📌 [종목명] ([티커])\n"
                 f"- **주가 현황:** 현재가 [숫자]원\n"
-                f"- **목표가 교차검증:** 애널리스트 목표가 **[숫자]원 (모멘텀: [트렌드])** vs 퀀트 시스템 적정가 **[숫자]원**\n"
+                f"- **목표가 교차검증:** 애널리스트 목표가 **[숫자]원 (모멘텀: [트렌드])** vs 퀀트 시스템 중기 적정가 **[숫자]원**\n"
                 f"- **거시 국면 연결고리:** (이 종목이 왜 지금 매크로 상태에서 촉매를 받는지 서술)\n"
                 f"- **펀더멘털 및 퀀트 강세 논리:** (파이썬 로그의 PER, BPS, 기술적 이격도 수치 인용)\n"
                 f"</ANALYSIS_종목명>\n\n"
-                f"※ 마지막 줄은 반드시 [SELECTED_NAMES]: 종목명1, 종목명2 형식으로 정확하게 종료하십시오.\n"
+                f"※ 주의: 마지막 줄은 반드시 선정된 2개 종목의 '6자리 숫자 티커만' 콤마로 구분하여 아래 형식으로 출력하십시오. 종목명이나 괄호는 절대 쓰지 마십시오.\n"
+                f"[SELECTED_TICKERS]: 000000, 111111\n"
                 f"[SENTIMENT_SCORE]: (점수)"
             )
             full_report = "".join(call_gemini_stream_with_fallback(prompt))
@@ -984,7 +985,7 @@ with tab2:
 
     if st.session_state.get('morning_report'):
         raw_report = st.session_state.morning_report
-        display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw_report.split("[SELECTED_NAMES]")[0].strip())
+        display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw_report.split("[SELECTED_TICKERS]")[0].strip())
         with st.container(border=True):
             st.markdown(display_text)
 
@@ -1119,18 +1120,17 @@ with tab4:
 
                 with st.spinner(f"[4단계] 최종 선별된 {len(valid_results)}개 중 시니어 애널리스트 방식 Top 3 보고서 작성 중..."):
                     t4 = time.time()
-                    
-                    # [패치 완료] 전수 검증 의무화 및 스크리닝 표 작성 지시 추가
                     step3_prompt = (
                         f"당신은 월스트리트 헤지펀드의 시니어 퀀트 애널리스트입니다.\n"
                         f"[시장 전체 핵심 모멘텀 분석]\n{momentum_context}\n\n"
                         f"[후보군 팩트 데이터(실적 추세, 최근 20일 수급 동향, 밸류에이션, 차트)]\n{tech_data_str_all}\n\n"
                         f"=== ⚠️ 시니어 애널리스트 분석 지침 ===\n"
-                        f"1. [전수 평가 및 선별] 전달받은 전체 후보군(최대 10개) 데이터를 모두 비교 평가하여 각각의 '종합 매력도 점수'를 매기십시오. 그 후 가장 점수가 높은 **최상위 Top 3 종목만 엄선**하여 심층 리포트를 작성하십시오.\n"
-                        f"2. [스토리텔링] 파편화된 데이터(뉴스, 수급, 밸류에이션, 실적 추이)를 단순 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
-                        f"3. [추세 변화] 실적(매출/영업이익)의 분기별 증감 추세와 외국인/기관의 '최근 5일 vs 20일 수급 변화'를 바탕으로 모멘텀을 분석하십시오.\n"
-                        f"4. [자기 검증] 긍정적 편향을 깨기 위해, 스스로 도출한 결론이 틀릴 가능성(반대 논리 및 Value Trap 리스크) 3가지를 반드시 서술하십시오.\n"
-                        f"5. [액션 플랜] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 확인해야 할 이벤트를 반드시 요약하십시오.\n\n"
+                        f"1. [전수 평가 및 선별] 전달받은 전체 후보군 데이터를 모두 비교 평가하여 각각의 '종합 매력도 점수'를 매기십시오. 그 후 가장 점수가 높은 **최상위 Top 3 종목만 엄선**하여 심층 리포트를 작성하십시오.\n"
+                        f"2. [숫자 일치 강제 - 매우 중요] 리포트에 기재하는 모든 가격(현재가, 목표가, 손절가 등)과 실적 수치는 **'파이썬 퀀트 엔진 연산 로그'에 찍힌 숫자를 절대 반올림하거나 가공하지 말고 1원 단위까지 100% 똑같이 복사해서 기재**하십시오.\n"
+                        f"3. [스토리텔링] 파편화된 데이터(뉴스, 수급, 밸류에이션, 실적 추이)를 단순 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
+                        f"4. [추세 변화] 실적(매출/영업이익)의 분기별 증감 추세와 외국인/기관의 '최근 5일 vs 20일 수급 변화'를 바탕으로 모멘텀을 분석하십시오.\n"
+                        f"5. [자기 검증] 긍정적 편향을 깨기 위해, 스스로 도출한 결론이 틀릴 가능성(반대 논리 및 Value Trap 리스크) 3가지를 반드시 서술하십시오.\n"
+                        f"6. [액션 플랜] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 확인해야 할 이벤트를 반드시 요약하십시오.\n\n"
                         f"=== 리포트 작성 포맷 ===\n"
                         f"### 🏆 1차 후보군 스크리닝 요약 (전체 평가)\n"
                         f"(검토한 전체 후보군의 종목명, 매력도 점수, 핵심 이유 1줄을 간단한 표나 리스트로 먼저 제시할 것)\n\n"
@@ -1152,7 +1152,7 @@ with tab4:
                         f"- **의사결정 핵심 근거 Top 3:** (1, 2, 3)\n"
                         f"- **향후 반드시 확인해야 할 트리거 이벤트:** (예: 다음 분기 영업이익률 회복 여부 등)\n"
                         f"</ANALYSIS_티커숫자>\n\n"
-                        f"※ 마지막 줄에 선정된 3개 종목의 티커를 콤마로 구분하여 아래 형식으로 반드시 출력하십시오.\n"
+                        f"※ 주의: 마지막 줄은 반드시 아래 형식으로 선정된 3개 종목의 '6자리 숫자 티커만' 콤마로 구분하여 출력하십시오. 종목명이나 괄호는 절대 쓰지 마십시오.\n"
                         f"[SELECTED_TICKERS]: 000000, 111111, 222222"
                     )
                     st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step3_prompt))
@@ -1169,9 +1169,12 @@ with tab4:
             st.write(display_text)
 
             if "[SELECTED_TICKERS]" in raw:
-                match = re.search(r'\[SELECTED_TICKERS\]\s*:\s*([\d\s,]+)', raw)
+                # [버그 수정 완료] AI가 종목명이나 한글을 섞어 써도 6자리 숫자(티커)만 정확하게 모두 파싱하는 안전장치
+                match = re.search(r'\[SELECTED_TICKERS\]\s*:\s*(.*)', raw)
                 if match:
-                    selected_ticks = [t.strip() for t in match.group(1).split(',') if len(t.strip()) == 6]
+                    selected_ticks = re.findall(r'\b\d{6}\b', match.group(1))
+                    selected_ticks = list(dict.fromkeys(selected_ticks))[:3]
+                    
                     price_map = fetch_current_prices(selected_ticks)
                     cols_rec = st.columns(3)
 
@@ -1271,11 +1274,12 @@ with tab5:
                         prompt = (f"[{name} 진단]\n[팩트 데이터]\n{data_dict['tech_data_str']}\n{extra_ctx}\n\n"
                                   f"당신은 리스크와 기회를 종합적으로 분석하는 전문 퀀트 애널리스트입니다.\n"
                                   f"=== ⚠️ AI 분석 지침 ===\n"
-                                  f"1. [스토리텔링] 파편화된 데이터를 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
-                                  f"2. [추세 변화] 실적의 분기별 증감 추세와 외국인/기관의 '최근 5일 vs 20일 수급 변화'를 바탕으로 분석하십시오.\n"
-                                  f"3. [계좌 진단] 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 판단하십시오.\n"
-                                  f"4. [자기 검증] 스스로 도출한 결론이 틀릴 가능성(반대 논리 및 Value Trap 리스크) 3가지를 반드시 서술하십시오.\n"
-                                  f"5. [액션 플랜] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 확인해야 할 이벤트를 요약하십시오.\n\n"
+                                  f"1. [숫자 일치 강제] 리포트에 기재하는 모든 가격(현재가, 목표가, 손절가 등) 수치는 **'팩트 데이터'에 찍힌 숫자를 절대 반올림하거나 가공하지 말고 1원 단위까지 100% 똑같이 복사해서 기재**하십시오.\n"
+                                  f"2. [스토리텔링] 파편화된 데이터를 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
+                                  f"3. [추세 변화] 실적의 분기별 증감 추세와 외국인/기관의 '최근 5일 vs 20일 수급 변화'를 바탕으로 분석하십시오.\n"
+                                  f"4. [계좌 진단] 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 판단하십시오.\n"
+                                  f"5. [자기 검증] 스스로 도출한 결론이 틀릴 가능성(반대 논리 및 Value Trap 리스크) 3가지를 반드시 서술하십시오.\n"
+                                  f"6. [액션 플랜] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 확인해야 할 이벤트를 요약하십시오.\n\n"
                                   f"=== 리포트 작성 포맷 ===\n"
                                   f"**📖 핵심 투자 스토리 (Investment Story)**\n"
                                   f"(수급, 실적 추세, 뉴스, 밸류에이션을 하나로 엮은 심층 분석)\n\n"
