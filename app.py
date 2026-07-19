@@ -344,7 +344,7 @@ def get_dart_filings(stock_code):
         local_conn.close()
         
         if not row: return "DART 매핑 데이터 없음"
-        bgn_de = (datetime.now() - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
+        bgn_de = (datetime.now() - pd.Timedelta(days=90)).strftime("%Y%m%d")
         url = f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={row[0]}&bgn_de={bgn_de}&page_count=5"
         session = get_session()
         res = session.get(url, timeout=5).json()
@@ -725,29 +725,35 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         data_incomplete = False
 
     # =======================================================
-    # [3x3 결합 트렌드 매트릭스 & Tier 필터 - 해설이 포함된 명칭으로 변경]
+    # [3x3 결합 트렌드 매트릭스 & Tier 필터 - 동적 실적 계산 연동]
     # =======================================================
     tp_trend = "유지/신규"
-    eps_e_trend = "유지"
     
     if analyst_data:
         matched_report = next((rep for rep in analyst_data.values() if rep.get("ticker") == ticker), None)
         if matched_report:
             tp_trend = matched_report.get("tp_trend", "유지/신규")
-            eps_e_trend = matched_report.get("eps_e_trend", "유지")
+
+    # 기존 강제 "유지" 할당을 제거하고 과거 EPS 히스토리를 기반으로 동적 판정
+    eps_e_trend = "유지"
+    if len(eps_history) >= 2:
+        if eps_history[-1] > eps_history[-2] * 1.05:
+            eps_e_trend = "상향"
+        elif eps_history[-1] < eps_history[-2] * 0.95:
+            eps_e_trend = "하향"
 
     if "상향" in tp_trend:
-        if "상향" in eps_e_trend: cross_signal, tier, penalty = "True Bull (펀더멘털과 가격이 동행하는 건전한 성장)", "Tier 1 (Pass)", 0
-        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Critical Value Trap (실적은 꺾이는데 목표가만 높은 위험한 거품)", "Tier 3 (Fatal)", -20
-        else: cross_signal, tier, penalty = "Momentum Driven (실적 상향 없이 가격만 오르는 수급 주도)", "Tier 1 (Pass)", -5
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "True Bull (목표가 상향 + 실적 상향 ➡️ 펀더멘털과 가격이 동행하는 건전한 성장)", "Tier 1 (Pass)", 0
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Critical Value Trap (목표가 상향 + 실적 하향 ➡️ 실적은 꺾이는데 목표가만 높은 위험한 거품)", "Tier 3 (Fatal)", -20
+        else: cross_signal, tier, penalty = "Momentum Driven (목표가 상향 + 실적 유지 ➡️ 실적 상향 없이 가격만 오르는 수급 주도)", "Tier 1 (Pass)", -5
     elif "하향" in tp_trend:
-        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Turnaround (주가는 빠지지만 실적 체력은 오르는 소외된 우량주)", "Tier 1 (Pass)", 10
-        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Genuine Bear (이익과 가격이 모두 부러진 구조적 침체)", "Tier 3 (Fatal)", 0
-        else: cross_signal, tier, penalty = "Sentiment Driven Drop (실적 하향은 멈췄으나 심리적 과매도로 하락)", "Tier 2 (Warning)", 0
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Turnaround (목표가 하향 + 실적 상향 ➡️ 주가는 빠지지만 실적 체력은 오르는 소외된 우량주)", "Tier 1 (Pass)", 10
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Genuine Bear (목표가 하향 + 실적 하향 ➡️ 이익과 가격이 모두 부러진 구조적 침체)", "Tier 3 (Fatal)", 0
+        else: cross_signal, tier, penalty = "Sentiment Driven Drop (목표가 하향 + 실적 유지 ➡️ 실적 하향은 멈췄으나 심리적 과매도로 하락)", "Tier 2 (Warning)", 0
     else:
-        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Quiet Accumulation (시장은 조용하나 실적 추정치가 개선되는 선취매 구간)", "Tier 1 (Pass)", 5
-        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Value Trap (목표가는 방어 중이나 이익은 몰래 하향 중인 눈치보기 장세)", "Tier 2 (Warning)", -10
-        else: cross_signal, tier, penalty = "Neutral (방향성 없음)", "Tier 1 (Pass)", 0
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Quiet Accumulation (목표가 유지 + 실적 상향 ➡️ 시장은 조용하나 실적 추정치가 개선되는 선취매 구간)", "Tier 1 (Pass)", 5
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Value Trap (목표가 유지 + 실적 하향 ➡️ 목표가는 방어 중이나 이익은 몰래 하향 중인 눈치보기 장세)", "Tier 2 (Warning)", -10
+        else: cross_signal, tier, penalty = "Neutral (목표가 유지 + 실적 유지 ➡️ 뚜렷한 방향성 없음)", "Tier 1 (Pass)", 0
 
     if is_discovery_mode and tier == "Tier 3 (Fatal)":
         return {"ticker": ticker, "name": name, "status": "KILLED", "reason": f"{cross_signal} ({tier} 치명적 리스크 제어 작동)"}
@@ -772,7 +778,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         a_target = float(matched_report.get("target_price", 0))
         if a_target > 0 and tp_m > 0:
             divergence = (tp_m - a_target) / a_target
-            consensus_log = f"   - ⚖️ 컨센서스 교차검증: 증권사 목표가 {a_target:,.0f}원({tp_trend}) vs 퀀트 중기 적정가 {tp_m:,.0f}원 (괴리율: {divergence*100:+.1f}%) ➡️ **[{cross_signal} / {tier}]** 판정 (페널티 계수: {penalty}%)\n"
+            consensus_log = f"   - ⚖️ 컨센서스 교차검증: 증권사 목표가 {a_target:,.0f}원({tp_trend}) vs 퀀트 중기 적정가 {tp_m:,.0f}원 (괴리율: {divergence*100:+.1f}%) ➡️ 판정 (페널티 계수: {penalty}%)\n"
 
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
@@ -786,6 +792,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         f"{struct_warn_line}"
         f"   - 중기 시그널 상태: {flag_m}\n"
         f"   - 장기 시그널 상태: {flag_l}\n"
+        f"   - 🧭 3x3 트렌드 매트릭스 판정: {tier} | 시그널: {cross_signal}\n"
         f"{consensus_log}"
         f"   - 참고 원본 BPS: {bps_disp_val}\n"
     )
@@ -1097,7 +1104,7 @@ with tab3:
                         with st.spinner("상위 30개 핵심 뉴스 요약 중..."):
                             top_30_titles = "\n".join([i['title'] for i in items[:30]])
                             l_sum = call_gemini_lite_summary(f"아래 상위 30개 뉴스를 바탕으로 {sec} 섹터의 핵심 모멘텀을 요약하라:\n{top_30_titles}")
-                            st.write(call_gemini_with_fallback(f"[{sec} 요약]\n{l_sum}\n\n위 요약을 바탕으로 해당 섹터의 주도주 흐름และ 향후 모멘텀을 심층 분석하라."))
+                            st.write(call_gemini_with_fallback(f"[{sec} 요약]\n{l_sum}\n\n위 요약을 바탕으로 해당 섹터의 주도주 흐름 및 향후 모멘텀을 심층 분석하라."))
 
 with tab4:
     st.subheader("종목 발굴 (시니어 애널리스트 퀀트 분석)")
@@ -1232,6 +1239,7 @@ with tab4:
                         f"- **현재가:** 000원\n"
                         f"- **목표가:** [해당 기간 목표가 00원]\n"
                         f"- **손절가:** [해당 기간 손절선 00원]\n"
+                        f"- **💡 3x3 매트릭스 진단:** [Tier 등급 기입] (파이썬 로그를 참고하여 이 등급이 부여된 이유를 '목표가 XX + 실적 XX' 형태로 1줄 설명)\n"
                         f"- **한 줄 요약:** (가장 핵심이 되는 투자 논리 1줄)\n\n"
                         f"---\n"
                         f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
@@ -1253,7 +1261,6 @@ with tab4:
                 for k_item in cached_killed:
                     st.error(f"**[KILLED]** 종목: `{k_item['name']}` ({k_item['ticker']}) ➡️ 사유: `{k_item['reason']}`")
 
-        # 새로고침 시 접힌 상태가 기본이 되도록 expanded=False 설정
         with st.expander("추천 리포트", expanded=False):
             display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw.split("[SELECTED_TICKERS]")[0].strip())
             st.write(display_text)
@@ -1335,7 +1342,7 @@ with tab5:
 
         price_map_watch = fetch_current_prices([p[15] for p in portfolios if p[15]])
         analyst_universe = cached_data.get("analyst_universe", {})
-        my_stock_news_pool = cached_data.get("my_stock_news", {})
+        my_stock_news_pool = cached_data.get("my_stock_news", {}) 
 
         for p in portfolios:
             p_id, name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, model_used, report_time, ticker = p
@@ -1371,7 +1378,6 @@ with tab5:
                             extra_ctx += "\n".join([f"- 제목: {n['title']}\n  내용: {n.get('summary', '')}" for n in target_news[:5]])
                             extra_ctx += "\n"
 
-                        # (이하 기존 프롬프트 및 리포트 작성 로직 유지)
                         if "단기" in eval_horizon:
                             persona_t5 = "단기 스윙 트레이더"
                             t5_strategy = "▶ [단기 전략]: 파이썬 로그에 장기 지표(BPS, PER 등)가 있더라도 철저히 무시하십시오. 오직 최근 5일 수급, 차트 흐름, 뉴스 모멘텀만으로 매수/손절을 판단하십시오."
@@ -1396,6 +1402,7 @@ with tab5:
                             f"- **현재가:** 000원\n"
                             f"- **목표가:** [{eval_horizon} 목표가 00원]\n"
                             f"- **시스템 손절가:** [{eval_horizon} 손절가 00원]\n"
+                            f"- **💡 3x3 매트릭스 진단:** [Tier 등급 기입] (파이썬 로그를 참고하여 이 등급이 부여된 이유를 '목표가 XX + 실적 XX' 형태로 1줄 설명)\n"
                             f"- **한 줄 요약:** (가장 핵심이 되는 판단 근거 1줄)\n\n"
                             f"---\n"
                             f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
@@ -1417,36 +1424,26 @@ with tab5:
                     c.execute("DELETE FROM portfolio WHERE id=?", (p_id,))
                     conn.commit(); st.rerun()
 
-            # --------------------------------=======================----------------
-            # [수정] 컬럼 배치가 모두 끝난 후(안전한 곳)에 뉴스 칸과 리포트 칸을 렌더링합니다.
-            # --------------------------------=======================----------------
-            # (이전 컬럼 배치 및 개별 삭제 버튼 코드 하단에 위치)
-            
             target_news = my_stock_news_pool.get(name, [])
             if target_news:
                 with st.expander(f"📰 {name} 관련 수집 뉴스 ({len(target_news)}건)", expanded=False):
-                    # 종목별(p_id) 고유한 표시 한도 상태 생성
                     limit_key = f"news_limit_t5_{p_id}"
                     if limit_key not in st.session_state:
                         st.session_state[limit_key] = 5
                         
                     current_limit = st.session_state[limit_key]
                     
-                    # 현재 설정된 한도까지만 뉴스 출력
                     for idx, n in enumerate(target_news[:current_limit]):
                         st.markdown(f"**{idx+1}. [{n['title']}]({n['link']})**")
                         if n.get('summary'):
                             st.caption(f"{n['summary']}")
                             
-                    # 남은 뉴스가 있다면 더보기 버튼 렌더링
                     if len(target_news) > current_limit:
                         if st.button("🔽 뉴스 더보기", key=f"btn_more_news_{p_id}", use_container_width=True):
                             st.session_state[limit_key] += 5
                             st.rerun()
             else:
                 st.info(f"ℹ️ {name} 관련 수집된 뉴스가 없습니다. (드라이브 백업 후 람다 스케줄러 실행 대기 필요)")
-
-            # (이후 진단 리포트 출력 코드 이어짐)
 
             if report_text:
                 with st.expander("진단 리포트", expanded=False):
@@ -1463,6 +1460,7 @@ with tab5:
                                   (f"{name} 관심종목 진단", report_text, name, ticker, current, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), model_used, current_user))
                         conn.commit(); st.success("스크랩북 저장 완료")
             st.divider()
+
 with tab6:
     st.subheader("저장된 분석 리포트 및 모델 검증")
     c.execute("""
