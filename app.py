@@ -1352,6 +1352,7 @@ with tab5:
                     if current > 0 and avg_price > 0: st.markdown(f"수익률: {((current - avg_price) / avg_price * 100):+.1f}%")
             with col_price:
                 if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
+            
             with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
                     with st.spinner("파이썬 연산 및 수치 방어 논리 작성 중..."):
@@ -1363,16 +1364,13 @@ with tab5:
                         extra_ctx = f"\n현재가: {current:,.0f}\n"
                         if is_owned and avg_price > 0: extra_ctx += f"[내 계좌 정보] 평단가: {avg_price:,.0f} | 현재 수익률: {((current - avg_price) / avg_price * 100):+.1f}%\n"
 
-                        # =======================================================
-                        # [뉴스 전용 주입] 람다가 수집해둔 해당 관심종목 뉴스를 컨텍스트 재료에 가두어 추가
-                        # =======================================================
-                        my_stock_news_pool = cached_data.get("my_stock_news", {})
                         target_news = my_stock_news_pool.get(name, [])
                         if target_news:
                             extra_ctx += f"\n[{name} 최근 핵심 뉴스 요약 및 모멘텀 소스]\n"
                             extra_ctx += "\n".join([f"- 제목: {n['title']}\n  내용: {n.get('summary', '')}" for n in target_news[:5]])
                             extra_ctx += "\n"
 
+                        # (이하 기존 프롬프트 및 리포트 작성 로직 유지)
                         if "단기" in eval_horizon:
                             persona_t5 = "단기 스윙 트레이더"
                             t5_strategy = "▶ [단기 전략]: 파이썬 로그에 장기 지표(BPS, PER 등)가 있더라도 철저히 무시하십시오. 오직 최근 5일 수급, 차트 흐름, 뉴스 모멘텀만으로 매수/손절을 판단하십시오."
@@ -1412,13 +1410,26 @@ with tab5:
                         c.execute("UPDATE portfolio SET report_text=?, tp_s=?, tp_m=?, tp_l=?, bp=?, sl_s=?, sl_m=?, sl_l=?, model_used=?, report_time=? WHERE id=?", 
                                   (report, n_tp_s, n_tp_m, n_tp_l, current, n_sl_s, n_sl_m, n_sl_l, MODEL_NAME, datetime.now().strftime("%Y-%m-%d %H:%M"), p_id))
                         conn.commit(); st.rerun()
+            
             with col_del:
                 if st.button("개별 삭제", key=f"del_t5_{p_id}", use_container_width=True):
                     c.execute("DELETE FROM portfolio WHERE id=?", (p_id,))
                     conn.commit(); st.rerun()
 
+            # --------------------------------=======================----------------
+            # [수정] 컬럼 배치가 모두 끝난 후(안전한 곳)에 뉴스 칸과 리포트 칸을 렌더링합니다.
+            # --------------------------------=======================----------------
+            target_news = my_stock_news_pool.get(name, [])
+            if target_news:
+                with st.expander(f"📰 {name} 관련 수집 뉴스 ({len(target_news)}건)", expanded=False):
+                    for idx, n in enumerate(target_news[:5]):
+                        st.markdown(f"**{idx+1}. [{n['title']}]({n['link']})**")
+                        if n.get('summary'):
+                            st.caption(f"{n['summary']}")
+            else:
+                st.info(f"ℹ️ {name} 관련 수집된 뉴스가 없습니다. (드라이브 백업 후 람다 스케줄러 실행 대기 필요)")
+
             if report_text:
-                # 새로고침 시 접힌 상태가 기본이 되도록 expanded=False 설정
                 with st.expander("진단 리포트", expanded=False):
                     st.write(report_text)
                     st.divider()
@@ -1433,7 +1444,6 @@ with tab5:
                                   (f"{name} 관심종목 진단", report_text, name, ticker, current, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), model_used, current_user))
                         conn.commit(); st.success("스크랩북 저장 완료")
             st.divider()
-
 with tab6:
     st.subheader("저장된 분석 리포트 및 모델 검증")
     c.execute("""
