@@ -803,8 +803,22 @@ g_data = st.session_state.realtime_cache
 # =======================================================
 # 상단 레이아웃: 트레이딩뷰 실시간 웹소켓 티커
 # =======================================================
-st.markdown("### 📊 글로벌 마켓 실시간 전광판")
+market_data = g_data.get("market_status", {})
+metrics_html = ""
 
+# 파이썬이 네이버에서 수집한 지표를 제목 옆에 나란히 배치하기 위한 HTML 포매팅
+for key in ["코스피", "코스닥", "S&P 500", "원/달러 환율"]:
+    if key in market_data:
+        val = market_data[key].get("current", 0.0)
+        diff = market_data[key].get("diff", 0.0)
+        diff_pct = market_data[key].get("diff_pct", 0.0)
+        if val:
+            color = "red" if diff > 0 else "blue" if diff < 0 else "gray"
+            sign = "+" if diff > 0 else ""
+            metrics_html += f"<span style='font-size:0.55em; margin-left:15px; font-weight:normal; color:#444;'><b>{key}</b> {val:,.2f} <span style='color:{color};'>({sign}{diff_pct:.2f}%)</span></span>"
+
+# 제목과 지표를 한 줄로 병합하여 출력
+st.markdown(f"### 📊 글로벌 마켓 실시간 전광판 {metrics_html}", unsafe_allow_html=True)
 # [완벽 해결 패치] 외부 송출 차단된 KRX/기준금리 빼고, 실시간 글로벌 매크로 지표로 100% 교체
 tv_config = {
     "symbols": [
