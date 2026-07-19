@@ -1420,15 +1420,33 @@ with tab5:
             # --------------------------------=======================----------------
             # [수정] 컬럼 배치가 모두 끝난 후(안전한 곳)에 뉴스 칸과 리포트 칸을 렌더링합니다.
             # --------------------------------=======================----------------
+            # (이전 컬럼 배치 및 개별 삭제 버튼 코드 하단에 위치)
+            
             target_news = my_stock_news_pool.get(name, [])
             if target_news:
                 with st.expander(f"📰 {name} 관련 수집 뉴스 ({len(target_news)}건)", expanded=False):
-                    for idx, n in enumerate(target_news[:5]):
+                    # 종목별(p_id) 고유한 표시 한도 상태 생성
+                    limit_key = f"news_limit_t5_{p_id}"
+                    if limit_key not in st.session_state:
+                        st.session_state[limit_key] = 5
+                        
+                    current_limit = st.session_state[limit_key]
+                    
+                    # 현재 설정된 한도까지만 뉴스 출력
+                    for idx, n in enumerate(target_news[:current_limit]):
                         st.markdown(f"**{idx+1}. [{n['title']}]({n['link']})**")
                         if n.get('summary'):
                             st.caption(f"{n['summary']}")
+                            
+                    # 남은 뉴스가 있다면 더보기 버튼 렌더링
+                    if len(target_news) > current_limit:
+                        if st.button("🔽 뉴스 더보기", key=f"btn_more_news_{p_id}", use_container_width=True):
+                            st.session_state[limit_key] += 5
+                            st.rerun()
             else:
                 st.info(f"ℹ️ {name} 관련 수집된 뉴스가 없습니다. (드라이브 백업 후 람다 스케줄러 실행 대기 필요)")
+
+            # (이후 진단 리포트 출력 코드 이어짐)
 
             if report_text:
                 with st.expander("진단 리포트", expanded=False):
