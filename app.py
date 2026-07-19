@@ -382,11 +382,9 @@ def get_advanced_fundamental_data(code):
         if cop_table:
             data["quarter_trend"] = "최근 실적 및 컨센서스 테이블 파싱 완료"
             try:
-                # <th>에서 연도/분기 헤더 추출 (예: 2026.12(E))
                 thead_tr = cop_table.find("thead").find("tr")
                 headers_text = [th.get_text().strip() for th in thead_tr.find_all("th")] if thead_tr else []
                 
-                # 컨센서스(E)가 붙은 최우측 선행 열의 인덱스 검색
                 forward_idx = -1
                 for idx, h_txt in enumerate(headers_text):
                     if "(E)" in h_txt:
@@ -399,7 +397,6 @@ def get_advanced_fundamental_data(code):
                         tds = tr.find_all("td")
                         td_values = [td.get_text().strip().replace(',', '') for td in tds]
                         
-                        # 과거 데이터 기본 수집
                         valid_nums = [float(v) for v in td_values if v and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
                         
                         if "매출액" in th_title:
@@ -410,9 +407,8 @@ def get_advanced_fundamental_data(code):
                             if valid_nums:
                                 if data["eps"] is None: data["eps"] = valid_nums[-1]
                                 data["eps_history"] = valid_nums[-3:]
-                            # [선행 이익 파싱] 만약 (E) 컨센서스 열이 존재하면 미래 선행 EPS 추출
                             if forward_idx != -1 and len(td_values) >= forward_idx:
-                                target_v = td_values[forward_idx-1] # <th> 제외 인덱스 보정
+                                target_v = td_values[forward_idx-1]
                                 if target_v and target_v.replace('.', '', 1).replace('-', '', 1).isdigit():
                                     data["forward_eps_e"] = float(target_v)
                                     data["consensus_source"] = f"Forward Estimate (E) Column Match"
@@ -421,7 +417,6 @@ def get_advanced_fundamental_data(code):
                                 data["bps"] = valid_nums[-1]
                         elif "ROE" in th_title:
                             if valid_nums: data["roe_history"] = valid_nums[-3:]
-                            # [선행 ROE 파싱] 만약 (E) 컨센서스 열이 존재하면 미래 기대 ROE 추출
                             if forward_idx != -1 and len(td_values) >= forward_idx:
                                 target_v = td_values[forward_idx-1]
                                 if target_v and target_v.replace('.', '', 1).replace('-', '', 1).isdigit():
@@ -730,7 +725,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         data_incomplete = False
 
     # =======================================================
-    # [3x3 결합 트렌드 매트릭스 & Tier 필터 인프라 수립]
+    # [3x3 결합 트렌드 매트릭스 & Tier 필터 - 해설이 포함된 명칭으로 변경]
     # =======================================================
     tp_trend = "유지/신규"
     eps_e_trend = "유지"
@@ -742,17 +737,17 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             eps_e_trend = matched_report.get("eps_e_trend", "유지")
 
     if "상향" in tp_trend:
-        if "상향" in eps_e_trend: cross_signal, tier, penalty = "True Bull", "Tier 1 (Pass)", 0
-        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Critical Value Trap", "Tier 3 (Fatal)", -20
-        else: cross_signal, tier, penalty = "Momentum Driven", "Tier 1 (Pass)", -5
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "True Bull (펀더멘털과 가격이 동행하는 건전한 성장)", "Tier 1 (Pass)", 0
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Critical Value Trap (실적은 꺾이는데 목표가만 높은 위험한 거품)", "Tier 3 (Fatal)", -20
+        else: cross_signal, tier, penalty = "Momentum Driven (실적 상향 없이 가격만 오르는 수급 주도)", "Tier 1 (Pass)", -5
     elif "하향" in tp_trend:
-        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Turnaround", "Tier 1 (Pass)", 10
-        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Genuine Bear", "Tier 3 (Fatal)", 0
-        else: cross_signal, tier, penalty = "Sentiment Driven Drop", "Tier 2 (Warning)", 0
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Turnaround (주가는 빠지지만 실적 체력은 오르는 소외된 우량주)", "Tier 1 (Pass)", 10
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Genuine Bear (이익과 가격이 모두 부러진 구조적 침체)", "Tier 3 (Fatal)", 0
+        else: cross_signal, tier, penalty = "Sentiment Driven Drop (실적 하향은 멈췄으나 심리적 과매도로 하락)", "Tier 2 (Warning)", 0
     else:
-        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Quiet Accumulation", "Tier 1 (Pass)", 5
-        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Value Trap", "Tier 2 (Warning)", -10
-        else: cross_signal, tier, penalty = "Neutral", "Tier 1 (Pass)", 0
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Quiet Accumulation (시장은 조용하나 실적 추정치가 개선되는 선취매 구간)", "Tier 1 (Pass)", 5
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Value Trap (목표가는 방어 중이나 이익은 몰래 하향 중인 눈치보기 장세)", "Tier 2 (Warning)", -10
+        else: cross_signal, tier, penalty = "Neutral (방향성 없음)", "Tier 1 (Pass)", 0
 
     if is_discovery_mode and tier == "Tier 3 (Fatal)":
         return {"ticker": ticker, "name": name, "status": "KILLED", "reason": f"{cross_signal} ({tier} 치명적 리스크 제어 작동)"}
@@ -1224,26 +1219,24 @@ with tab4:
                         f"[시장 모멘텀]\n{momentum_context}\n\n"
                         f"[팩트 데이터 로그]\n{tech_data_str_all}\n\n"
                         f"=== ⚠️ 시니어 애널리스트 분석 지침 ===\n"
-                        f"1. 전달받은 전체 후보군 데이터를 모두 비교 평가하여 종합 매력도 점수를 매긴 후 최상위 Top 3 종목만 엄선하여 서술하십시오.\n"
+                        f"1. 전달받은 전체 후보군 데이터를 비교 평가하여 최상위 Top 3 종목만 엄선해 서술하십시오.\n"
                         f"2. {strategy_guide}\n"
-                        f"3. 리포트에 기재하는 모든 가격 수치는 팩트 데이터 로그에 찍힌 숫자를 절대 임의 수정 없이 100% 복사해서 기재하십시오.\n"
-                        f"4. 팩트 데이터 로그에 적힌 3x3 '교차검증 시그널'(예: True Bull, Hidden Value Trap 등)의 퀀트 판정 라벨을 분석 스토리에 반드시 결합하여 해설하십시오.\n"
-                        f"5. [자기 검증 - 치명적 리스크 강제 출력] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 로그에 Tier 2 경고플래그가 활성화되어 있다면 이를 Bear Case 1순위로 강력 경고하십시오.\n"
-                        f"6. 마지막 액션플랜에 의견을 요약하고, 부여한 신뢰도의 산출 및 감점 근거를 사유서 형태로 명시하십시오.\n\n"
+                        f"3. 결론을 맨 앞에 배치하는 구조(BLUF)를 준수하십시오. 투자의견, 신뢰도, 핵심 이유를 먼저 출력한 뒤 스토리를 풀어내십시오.\n"
+                        f"4. 팩트 데이터 로그에 적힌 3x3 '교차검증 시그널'(예: True Bull 등) 인용 시, 괄호 안에 있는 친절한 해설을 포함하여 사용자가 쉽게 이해하도록 작성하십시오.\n"
+                        f"5. [자기 검증 - 치명적 리스크] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 로그에 Tier 2 경고가 있다면 이를 1순위로 강력 경고하십시오.\n\n"
                         f"=== 리포트 작성 포맷 ===\n"
                         f"### 🏆 1차 후보군 스크리닝 요약 (전체 평가)\n\n"
                         f"<ANALYSIS_티커숫자>\n"
-                        f"### [종목명] (티커)\n"
-                        f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
-                        f"**📊 집중 전략 팩트 분석 (3x3 교차 라벨 포함)**\n\n"
-                        f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n\n"
-                        f"---\n"
-                        f"**🏁 최종 투자 의사결정 (Action Plan)**\n"
-                        f"- **현재 투자의견:** [매수 / 관망 / 비중축소] (신뢰도: 00%)\n"
-                        f"- **신뢰도 평가 사유:** (감점 사유 및 크로스 매트릭스 변동성 명시)\n"
-                        f"- **적정 매수가:** [000원 이하]\n"
+                        f"### 📌 [종목명] (티커)\n"
+                        f"**🎯 투자의견: [매수 / 관망 / 비중축소]** (신뢰도: 00%)\n"
+                        f"- **현재가:** 000원\n"
                         f"- **목표가:** [해당 기간 목표가 00원]\n"
                         f"- **손절가:** [해당 기간 손절선 00원]\n"
+                        f"- **한 줄 요약:** (가장 핵심이 되는 투자 논리 1줄)\n\n"
+                        f"---\n"
+                        f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
+                        f"**📊 집중 전략 팩트 분석 (3x3 교차 라벨 해설 포함)**\n\n"
+                        f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n"
                         f"</ANALYSIS_티커숫자>\n\n"
                         f"[SELECTED_TICKERS]: 000000, 111111, 222222"
                     )
@@ -1381,25 +1374,23 @@ with tab5:
 
                         prompt = (
                             f"[{name} 진단]\n[팩트 데이터 로그]\n{data_dict['tech_data_str']}\n{extra_ctx}\n\n"
-                            f"당신은 리스크와 기회를 종합적으로 분석하는 {persona_t5}입니다. 고객의 투자 타임라인은 {eval_horizon}입니다.\n\n"
+                            f"당신은 리스크와 기회를 종합적으로 분석하는 {persona_t5}입니다. 투자 타임라인은 {eval_horizon}입니다.\n\n"
                             f"=== ⚠️ AI 분석 지침 ===\n"
-                            f"1. [집중 전략 준수 강제] {t5_strategy}\n"
-                            f"2. 리포트에 기재하는 모든 가격 수치는 절대 임의 변경 없이 '팩트 데이터 로그'의 값을 1원 단위까지 100% 복사해서 기재하십시오.\n"
-                            f"3. 계좌 수익률과 주가의 위치를 참고하여 추가매수/유지/비중축소/손절 여부를 강력히 권고하십시오.\n"
-                            f"4. 파이썬 로그에 찍힌 3x3 크로스 매트릭스 시그널 라벨(예: Hidden Value Trap, Critical Value Trap 등)을 읽고, 기관 애널리스트들이 숨겨놓은 실적 하향 경고의 인과관계를 매우 날카롭게 분석해 서술하십시오.\n"
-                            f"5. [자기 검증 - 치명적 리스크 강제 출력] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 만약 파이썬 로그에 Tier 2 경고가 적혀 있다면 무조건 Bear Case 1순위로 경고하십시오.\n"
-                            f"6. 마지막 액션플랜 요약문 내에 신뢰도의 산출 사유와 감점 내역을 명시하십시오.\n\n"
+                            f"1. 결론을 맨 앞에 배치하는 구조(BLUF)를 준수하십시오. 투자의견, 신뢰도, 현재가, 목표가, 손절가, 한 줄 요약을 가장 먼저 출력하십시오.\n"
+                            f"2. {t5_strategy}\n"
+                            f"3. 계좌 수익률과 주가의 위치를 참고하여 추가매수/유지/비중축소/손절 여부를 권고하십시오.\n"
+                            f"4. 파이썬 로그에 찍힌 3x3 크로스 매트릭스 시그널(예: Hidden Value Trap 등) 인용 시, 괄호 안에 있는 뜻풀이를 덧붙여 직관적으로 이해할 수 있게 하십시오.\n"
+                            f"5. [자기 검증 - 치명적 리스크 강제 출력] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 만약 파이썬 로그에 Tier 2 경고가 적혀 있다면 무조건 Bear Case 1순위로 경고하십시오.\n\n"
                             f"=== 리포트 작성 포맷 ===\n"
-                            f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
-                            f"**📊 {eval_horizon} 맞춤형 팩트 분석 (3x3 크로스 시그널 분석 포함)**\n\n"
-                            f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n\n"
-                            f"---\n"
-                            f"**🏁 최종 투자 의사결정 (Action Plan)**\n"
-                            f"- **현재 투자의견:** [매수 / 유지 / 비중축소 / 손절] (신뢰도: 00%)\n"
-                            f"- **신뢰도 평가 사유:** (크로스 매트릭스 엇박자 감지 등 감점 및 산정 근거 명시)\n"
-                            f"- **적정 매수가:** [000원 이하]\n"
+                            f"**🎯 투자의견: [매수 / 유지 / 비중축소 / 손절]** (신뢰도: 00%)\n"
+                            f"- **현재가:** 000원\n"
                             f"- **목표가:** [{eval_horizon} 목표가 00원]\n"
                             f"- **시스템 손절가:** [{eval_horizon} 손절가 00원]\n"
+                            f"- **한 줄 요약:** (가장 핵심이 되는 판단 근거 1줄)\n\n"
+                            f"---\n"
+                            f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
+                            f"**📊 {eval_horizon} 맞춤형 팩트 분석 (3x3 크로스 시그널 해설 포함)**\n\n"
+                            f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n"
                         )
                         
                         report = call_gemini_with_fallback(prompt)
