@@ -30,7 +30,7 @@ LITE_MODEL_NAME = "gemini-3.1-flash-lite"
 FALLBACK_MODEL_NAME = "gemini-3-flash-preview"
 
 db_backup_lock = threading.Lock()
-db_schema_lock = threading.Lock() # [패치 ③] DB 스키마 변경용 글로벌 락 신설
+db_schema_lock = threading.Lock() 
 xml_parse_lock = threading.Lock() 
 thread_local = threading.local()  
 
@@ -86,7 +86,7 @@ DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 # =======================================================
 @st.cache_resource
 def init_db():
-    with db_schema_lock: # [패치 ③] 스레드 동시 진입으로 인한 SQLite Database Lock 원천 차단
+    with db_schema_lock: 
         connection = sqlite3.connect('market_analysis.db', check_same_thread=False, timeout=30)
         cursor = connection.cursor()
         cursor.execute('''CREATE TABLE IF NOT EXISTS scrapbook (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, link TEXT, summary TEXT, analysis TEXT, scrap_date TEXT)''')
@@ -103,7 +103,7 @@ def init_db():
                 ('034730', 'SK'), ('000150', '두산'), ('004800', '효성'), ('028260', '삼성물산'), 
                 ('267250', 'HD현대'), ('004990', '롯데지주'), ('002020', '코오롱'), ('000240', '한국앤컴퍼니'), 
                 ('002790', '아모레G'), ('000210', 'DL'), ('058650', '세아홀딩스'), ('000140', '하이트진로홀딩스'), 
-                ('005720', '넥xen'), ('003550', 'LG')
+                ('005720', '넥센'), ('003550', 'LG')
             ]
             cursor.executemany("INSERT OR IGNORE INTO holding_companies (stock_code, corp_name) VALUES (?, ?)", default_holdings)
         
@@ -354,7 +354,12 @@ def get_dart_filings(stock_code):
 
 @st.cache_data(ttl=600)
 def get_advanced_fundamental_data(code):
-    data = {"per": "-", "pbr": "-", "eps": None, "bps": None, "industry_per": "-", "quarter_trend": "정보 없음", "supply_demand": "수급 정보 없음", "sales_history": [], "op_history": [], "eps_history": [], "roe_history": []}
+    data = {
+        "per": "-", "pbr": "-", "eps": None, "bps": None, "industry_per": "-", 
+        "quarter_trend": "정보 없음", "supply_demand": "수급 정보 없음", 
+        "sales_history": [], "op_history": [], "eps_history": [], "roe_history": [],
+        "forward_eps_e": None, "forward_roe_e": None, "consensus_source": "Past Actual (A)"
+    }
     headers = {'User-Agent': 'Mozilla/5.0'}
     session = get_session()
     try:
@@ -375,29 +380,54 @@ def get_advanced_fundamental_data(code):
 
         cop_table = soup.find("div", class_="cop_analysis")
         if cop_table:
-            data["quarter_trend"] = "최근 실적 수집 완료"
+            data["quarter_trend"] = "최근 실적 및 컨센서스 테이블 파싱 완료"
             try:
-                for th in cop_table.find_all("th"):
-                    text = th.get_text().strip()
-                    if "매출액" in text:
-                        valid_sales = [float(v) for td in th.find_parent("tr").find_all("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
-                        if valid_sales: data["sales_history"] = valid_sales[-3:]
-                    elif "영업이익" in text:
-                        valid_op = [float(v) for td in th.find_parent("tr").find_all("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
-                        if valid_op: data["op_history"] = valid_op[-3:]
-                    elif "EPS" in text:
-                        valid_eps = [float(v) for td in th.find_parent("tr").find_all("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
-                        if valid_eps:
-                            if data["eps"] is None: data["eps"] = valid_eps[-1] 
-                            data["eps_history"] = valid_eps[-3:]
-                    elif "BPS" in text:
-                        valid_bps = [float(v) for td in th.find_parent("tr").find_all("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
-                        if valid_bps:
-                            if data["bps"] is None: data["bps"] = valid_bps[-1] 
-                    elif "ROE" in text:
-                        valid_roe = [float(v) for td in th.find_parent("tr").find_all("td") if (v := td.get_text().strip().replace(',', '')) and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
-                        if valid_roe: data["roe_history"] = valid_roe[-3:]
-            except: pass
+                # <th>에서 연도/분기 헤더 추출 (예: 2026.12(E))
+                thead_tr = cop_table.find("thead").find("tr")
+                headers_text = [th.get_text().strip() for th in thead_tr.find_all("th")] if thead_tr else []
+                
+                # 컨센서스(E)가 붙은 최우측 선행 열의 인덱스 검색
+                forward_idx = -1
+                for idx, h_txt in enumerate(headers_text):
+                    if "(E)" in h_txt:
+                        forward_idx = idx
+                
+                tbody = cop_table.find("tbody")
+                if tbody:
+                    for tr in tbody.find_all("tr"):
+                        th_title = tr.find("th").get_text().strip() if tr.find("th") else ""
+                        tds = tr.find_all("td")
+                        td_values = [td.get_text().strip().replace(',', '') for td in tds]
+                        
+                        # 과거 데이터 기본 수집
+                        valid_nums = [float(v) for v in td_values if v and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
+                        
+                        if "매출액" in th_title:
+                            if valid_nums: data["sales_history"] = valid_nums[-3:]
+                        elif "영업이익" in th_title:
+                            if valid_nums: data["op_history"] = valid_nums[-3:]
+                        elif "EPS" in th_title:
+                            if valid_nums:
+                                if data["eps"] is None: data["eps"] = valid_nums[-1]
+                                data["eps_history"] = valid_nums[-3:]
+                            # [선행 이익 파싱] 만약 (E) 컨센서스 열이 존재하면 미래 선행 EPS 추출
+                            if forward_idx != -1 and len(td_values) >= forward_idx:
+                                target_v = td_values[forward_idx-1] # <th> 제외 인덱스 보정
+                                if target_v and target_v.replace('.', '', 1).replace('-', '', 1).isdigit():
+                                    data["forward_eps_e"] = float(target_v)
+                                    data["consensus_source"] = f"Forward Estimate (E) Column Match"
+                        elif "BPS" in th_title:
+                            if valid_nums:
+                                data["bps"] = valid_nums[-1]
+                        elif "ROE" in th_title:
+                            if valid_nums: data["roe_history"] = valid_nums[-3:]
+                            # [선행 ROE 파싱] 만약 (E) 컨센서스 열이 존재하면 미래 기대 ROE 추출
+                            if forward_idx != -1 and len(td_values) >= forward_idx:
+                                target_v = td_values[forward_idx-1]
+                                if target_v and target_v.replace('.', '', 1).replace('-', '', 1).isdigit():
+                                    data["forward_roe_e"] = float(target_v)
+            except Exception as e:
+                pass
             
         for th in soup.find_all("th"):
             if "동일업종 PER" in th.get_text():
@@ -593,17 +623,23 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     news_raw = fetch_stock_news(name, display=4)
     
     news_text = "\n".join([f"- 제목: {n['title']}\n  내용: {n.get('summary', '요약 없음')}" for n in news_raw])
-    
-    # [패치 ①] 글로벌 바구니 공유 차단을 위해 종목 단독 뉴스로만 고정 요약 수행
     lite_summary = call_gemini_lite_summary(f"[{name}] 관련 기업 공시 및 뉴스 정보 요약:\n{dart_info}\n{news_text}")
     
     current_price = tech['current'] if tech else 0.0
     daily_vol = tech['daily_volatility'] if tech else 0.0
     beta = tech['beta'] if tech and 'beta' in tech else 1.0
     
-    eps_val = fund.get('eps')
+    # [미래 선행 지표 우선 바인딩 패치]
+    eps_val = fund.get('forward_eps_e') if fund.get('forward_eps_e') is not None else fund.get('eps')
     bps_val = fund.get('bps')
-    roe_history = fund.get('roe_history', [])
+    
+    # RIM의 핵심 인풋인 expected_roe를 미래 선행 ROE(E)에서 우선 채택
+    if fund.get('forward_roe_e') is not None:
+        expected_roe = fund.get('forward_roe_e') / 100
+    else:
+        roe_history = fund.get('roe_history', [])
+        expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
+        
     eps_history = fund.get('eps_history', [])
     
     try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
@@ -652,7 +688,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             structural_warning = f"⚠️ [지주사 디스카운트] 타겟 PBR 0.5 수준({tp_m:,.0f}원) 앵커링."
             
         required_return = rf + (beta * 0.06) 
-        expected_roe = (roe_history[-1] / 100) if (roe_history and roe_history[-1] > 0) else 0.05
         tp_l = effective_bps + (effective_bps * (expected_roe - required_return) / required_return)
         fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f})"
         conservative_bps = effective_bps
@@ -684,23 +719,51 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         if float_ind_per > (dynamic_per_cap * 1.5):
             fund_type = "상대 가치 (PEG 동적 캡 적용)"
             structural_warning = f"⚠️ [Value Trap 방어] 업종 PER({float_ind_per:.1f}배)이 기업의 이익성장력(PEG 한계치 {dynamic_per_cap:.1f}배) 대비 비정상적으로 높아 동적 상한선을 강제 적용했습니다."
-            
             safe_per_cap = min(current_per * 1.5, dynamic_per_cap)
             tp_m = eps_val * safe_per_cap
+            # [패치 ⑤] 고평가 면죄부 주던 max(tp_m, current_price * 1.05) 클램프 한 줄 완벽 제거! (원칙 통일)
         else:
             fund_type = "기본 상대 가치 (업종 평균 수렴)"
             tp_m = eps_val * adjusted_ind_per
             
         required_return = rf + (beta * 0.06) 
-        expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / required_return)
         fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f})"
         conservative_bps = bps_val
         data_incomplete = False
 
+    # =======================================================
+    # [3x3 결합 트렌드 매트릭스 & Tier 필터 인프라 수립]
+    # =======================================================
+    tp_trend = "유지/신규"
+    eps_e_trend = "유지"
+    
+    if analyst_data:
+        matched_report = next((rep for rep in analyst_data.values() if rep.get("ticker") == ticker), None)
+        if matched_report:
+            tp_trend = matched_report.get("tp_trend", "유지/신규")
+            eps_e_trend = matched_report.get("eps_e_trend", "유지") # 미래 람다 확장 규격 사전 동기화
+
+    # 3x3 결합 매트릭스 라벨링 로직
+    if "상향" in tp_trend:
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "True Bull", "Tier 1 (Pass)", 0
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Critical Value Trap", "Tier 3 (Fatal)", -20
+        else: cross_signal, tier, penalty = "Momentum Driven", "Tier 1 (Pass)", -5
+    elif "하향" in tp_trend:
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Turnaround", "Tier 1 (Pass)", 10
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Genuine Bear", "Tier 3 (Fatal)", 0
+        else: cross_signal, tier, penalty = "Sentiment Driven Drop", "Tier 2 (Warning)", 0
+    else: # 유지/신규
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Quiet Accumulation", "Tier 1 (Pass)", 5
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Value Trap", "Tier 2 (Warning)", -10
+        else: cross_signal, tier, penalty = "Neutral", "Tier 1 (Pass)", 0
+
+    # [Hard Kill 조치] 종목 발굴 모드이고 최악의 결함(Tier 3) 상태 감지 시, 독극물 조기 차단 및 특수 객체 반환
+    if is_discovery_mode and tier == "Tier 3 (Fatal)":
+        return {"ticker": ticker, "name": name, "status": "KILLED", "reason": f"{cross_signal} ({tier} 치명적 리스크 제어 작동)"}
+
     if is_discovery_mode:
-        if data_incomplete:
-            pass 
+        if data_incomplete: pass 
         elif is_holding:
             if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None
         elif eps_val <= 0:
@@ -715,26 +778,11 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     bps_disp_val = f"{bps_val:,.0f}원" if bps_val is not None else "데이터 누락"
 
     consensus_log = ""
-    if analyst_data:
-        matched_report = next((rep for rep in analyst_data.values() if rep.get("ticker") == ticker), None)
-        if matched_report:
-            a_target = float(matched_report.get("target_price", 0))
-            a_opinion = matched_report.get("opinion", "N/A")
-            a_broker = matched_report.get("broker", "알 수 없음")
-            a_trend = matched_report.get("tp_trend", "유지/신규") 
-            
-            if a_target > 0 and tp_m > 0:
-                divergence = (tp_m - a_target) / a_target
-                trend_text = f"시장 모멘텀: {a_trend}"
-                if abs(divergence) >= 0.15:
-                    if divergence > 0:
-                        consensus_log = f"   - ⚖️ 컨센서스 교차검증: ⚠️[퀀트 고평가] 증권사 목표가({a_target:,.0f}원 | {trend_text}) 대비 퀀트 엔진 중기 목표가({tp_m:,.0f}원)가 {abs(divergence)*100:.1f}% 과도하게 높음. (Bear Case에 반영할 것)\n"
-                    else:
-                        consensus_log = f"   - ⚖️ 컨센서스 교차검증: ⚠️[퀀트 보수적] 증권사 목표가({a_target:,.0f}원 | {trend_text}) 대비 퀀트 엔진이 {abs(divergence)*100:.1f}% 더 보수적으로 하향 조정함. (시장 기대치가 비이성적일 수 있음)\n"
-                else:
-                    consensus_log = f"   - ⚖️ 컨센서스 교차검증: ✅[수렴] 퀀트 모델({tp_m:,.0f}원)과 {a_broker} 컨센서스({a_target:,.0f}원 | {trend_text})가 오차범위 내 일치함.\n"
-            else:
-                consensus_log = f"   - ⚖️ 컨센서스 교차검증: 시장 목표가 데이터 없음 ({a_opinion})\n"
+    if analyst_data and matched_report:
+        a_target = float(matched_report.get("target_price", 0))
+        if a_target > 0 and tp_m > 0:
+            divergence = (tp_m - a_target) / a_target
+            consensus_log = f"   - ⚖️ 컨센서스 교차검증: 목표가 {tp_trend} / EPS {eps_e_trend} ➡️ **[{cross_signal} / {tier}]** 판정 (페널티 계수: {penalty}%)\n"
 
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
@@ -744,6 +792,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         f"   - 장기 목표가: {tp_l:,.0f}원\n"
         f"▶ [퀀트 엔진 내부 검증 로그 (리스크 플래그)]:\n"
         f"   - 밸류에이션 모델 타입: {fund_type}\n"
+        f"   - 데이터 소스 엔진: {fund.get('consensus_source')}\n"
         f"{struct_warn_line}"
         f"   - 중기 시그널 상태: {flag_m}\n"
         f"   - 장기 시그널 상태: {flag_l}\n"
@@ -775,7 +824,8 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         "sl_l": sl_l,
         "current_price": current_price,
         "conservative_bps": conservative_bps,
-        "tech_data_str": tech_data_str
+        "tech_data_str": tech_data_str,
+        "status": "PASSED"
     }
 
 # =======================================================
@@ -783,7 +833,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 # =======================================================
 cached_data = fetch_cached_global_data() or {}
 
-# [패치 ④] 람다 지연으로 인한 딕셔너리 미생성 및 렌더링 폭발(KeyError) 방지용 완벽 방어 초깃값 선언
 if "realtime_cache" not in st.session_state: 
     st.session_state.realtime_cache = {
         "market_status": cached_data.get("market_status") or {
@@ -985,7 +1034,8 @@ with tab2:
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 futures = [executor.submit(process_single_ticker, t, "중기 (3~6개월)", k_factor, False, analyst_universe) for t in tickers_to_process]
-                valid_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
+                # Filter out None values or specific status outputs
+                valid_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result() and isinstance(f.result(), dict) and f.result().get("status") == "PASSED"]
 
             tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
 
@@ -997,10 +1047,9 @@ with tab2:
                 f"=== ⚠️ 작성 지침 및 데이터 스펙 ===\n"
                 f"1. 제공된 [매크로 요약 팩트]를 바탕으로 오늘 한국 증시의 자산 배분 방안과 주도 섹터 흐름을 매우 상세하고 풍부하게 서술하십시오.\n"
                 f"2. 제공된 [퀀트 엔진 로그]를 분석하여 가장 매력적인 핫픽 2종목을 엄선하십시오.\n"
-                f"3. 핫픽 종목 작성 시 로그에 찍힌 **[현재가], [증권사 목표가 및 트렌드], [우리의 시스템 퀀트 중기 목표가(tp_m)]**를 반드시 모두 숫자로 명시하십시오.\n"
-                f"4. 두 목표가 간의 괴리율(+-5% 기준)을 바탕으로 수렴/과대평가 여부를 객관적으로 평가하십시오.\n"
-                f"5. 강세/약세 논리 서술 시 차트 데이터(이평선)와 밸류에이션(EPS, PER) 숫자를 철저히 인용하십시오.\n"
-                f"6. 브리핑 결과를 바탕으로 오늘의 종합 시장 심리 수치(0~100)를 산출하여 반드시 마지막에 [SENTIMENT_SCORE]: 50 형식으로 출력할 것.\n\n"
+                f"3. 핫픽 종목 작성 시 로그에 찍힌 **[현재가], [우리의 시스템 퀀트 중기 목표가(tp_m)]**를 반드시 모두 숫자로 명시하십시오.\n"
+                f"4. 강세/약세 논리 서술 시 차트 데이터(이평선)와 밸류에이션(EPS, PER) 숫자를 철저히 인용하십시오.\n"
+                f"5. 브리핑 결과를 바탕으로 오늘의 종합 시장 심리 수치(0~100)를 산출하여 반드시 마지막에 [SENTIMENT_SCORE]: 50 형식으로 출력할 것.\n\n"
                 f"=== 리포트 출력 포맷 ===\n"
                 f"## 📰 1. 글로벌 매크로 국면 및 주도 섹터 심층 브리핑\n"
                 f"(실시간 지표와 매크로 뉴스를 연결하여 오늘 장의 성격 규정, 리스크 요인, 기회 요인을 구체적이고 길게 서술)\n\n"
@@ -1008,7 +1057,7 @@ with tab2:
                 f"<ANALYSIS_종목명>\n"
                 f"### 📌 [종목명] ([티커])\n"
                 f"- **주가 현황:** 현재가 [숫자]원\n"
-                f"- **목표가 교차검증:** 애널리스트 목표가 **[숫자]원 (모멘텀: [트렌드])** vs 퀀트 시스템 적정가 **[숫자]원**\n"
+                f"- **퀀트 시스템 적정가:** **[숫자]원**\n"
                 f"- **거시 국면 연결고리:** (이 종목이 왜 지금 매크로 상태에서 촉매를 받는지 서술)\n"
                 f"- **펀더멘털 및 퀀트 강세 논리:** (파이썬 로그의 PER, BPS, 기술적 이격도 수치 인용)\n"
                 f"</ANALYSIS_종목명>\n\n"
@@ -1078,18 +1127,14 @@ with tab4:
         if not rec_news:
             st.error("분석 대상 뉴스 풀이 비어있습니다.")
         else:
-            with st.spinner("[1단계] Lite 모델이 수집된 핵심 뉴스를 바탕으로 시장 전체 모멘텀을 추출 중..."):
-                t1 = time.time()
+            with st.spinner("[1단계] 주도 테마 및 모멘텀 문맥 추출 중..."):
                 news_str = "\n".join([f"- {n.get('title', '')}: {n.get('summary', '')}" for n in rec_news])
                 momentum_context = call_gemini_lite_summary(
-                    f"다음은 현재 시장의 실시간, 거시경제, 섹터별 핵심 뉴스 목록이다. "
-                    f"이 중 시장을 지배하는 핵심 테마 3~5개만 골라, 각 테마당 2~3문장으로 "
-                    f"핵심 근거와 관련 종목/섹터를 요약하라. 전체 800자를 넘기지 마라:\n\n{news_str}"
+                    f"다음 핵심 뉴스 목록을 요약하여 지배적 테마 3~5개를 선별하십시오:\n\n{news_str}"
                 )
 
-            with st.spinner("[2단계] 추출된 모멘텀 기반으로 1차 후보군 발굴 중..."):
-                t2 = time.time()
-                prompt = f"투자 [{investment_horizon}] 모멘텀 수혜가 예상되는 종목 15개의 '종목명'만 JSON 배열로 출력하라.\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"삼성전자\", \"현대차\"] 형태의 배열만 출력하시오."
+            with st.spinner("[2단계] 후보군 종목 코드 매핑 중..."):
+                prompt = f"투자 [{investment_horizon}] 모멘텀 수혜 예상 종목 15개의 '종목명'만 JSON 배열로 출력하라.\n\n{momentum_context}\n\n※ [\"삼성전자\", \"현대차\"] 형태만 반환하시오."
                 res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
 
                 selected_tickers = []
@@ -1105,22 +1150,33 @@ with tab4:
                 except: pass
 
             if not selected_tickers:
-                st.error("⚠️ AI가 조건에 맞는 종목을 추출하지 못했거나 API 응답이 지연되었습니다. 잠시 후 다시 시도해주세요.")
+                st.error("⚠️ 후보 종목 매핑 오류. 잠시 후 시도해주세요.")
                 st.stop()
 
-            with st.spinner("[3단계] 후보군 동시 병렬 크롤링 및 리스크/목표가 밴드 산출 중..."):
+            # [탈락 종목 실시간 인프라 연동 바구니 선언]
+            passed_results = []
+            killed_logs = []
+
+            with st.spinner("[3단계] 후보군 병렬 크롤링 및 3x3 Tier 필터링 가동 중..."):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                     futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True, analyst_universe) for t in selected_tickers]
-                    valid_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
+                    for f in concurrent.futures.as_completed(futures):
+                        f_res = f.result()
+                        if f_res:
+                            if f_res.get("status") == "KILLED":
+                                killed_logs.append(f_res)
+                            elif f_res.get("status") == "PASSED":
+                                passed_results.append(f_res)
 
             tried_tickers = set(selected_tickers)
             max_retry = 2
             retry_count = 0
 
-            while len(valid_results) < 10 and retry_count < max_retry:
-                with st.spinner(f"[보충 단계] 부족분 보충 중 (시도 {retry_count+1}/{max_retry})..."):
-                    deficit = 10 - len(valid_results)
-                    extra_prompt = f"다음 코드를 제외하고, 투자 [{investment_horizon}] 모멘텀 수혜 예상 종목 {deficit}개의 '종목명'만 JSON 배열로 출력하라.\n(제외: {', '.join(tried_tickers)})\n\n[시장 모멘텀 분석]\n{momentum_context}\n\n※ 다른 설명 없이 [\"SK하이닉스\", \"LG에너지솔루션\"] 형태의 배열만 출력하시오."
+            # 보충 단계 루프
+            while len(passed_results) < 10 and retry_count < max_retry:
+                deficit = 10 - len(passed_results)
+                with st.spinner(f"[보충 단계] 부족분 {deficit}개 보충 및 필터링 중 (시도 {retry_count+1}/{max_retry})..."):
+                    extra_prompt = f"다음 코드를 제외하고 수혜 예상 종목 {deficit}개의 '종목명'만 JSON 배열로 출력하라.\n(제외: {', '.join(tried_tickers)})\n\n※ 다른 설명 생략."
                     extra_res = call_gemini_with_fallback(extra_prompt, model=LITE_MODEL_NAME)
 
                     extra_tickers = []
@@ -1135,7 +1191,7 @@ with tab4:
                                 if len(extra_tickers) >= deficit: break
                     except: pass
 
-                    # [패치 ②] 만약 추가로 발굴된 신규 티커가 0개라면 무의미한 loop 돌지 않고 즉시 탈출(Break) 처리
+                    # [패치 ②] 새롭게 수집된 후보군이 0개라면 무한 루프 돌지 않고 즉시 탈출
                     if not extra_tickers: 
                         break
                         
@@ -1143,74 +1199,80 @@ with tab4:
 
                     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                         futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True, analyst_universe) for t in extra_tickers]
-                        extra_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result()]
-                        valid_results += extra_results
+                        for f in concurrent.futures.as_completed(futures):
+                            f_res = f.result()
+                            if f_res:
+                                if f_res.get("status") == "KILLED":
+                                    killed_logs.append(f_res)
+                                elif f_res.get("status") == "PASSED":
+                                    passed_results.append(f_res)
                     retry_count += 1
 
-            if len(valid_results) == 0:
-                st.warning("⚠️ 후보군 전부 밸류에이션상 상승여력이 없어 추천에서 제외되었습니다.")
-                st.session_state.today_recommendation = ""
-                st.session_state.valid_results_cache = []
-            else:
-                tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
-                st.session_state.valid_results_cache = valid_results
+            # 세션 캐시에 분리 보존
+            st.session_state.valid_results_cache = passed_results
+            st.session_state.killed_results_cache = killed_logs
 
-                with st.spinner(f"[4단계] 최종 선별된 {len(valid_results)}개 중 시니어 애널리스트 방식 Top 3 보고서 작성 중..."):
-                    
+            if len(passed_results) == 0:
+                st.warning("⚠️ 퀀트 가치평가 및 Tier 3 하드 필터를 통과한 종목이 없습니다.")
+                st.session_state.today_recommendation = ""
+            else:
+                tech_data_str_all = "".join([r['tech_data_str'] for r in passed_results])
+
+                with st.spinner(f"[4단계] 최종 선별된 {len(passed_results)}개 중 시니어 애널리스트 방식 Top 3 보고서 작성 중..."):
                     if "단기" in investment_horizon:
-                        persona = "모멘텀 스윙 트레이더 (단기 차트 및 수급, 뉴스 테마 돌파 매매 전문)"
-                        strategy_guide = "▶ [단기(1~3개월) 매매 전략]: 파이썬 로그에 장기 펀더멘털 데이터(BPS, PER 등)가 제공되더라도 '절대 언급하지 말고 철저히 무시'하십시오. 오로지 차트, 5일 수급, 당장의 뉴스 모멘텀에만 집중하여 매수 논리를 구성하십시오."
+                        persona = "모멘텀 스윙 트레이더"
+                        strategy_guide = "▶ [단기 전략]: 파이썬 로그의 장기 지표(BPS, RIM 등)는 완전히 무시하고, 20일 변동성, 수급동향, MACD 골든크로스 및 뉴스테마 모멘텀에만 집중하십시오."
                     elif "중기" in investment_horizon:
-                        persona = "실적 턴어라운드/가치투자 애널리스트 (분기 실적 및 적정 주가 회귀 전문)"
-                        strategy_guide = "▶ [중기(3~6개월) 매매 전략]: 파이썬 로그에 제공된 데이터 중 분기/다음 분기의 '실적 턴어라운드(영업이익)'와 'PER 밸류에이션 매력도', 기관/외인의 '최근 20일 누적 수급 변화'에 집중하십시오. 단일 뉴스 가십은 무시하십시오."
+                        persona = "실적 가치투자 애널리스트"
+                        strategy_guide = "▶ [중기 전략]: 최근 분기 영업이익률 트렌드와 PER 상대매력, 3x3 크로스 시그널의 정합성 상태에 집중하십시오."
                     else:
-                        persona = "장기 구조적 성장/매크로 전략가 (메가트렌드 및 ROE, BPS 가치투자 전문)"
-                        strategy_guide = "▶ [장기(1년 이상) 매매 전략]: 파이썬 로그에 단기 노이즈 데이터(최근 5일 수급, 단기 이동평균선, 단순 뉴스 등)가 있더라도 '철저히 무시'하십시오. 기업의 본질적 가치(BPS), 자본효율성(ROE 추세), 구조적 산업 성장에만 집중하여 논리를 구성하십시오."
+                        persona = "장기 구조적 성장 전략가"
+                        strategy_guide = "▶ [장기 전략]: 선행 ROE(E)와 잔여이익모델(RIM)의 장기 내재가치 팩트에 전적으로 집중하십시오. 단기 차트 노이즈는 기사 요약과 함께 배제하십시오."
 
                     step3_prompt = (
-                        f"당신은 월스트리트 헤지펀드의 {persona}입니다.\n"
-                        f"고객의 투자 타임라인은 **{investment_horizon}**입니다. 주어진 역할과 전략에 완벽히 몰입하십시오.\n\n"
-                        f"[시장 전체 핵심 모멘텀 분석]\n{momentum_context}\n\n"
-                        f"[후보군 팩트 데이터]\n{tech_data_str_all}\n\n"
+                        f"당신은 월스트리트 헤지펀드의 {persona}입니다. 투자 타임라인은 {investment_horizon}입니다.\n\n"
+                        f"[시장 모멘텀]\n{momentum_context}\n\n"
+                        f"[팩트 데이터 로그]\n{tech_data_str_all}\n\n"
                         f"=== ⚠️ 시니어 애널리스트 분석 지침 ===\n"
-                        f"1. [전수 평가 및 선별] 전달받은 전체 후보군 데이터를 모두 비교 평가하여 각각의 '종합 매력도 점수'를 매기십시오. 그 후 가장 점수가 높은 **최상위 Top 3 종목만 엄선**하여 심층 리포트를 작성하십시오.\n"
-                        f"2. [집중 전략 준수 강제] {strategy_guide}\n"
-                        f"3. [숫자 일치 강제] 리포트에 기재하는 모든 가격(현재가, 목표가, 손절가 등)과 실적 수치는 **'파이썬 퀀트 엔진 연산 로그'에 찍힌 숫자를 절대 반올림하지 말고 똑같이 복사해서 기재**하십시오.\n"
-                        f"4. [스토리텔링] 파편화된 데이터를 단순 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
-                        f"5. [자기 검증 - 치명적 리스크 강제 출력] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 만약 파이썬 팩트 데이터에 '⚠️역전됨' 플래그나 '데이터 누락' 경고가 적혀 있다면, 투자 기간 관점과 무관하게 무조건 Bear Case 1순위로 강력하게 경고하십시오.\n"
-                        f"6. [액션 플랜 및 신뢰도] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 이벤트를 요약하고, 부여한 '신뢰도(%)'의 산출 근거(감점 사유 등)를 반드시 명시하십시오.\n\n"
+                        f"1. 전달받은 전체 후보군 데이터를 모두 비교 평가하여 종합 매력도 점수를 매긴 후 최상위 Top 3 종목만 엄선하여 서술하십시오.\n"
+                        f"2. {strategy_guide}\n"
+                        f"3. 리포트에 기재하는 모든 가격 수치는 팩트 데이터 로그에 찍힌 숫자를 절대 임의 수정 없이 100% 복사해서 기재하십시오.\n"
+                        f"4. 팩트 데이터 로그에 적힌 3x3 '교차검증 시그널'(예: True Bull, Hidden Value Trap 등)의 퀀트 판정 라벨을 분석 스토리에 반드시 결합하여 해설하십시오.\n"
+                        f"5. [자기 검증 - 치명적 리스크 강제 출력] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 로그에 Tier 2 경고플래그가 활성화되어 있다면 이를 Bear Case 1순위로 강력 경고하십시오.\n"
+                        f"6. 마지막 액션플랜에 의견을 요약하고, 부여한 신뢰도의 산출 및 감점 근거를 사유서 형태로 명시하십시오.\n\n"
                         f"=== 리포트 작성 포맷 ===\n"
-                        f"### 🏆 1차 후보군 스크리닝 요약 (전체 평가)\n"
-                        f"(검토한 전체 후보군의 종목명, 매력도 점수, 핵심 이유 1줄을 간단한 표나 리스트로 먼저 제시할 것)\n\n"
-                        f"---\n\n"
+                        f"### 🏆 1차 후보군 스크리닝 요약 (전체 평가)\n\n"
                         f"<ANALYSIS_티커숫자>\n"
                         f"### [종목명] (티커)\n"
-                        f"**📖 핵심 투자 스토리 (Investment Story)**\n"
-                        f"({investment_horizon} 전략 관점에 맞춘 심층 분석 서술)\n\n"
-                        f"**📊 집중 전략 팩트 분석**\n"
-                        f"(단기는 수급/차트, 중/장기는 실적/가치 위주로 팩트 증명)\n\n"
-                        f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n"
-                        f"1. \n2. \n3. \n\n"
+                        f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
+                        f"**📊 집중 전략 팩트 분석 (3x3 교차 라벨 포함)**\n\n"
+                        f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n\n"
                         f"---\n"
                         f"**🏁 최종 투자 의사결정 (Action Plan)**\n"
                         f"- **현재 투자의견:** [매수 / 관망 / 비중축소] (신뢰도: 00%)\n"
-                        f"- **신뢰도 평가 사유:** (역전 현상 감지, 데이터 누락, 컨센서스 괴리 등 점수 산정 및 감점 사유 명시)\n"
+                        f"- **신뢰도 평가 사유:** (감점 사유 및 크로스 매트릭스 변동성 명시)\n"
                         f"- **적정 매수가:** [000원 이하]\n"
                         f"- **목표가:** [해당 기간 목표가 00원]\n"
                         f"- **손절가:** [해당 기간 손절선 00원]\n"
-                        f"- **의사결정 핵심 근거 Top 3:** (1, 2, 3)\n"
-                        f"- **향후 반드시 확인해야 할 트리거 이벤트:** (예: 다음 분기 영업이익률 회복 여부 등)\n"
                         f"</ANALYSIS_티커숫자>\n\n"
-                        f"※ 주의: 마지막 줄은 반드시 아래 형식으로 선정된 3개 종목의 '6자리 숫자 티커만' 콤마로 구분하여 출력하십시오. 종목명이나 괄호는 절대 쓰지 마십시오.\n"
                         f"[SELECTED_TICKERS]: 000000, 111111, 222222"
                     )
                     st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step3_prompt))
+                    st.rerun()
 
+    # 화면 렌더링 영역
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
         cached_results = st.session_state.get('valid_results_cache', [])
+        cached_killed = st.session_state.get('killed_results_cache', [])
 
-        with st.expander("추천 리포트"):
+        # [관측성 확보] 조용한 실패 방지용 킬 로그 전용 아코디언 배치
+        if cached_killed:
+            with st.expander("🛑 [시스템 스크리닝] 3x3 매트릭스 Hard Kill 탈락 내역", expanded=False):
+                for k_item in cached_killed:
+                    st.error(f"**[KILLED]** 종목: `{k_item['name']}` ({k_item['ticker']}) ➡️ 사유: `{k_item['reason']}`")
+
+        with st.expander("추천 리포트", expanded=True):
             display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw.split("[SELECTED_TICKERS]")[0].strip())
             st.write(display_text)
 
@@ -1253,7 +1315,6 @@ with tab4:
 
 with tab5:
     st.subheader("관심종목 진단 (보유종목 정밀 평가)")
-    
     eval_horizon = st.radio("진단 관점 (투자기간)", ["단기 (1~3개월)", "중기 (3~6개월)", "장기 (1년 이상)"], horizontal=True)
     st.divider()
 
@@ -1305,13 +1366,14 @@ with tab5:
             with col_sel: st.checkbox("선택", key=f"chk_t5_{p_id}", label_visibility="collapsed")
             with col_info:
                 if is_owned:
-                    st.caption(f"보유 | 평단: {avg_price:,.0f} | 수량: {quantity}")
-                    if current > 0 and avg_price > 0: st.caption(f"수익률: {((current - avg_price) / avg_price * 100):+.1f}%")
+                    st.markdown(f"보유 \| 평단: {avg_price:,.0f} \| 수량: {quantity}")
+                    if current > 0 and avg_price > 0: st.markdown(f"수익률: {((current - avg_price) / avg_price * 100):+.1f}%")
             with col_price:
                 if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
             with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
                     with st.spinner("파이썬 연산 및 수치 방어 논리 작성 중..."):
+                        # 보유종목 진단은 is_discovery_mode=False 이므로 Hard kill 없이 통과하여 3x3 정밀해설 수령
                         data_dict = process_single_ticker(ticker, eval_horizon, k_factor, False, analyst_universe)
                         if not data_dict:
                             st.error("데이터 수집 실패")
@@ -1322,41 +1384,35 @@ with tab5:
 
                         if "단기" in eval_horizon:
                             persona_t5 = "단기 스윙 트레이더"
-                            t5_strategy = "▶ [단기(1~3개월) 매매 전략]: 파이썬 로그에 장기 지표(BPS, PER 등)가 있더라도 철저히 무시하십시오. 오직 '최근 5일 수급', '차트 흐름', '뉴스 모멘텀'만으로 매수/손절을 판단하십시오."
+                            t5_strategy = "▶ [단기 전략]: 파이썬 로그에 장기 지표(BPS, PER 등)가 있더라도 철저히 무시하십시오. 오직 최근 5일 수급, 차트 흐름, 뉴스 모멘텀만으로 매수/손절을 판단하십시오."
                         elif "중기" in eval_horizon:
                             persona_t5 = "가치/성장 투자 애널리스트"
-                            t5_strategy = "▶ [중기(3~6개월) 매매 전략]: 단기 노이즈는 무시하고, 분기별 실적 증감 추세와 PER 밸류에이션, 기관/외인의 최근 20일 수급 추세에 집중하여 판단하십시오."
+                            t5_strategy = "▶ [중기 전략]: 분기별 실적 증감 추세와 선행 이익 가이드라인, 3x3 크로스 매트릭스 라벨 상태에 집중하십시오."
                         else:
                             persona_t5 = "장기 구조적 매크로 전략가"
-                            t5_strategy = "▶ [장기(1년 이상) 매매 전략]: 단기 수급이나 차트 노이즈는 절대 언급하지 마십시오. 오직 BPS, ROE 추세, 산업 메가트렌드 등 본질적 가치(펀더멘털)에만 집중하여 평가하십시오."
+                            t5_strategy = "▶ [장기 전략]: 단기 수급이나 차트 노이즈는 배제하고, 선행 ROE(E)에 근거한 본질적 잔여이익 펀더멘털만 평가하십시오."
 
                         prompt = (
-                            f"[{name} 진단]\n[팩트 데이터]\n{data_dict['tech_data_str']}\n{extra_ctx}\n\n"
-                            f"당신은 리스크와 기회를 종합적으로 분석하는 {persona_t5}입니다.\n"
-                            f"고객의 투자 타임라인은 **{eval_horizon}**입니다.\n\n"
+                            f"[{name} 진단]\n[팩트 데이터 로그]\n{data_dict['tech_data_str']}\n{extra_ctx}\n\n"
+                            f"당신은 리스크와 기회를 종합적으로 분석하는 {persona_t5}입니다. 고객의 투자 타임라인은 {eval_horizon}입니다.\n\n"
                             f"=== ⚠️ AI 분석 지침 ===\n"
                             f"1. [집중 전략 준수 강제] {t5_strategy}\n"
-                            f"2. [숫자 일치 강제] 리포트에 기재하는 모든 가격(목표가/손절가) 수치는 절대 반올림하지 말고 **'팩트 데이터'에 찍힌 숫자를 1원 단위까지 100% 똑같이 복사해서 기재**하십시오.\n"
-                            f"3. [계좌 진단] 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 판단하십시오.\n"
-                            f"4. [스토리텔링] 파편화된 데이터를 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
-                            f"5. [자기 검증 - 치명적 리스크 강제 출력] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 만약 파이썬 팩트 데이터에 '⚠️역전됨' 플래그나 '데이터 누락' 경고가 적혀 있다면, 투자 기간 관점과 무관하게 무조건 Bear Case 1순위로 강력하게 경고하십시오.\n"
-                            f"6. [액션 플랜 및 신뢰도] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 이벤트를 요약하고, 부여한 '신뢰도(%)'의 산출 근거(감점 사유 등)를 반드시 명시하십시오.\n\n"
+                            f"2. 리포트에 기재하는 모든 가격 수치는 절대 임의 변경 없이 '팩트 데이터 로그'의 값을 1원 단위까지 100% 복사해서 기재하십시오.\n"
+                            f"3. 계좌 수익률과 주가의 위치를 참고하여 추가매수/유지/비중축소/손절 여부를 강력히 권고하십시오.\n"
+                            f"4. 파이썬 로그에 찍힌 3x3 크로스 매트릭스 시그널 라벨(예: Hidden Value Trap, Critical Value Trap 등)을 읽고, 기관 애널리스트들이 숨겨놓은 실적 하향 경고의 인과관계를 매우 날카롭게 분석해 서술하십시오.\n"
+                            f"5. [자기 검증 - 치명적 리스크 강제 출력] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 만약 파이썬 로그에 Tier 2 경고가 적혀 있다면 무조건 Bear Case 1순위로 경고하십시오.\n"
+                            f"6. 마지막 액션플랜 요약문 내에 신뢰도의 산출 사유와 감점 내역을 명시하십시오.\n\n"
                             f"=== 리포트 작성 포맷 ===\n"
-                            f"**📖 핵심 투자 스토리 (Investment Story)**\n"
-                            f"({eval_horizon} 전략 관점에 맞춘 심층 분석 서술)\n\n"
-                            f"**📊 {eval_horizon} 맞춤형 팩트 분석**\n"
-                            f"(전략에 부합하는 팩트만 선별하여 증명)\n\n"
-                            f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n"
-                            f"1. \n2. \n3. \n\n"
+                            f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
+                            f"**📊 {eval_horizon} 맞춤형 팩트 분석 (3x3 크로스 시그널 분석 포함)**\n\n"
+                            f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n\n"
                             f"---\n"
                             f"**🏁 최종 투자 의사결정 (Action Plan)**\n"
                             f"- **현재 투자의견:** [매수 / 유지 / 비중축소 / 손절] (신뢰도: 00%)\n"
-                            f"- **신뢰도 평가 사유:** (역전 현상 감지, 데이터 누락, 컨센서스 괴리 등 점수 산정 및 감점 사유 명시)\n"
+                            f"- **신뢰도 평가 사유:** (크로스 매트릭스 엇박자 감지 등 감점 및 산정 근거 명시)\n"
                             f"- **적정 매수가:** [000원 이하]\n"
                             f"- **목표가:** [{eval_horizon} 목표가 00원]\n"
                             f"- **시스템 손절가:** [{eval_horizon} 손절가 00원]\n"
-                            f"- **의사결정 핵심 근거 Top 3:** (1, 2, 3)\n"
-                            f"- **향후 반드시 확인해야 할 트리거 이벤트:** (예: 다음 분기 실적 등)\n"
                         )
                         
                         report = call_gemini_with_fallback(prompt)
@@ -1373,7 +1429,7 @@ with tab5:
                     conn.commit(); st.rerun()
 
             if report_text:
-                with st.expander("진단 리포트"):
+                with st.expander("진단 리포트", expanded=True):
                     st.write(report_text)
                     st.divider()
                     col_tgt, col_sl = st.columns(2)
