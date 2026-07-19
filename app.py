@@ -1474,7 +1474,7 @@ with tab6:
                     c.execute(f"DELETE FROM scrapbook WHERE id IN ({','.join(['?']*len(to_del))})", to_del)
                     conn.commit(); st.rerun()
                     
-       for row in scraps:
+        for row in scraps:
             s_id, title, s_name, ticker, s_date, analysis, m_used, saved_p, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l = row
             code = re.sub(r'[^\d]', '', ticker or "")
             price_info = price_map_scrap.get(code, {})
