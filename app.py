@@ -629,11 +629,9 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     daily_vol = tech['daily_volatility'] if tech else 0.0
     beta = tech['beta'] if tech and 'beta' in tech else 1.0
     
-    # [미래 선행 지표 우선 바인딩 패치]
     eps_val = fund.get('forward_eps_e') if fund.get('forward_eps_e') is not None else fund.get('eps')
     bps_val = fund.get('bps')
     
-    # RIM의 핵심 인풋인 expected_roe를 미래 선행 ROE(E)에서 우선 채택
     if fund.get('forward_roe_e') is not None:
         expected_roe = fund.get('forward_roe_e') / 100
     else:
@@ -721,7 +719,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             structural_warning = f"⚠️ [Value Trap 방어] 업종 PER({float_ind_per:.1f}배)이 기업의 이익성장력(PEG 한계치 {dynamic_per_cap:.1f}배) 대비 비정상적으로 높아 동적 상한선을 강제 적용했습니다."
             safe_per_cap = min(current_per * 1.5, dynamic_per_cap)
             tp_m = eps_val * safe_per_cap
-            # [패치 ⑤] 고평가 면죄부 주던 max(tp_m, current_price * 1.05) 클램프 한 줄 완벽 제거! (원칙 통일)
         else:
             fund_type = "기본 상대 가치 (업종 평균 수렴)"
             tp_m = eps_val * adjusted_ind_per
@@ -742,9 +739,8 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         matched_report = next((rep for rep in analyst_data.values() if rep.get("ticker") == ticker), None)
         if matched_report:
             tp_trend = matched_report.get("tp_trend", "유지/신규")
-            eps_e_trend = matched_report.get("eps_e_trend", "유지") # 미래 람다 확장 규격 사전 동기화
+            eps_e_trend = matched_report.get("eps_e_trend", "유지")
 
-    # 3x3 결합 매트릭스 라벨링 로직
     if "상향" in tp_trend:
         if "상향" in eps_e_trend: cross_signal, tier, penalty = "True Bull", "Tier 1 (Pass)", 0
         elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Critical Value Trap", "Tier 3 (Fatal)", -20
@@ -753,12 +749,11 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         if "상향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Turnaround", "Tier 1 (Pass)", 10
         elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Genuine Bear", "Tier 3 (Fatal)", 0
         else: cross_signal, tier, penalty = "Sentiment Driven Drop", "Tier 2 (Warning)", 0
-    else: # 유지/신규
+    else:
         if "상향" in eps_e_trend: cross_signal, tier, penalty = "Quiet Accumulation", "Tier 1 (Pass)", 5
         elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Value Trap", "Tier 2 (Warning)", -10
         else: cross_signal, tier, penalty = "Neutral", "Tier 1 (Pass)", 0
 
-    # [Hard Kill 조치] 종목 발굴 모드이고 최악의 결함(Tier 3) 상태 감지 시, 독극물 조기 차단 및 특수 객체 반환
     if is_discovery_mode and tier == "Tier 3 (Fatal)":
         return {"ticker": ticker, "name": name, "status": "KILLED", "reason": f"{cross_signal} ({tier} 치명적 리스크 제어 작동)"}
 
@@ -780,10 +775,9 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     consensus_log = ""
     if analyst_data and matched_report:
         a_target = float(matched_report.get("target_price", 0))
-       if a_target > 0 and tp_m > 0:
+        if a_target > 0 and tp_m > 0:
             divergence = (tp_m - a_target) / a_target
-            # 숫자(괴리율)와 트렌드(3x3 라벨)를 동시에 제공
-            consensus_log = f"   - ⚖️ 컨센서스 교차검증: 증권사 목표가 {a_target:,.0f}원({tp_trend}) vs 퀀트 중기 적정가 {tp_m:,.0f}원 (괴리율: {divergence*100:+.1f}%) ➡️ **[{cross_signal} / {tier}]** 판정\n"
+            consensus_log = f"   - ⚖️ 컨센서스 교차검증: 증권사 목표가 {a_target:,.0f}원({tp_trend}) vs 퀀트 중기 적정가 {tp_m:,.0f}원 (괴리율: {divergence*100:+.1f}%) ➡️ **[{cross_signal} / {tier}]** 판정 (페널티 계수: {penalty}%)\n"
 
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
@@ -1035,7 +1029,6 @@ with tab2:
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 futures = [executor.submit(process_single_ticker, t, "중기 (3~6개월)", k_factor, False, analyst_universe) for t in tickers_to_process]
-                # Filter out None values or specific status outputs
                 valid_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result() and isinstance(f.result(), dict) and f.result().get("status") == "PASSED"]
 
             tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
@@ -1154,7 +1147,6 @@ with tab4:
                 st.error("⚠️ 후보 종목 매핑 오류. 잠시 후 시도해주세요.")
                 st.stop()
 
-            # [탈락 종목 실시간 인프라 연동 바구니 선언]
             passed_results = []
             killed_logs = []
 
@@ -1173,7 +1165,6 @@ with tab4:
             max_retry = 2
             retry_count = 0
 
-            # 보충 단계 루프
             while len(passed_results) < 10 and retry_count < max_retry:
                 deficit = 10 - len(passed_results)
                 with st.spinner(f"[보충 단계] 부족분 {deficit}개 보충 및 필터링 중 (시도 {retry_count+1}/{max_retry})..."):
@@ -1192,7 +1183,6 @@ with tab4:
                                 if len(extra_tickers) >= deficit: break
                     except: pass
 
-                    # [패치 ②] 새롭게 수집된 후보군이 0개라면 무한 루프 돌지 않고 즉시 탈출
                     if not extra_tickers: 
                         break
                         
@@ -1209,7 +1199,6 @@ with tab4:
                                     passed_results.append(f_res)
                     retry_count += 1
 
-            # 세션 캐시에 분리 보존
             st.session_state.valid_results_cache = passed_results
             st.session_state.killed_results_cache = killed_logs
 
@@ -1261,13 +1250,11 @@ with tab4:
                     st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step3_prompt))
                     st.rerun()
 
-    # 화면 렌더링 영역
     if st.session_state.get('today_recommendation'):
         raw = st.session_state.today_recommendation
         cached_results = st.session_state.get('valid_results_cache', [])
         cached_killed = st.session_state.get('killed_results_cache', [])
 
-        # [관측성 확보] 조용한 실패 방지용 킬 로그 전용 아코디언 배치
         if cached_killed:
             with st.expander("🛑 [시스템 스크리닝] 3x3 매트릭스 Hard Kill 탈락 내역", expanded=False):
                 for k_item in cached_killed:
@@ -1374,7 +1361,6 @@ with tab5:
             with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
                     with st.spinner("파이썬 연산 및 수치 방어 논리 작성 중..."):
-                        # 보유종목 진단은 is_discovery_mode=False 이므로 Hard kill 없이 통과하여 3x3 정밀해설 수령
                         data_dict = process_single_ticker(ticker, eval_horizon, k_factor, False, analyst_universe)
                         if not data_dict:
                             st.error("데이터 수집 실패")
