@@ -1253,7 +1253,7 @@ with tab4:
                 for k_item in cached_killed:
                     st.error(f"**[KILLED]** 종목: `{k_item['name']}` ({k_item['ticker']}) ➡️ 사유: `{k_item['reason']}`")
 
-        with st.expander("추천 리포트", expanded=True):
+        with st.expander("추천 리포트", expanded=False):
             display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw.split("[SELECTED_TICKERS]")[0].strip())
             st.write(display_text)
 
@@ -1407,7 +1407,7 @@ with tab5:
                     conn.commit(); st.rerun()
 
             if report_text:
-                with st.expander("진단 리포트", expanded=True):
+                with st.expander("진단 리포트", expanded=False):
                     st.write(report_text)
                     st.divider()
                     col_tgt, col_sl = st.columns(2)
