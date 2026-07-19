@@ -746,7 +746,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         f"   - 참고 원본 BPS: {bps_disp_val}\n"
     )
 
-    # 롤백: 파이썬 단의 마스킹(숨김 처리)을 해제하고 모든 데이터를 항상 넘겨줌
     eps_str = f"{eps_val:,}원" if eps_val is not None else "데이터 누락"
     bps_str = f"{bps_val:,}원" if bps_val is not None else "데이터 누락"
 
@@ -801,13 +800,12 @@ if not st.session_state.realtime_cache.get("realtime_news"):
 g_data = st.session_state.realtime_cache
 
 # =======================================================
-# 상단 레이아웃: 트레이딩뷰 실시간 웹소켓 티커
+# 상단 레이아웃: 트레이딩뷰 실시간 웹소켓 티커 및 파이썬 요약 지표
 # =======================================================
 market_data = g_data.get("market_status", {})
 metrics_html = ""
 
-# 파이썬이 네이버에서 수집한 지표를 제목 옆에 나란히 배치하기 위한 HTML 포매팅
-for key in ["코스피", "코스닥"]:
+for key in ["코스피", "코스닥", "S&P 500", "원/달러 환율"]:
     if key in market_data:
         val = market_data[key].get("current", 0.0)
         diff = market_data[key].get("diff", 0.0)
@@ -817,17 +815,16 @@ for key in ["코스피", "코스닥"]:
             sign = "+" if diff > 0 else ""
             metrics_html += f"<span style='font-size:0.55em; margin-left:15px; font-weight:normal; color:#444;'><b>{key}</b> {val:,.2f} <span style='color:{color};'>({sign}{diff_pct:.2f}%)</span></span>"
 
-# 제목과 지표를 한 줄로 병합하여 출력
 st.markdown(f"### 📊 글로벌 마켓 실시간 전광판 {metrics_html}", unsafe_allow_html=True)
-# [완벽 해결 패치] 외부 송출 차단된 KRX/기준금리 빼고, 실시간 글로벌 매크로 지표로 100% 교체
+
 tv_config = {
     "symbols": [
-        { "proName": "FX_IDC:USDKRW", "title": "원/달러 환율" },
-        { "proName": "OANDA:WTICOUSD", "title": "WTI 원유" },
         { "proName": "OANDA:SPX500USD", "title": "S&P 500" },
         { "proName": "OANDA:NAS100USD", "title": "나스닥 100" },
+        { "proName": "FX_IDC:USDKRW", "title": "원/달러 환율" },
         { "proName": "BINANCE:BTCUSDT", "title": "비트코인" },
-        { "proName": "TVC:GOLD", "title": "금(Gold)" }
+        { "proName": "OANDA:XAUUSD", "title": "금(Gold)" },
+        { "proName": "OANDA:WTICOUSD", "title": "WTI 원유" }
     ],
     "showSymbolLogo": True,
     "isTransparent": False,
@@ -836,9 +833,7 @@ tv_config = {
     "locale": "kr"
 }
 
-# 설정값을 URL에 태워서 트레이딩뷰 자체 페이지를 직접 Iframe으로 불러옴
 tv_url = f"https://s.tradingview.com/embed-widget/ticker-tape/?locale=kr#{urllib.parse.quote(json.dumps(tv_config))}"
-
 components.iframe(tv_url, height=80)
 
 col_title, col_refresh = st.columns([5, 1.2])
@@ -1165,8 +1160,8 @@ with tab4:
                         f"2. [집중 전략 준수 강제] {strategy_guide}\n"
                         f"3. [숫자 일치 강제] 리포트에 기재하는 모든 가격(현재가, 목표가, 손절가 등)과 실적 수치는 **'파이썬 퀀트 엔진 연산 로그'에 찍힌 숫자를 절대 반올림하지 말고 똑같이 복사해서 기재**하십시오.\n"
                         f"4. [스토리텔링] 파편화된 데이터를 단순 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
-                        f"5. [자기 검증] 긍정적 편향을 깨기 위해, 스스로 도출한 결론이 틀릴 가능성(반대 논리 및 Value Trap 리스크) 3가지를 반드시 서술하십시오.\n"
-                        f"6. [액션 플랜] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 확인해야 할 이벤트를 반드시 요약하십시오.\n\n"
+                        f"5. [자기 검증 - 치명적 리스크 강제 출력] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 만약 파이썬 팩트 데이터에 '⚠️역전됨' 플래그나 '데이터 누락' 경고가 적혀 있다면, 투자 기간 관점과 무관하게 무조건 Bear Case 1순위로 강력하게 경고하십시오.\n"
+                        f"6. [액션 플랜 및 신뢰도] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 이벤트를 요약하고, 부여한 '신뢰도(%)'의 산출 근거(감점 사유 등)를 반드시 명시하십시오.\n\n"
                         f"=== 리포트 작성 포맷 ===\n"
                         f"### 🏆 1차 후보군 스크리닝 요약 (전체 평가)\n"
                         f"(검토한 전체 후보군의 종목명, 매력도 점수, 핵심 이유 1줄을 간단한 표나 리스트로 먼저 제시할 것)\n\n"
@@ -1182,6 +1177,7 @@ with tab4:
                         f"---\n"
                         f"**🏁 최종 투자 의사결정 (Action Plan)**\n"
                         f"- **현재 투자의견:** [매수 / 관망 / 비중축소] (신뢰도: 00%)\n"
+                        f"- **신뢰도 평가 사유:** (역전 현상 감지, 데이터 누락, 컨센서스 괴리 등 점수 산정 및 감점 사유 명시)\n"
                         f"- **적정 매수가:** [000원 이하]\n"
                         f"- **목표가:** [해당 기간 목표가 00원]\n"
                         f"- **손절가:** [해당 기간 손절선 00원]\n"
@@ -1326,8 +1322,8 @@ with tab5:
                             f"2. [숫자 일치 강제] 리포트에 기재하는 모든 가격(목표가/손절가) 수치는 절대 반올림하지 말고 **'팩트 데이터'에 찍힌 숫자를 1원 단위까지 100% 똑같이 복사해서 기재**하십시오.\n"
                             f"3. [계좌 진단] 계좌 수익률을 참고하여 '추가매수/유지/손절' 여부를 객관적으로 판단하십시오.\n"
                             f"4. [스토리텔링] 파편화된 데이터를 나열하지 말고, **하나의 투자 논리(Investment Story)**로 연결하여 서술하십시오.\n"
-                            f"5. [자기 검증] 스스로 도출한 결론이 틀릴 가능성(반대 논리 및 Value Trap 리스크) 3가지를 반드시 서술하십시오.\n"
-                            f"6. [액션 플랜] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 확인해야 할 이벤트를 요약하십시오.\n\n"
+                            f"5. [자기 검증 - 치명적 리스크 강제 출력] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 만약 파이썬 팩트 데이터에 '⚠️역전됨' 플래그나 '데이터 누락' 경고가 적혀 있다면, 투자 기간 관점과 무관하게 무조건 Bear Case 1순위로 강력하게 경고하십시오.\n"
+                            f"6. [액션 플랜 및 신뢰도] 마지막에 투자 의견, 매수가/목표가/손절가, 향후 이벤트를 요약하고, 부여한 '신뢰도(%)'의 산출 근거(감점 사유 등)를 반드시 명시하십시오.\n\n"
                             f"=== 리포트 작성 포맷 ===\n"
                             f"**📖 핵심 투자 스토리 (Investment Story)**\n"
                             f"({eval_horizon} 전략 관점에 맞춘 심층 분석 서술)\n\n"
@@ -1338,6 +1334,7 @@ with tab5:
                             f"---\n"
                             f"**🏁 최종 투자 의사결정 (Action Plan)**\n"
                             f"- **현재 투자의견:** [매수 / 유지 / 비중축소 / 손절] (신뢰도: 00%)\n"
+                            f"- **신뢰도 평가 사유:** (역전 현상 감지, 데이터 누락, 컨센서스 괴리 등 점수 산정 및 감점 사유 명시)\n"
                             f"- **적정 매수가:** [000원 이하]\n"
                             f"- **목표가:** [{eval_horizon} 목표가 00원]\n"
                             f"- **시스템 손절가:** [{eval_horizon} 손절가 00원]\n"
