@@ -687,7 +687,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             
             safe_per_cap = min(current_per * 1.5, dynamic_per_cap)
             tp_m = eps_val * safe_per_cap
-            tp_m = max(tp_m, current_price * 1.05) 
         else:
             fund_type = "기본 상대 가치 (업종 평균 수렴)"
             tp_m = eps_val * adjusted_ind_per
