@@ -780,9 +780,10 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     consensus_log = ""
     if analyst_data and matched_report:
         a_target = float(matched_report.get("target_price", 0))
-        if a_target > 0 and tp_m > 0:
+       if a_target > 0 and tp_m > 0:
             divergence = (tp_m - a_target) / a_target
-            consensus_log = f"   - ⚖️ 컨센서스 교차검증: 목표가 {tp_trend} / EPS {eps_e_trend} ➡️ **[{cross_signal} / {tier}]** 판정 (페널티 계수: {penalty}%)\n"
+            # 숫자(괴리율)와 트렌드(3x3 라벨)를 동시에 제공
+            consensus_log = f"   - ⚖️ 컨센서스 교차검증: 증권사 목표가 {a_target:,.0f}원({tp_trend}) vs 퀀트 중기 적정가 {tp_m:,.0f}원 (괴리율: {divergence*100:+.1f}%) ➡️ **[{cross_signal} / {tier}]** 판정\n"
 
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
