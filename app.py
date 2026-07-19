@@ -1351,7 +1351,7 @@ with tab5:
                     if current > 0 and avg_price > 0: st.markdown(f"수익률: {((current - avg_price) / avg_price * 100):+.1f}%")
             with col_price:
                 if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
-            with col_btn:
+           with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
                     with st.spinner("파이썬 연산 및 수치 방어 논리 작성 중..."):
                         data_dict = process_single_ticker(ticker, eval_horizon, k_factor, False, analyst_universe)
@@ -1361,6 +1361,14 @@ with tab5:
                             
                         extra_ctx = f"\n현재가: {current:,.0f}\n"
                         if is_owned and avg_price > 0: extra_ctx += f"[내 계좌 정보] 평단가: {avg_price:,.0f} | 현재 수익률: {((current - avg_price) / avg_price * 100):+.1f}%\n"
+
+                        # ▼▼▼ [신규 추가] 람다가 수집해둔 해당 종목의 전용 뉴스를 불러와 분석 재료에 추가합니다. ▼▼▼
+                        my_stock_news_pool = cached_data.get("my_stock_news", {})
+                        target_news = my_stock_news_pool.get(name, [])
+                        if target_news:
+                            extra_ctx += f"\n[{name} 최근 핵심 뉴스]\n"
+                            extra_ctx += "\n".join([f"- {n['title']}: {n.get('summary', '')}" for n in target_news[:5]])
+                            extra_ctx += "\n
 
                         if "단기" in eval_horizon:
                             persona_t5 = "단기 스윙 트레이더"
