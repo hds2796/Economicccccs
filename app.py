@@ -30,6 +30,7 @@ LITE_MODEL_NAME = "gemini-3.1-flash-lite"
 FALLBACK_MODEL_NAME = "gemini-3-flash-preview"
 
 db_backup_lock = threading.Lock()
+db_schema_lock = threading.Lock() # [패치 ③] DB 스키마 변경용 글로벌 락 신설
 xml_parse_lock = threading.Lock() 
 thread_local = threading.local()  
 
@@ -85,50 +86,51 @@ DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 # =======================================================
 @st.cache_resource
 def init_db():
-    connection = sqlite3.connect('market_analysis.db', check_same_thread=False, timeout=30)
-    cursor = connection.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS scrapbook (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, link TEXT, summary TEXT, analysis TEXT, scrap_date TEXT)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, stock_name TEXT)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KEY AUTOINCREMENT, calc_date TEXT, score REAL)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS dart_corp_codes (corp_code TEXT, corp_name TEXT, stock_code TEXT PRIMARY KEY)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, k_factor REAL)''')
-    
-    cursor.execute('''CREATE TABLE IF NOT EXISTS holding_companies (stock_code TEXT PRIMARY KEY, corp_name TEXT)''')
-    cursor.execute("SELECT count(*) FROM holding_companies")
-    if cursor.fetchone()[0] == 0:
-        default_holdings = [
-            ('078930', 'GS'), ('000880', '한화'), ('001040', 'CJ'), ('006260', 'LS'), 
-            ('034730', 'SK'), ('000150', '두산'), ('004800', '효성'), ('028260', '삼성물산'), 
-            ('267250', 'HD현대'), ('004990', '롯데지주'), ('002020', '코오롱'), ('000240', '한국앤컴퍼니'), 
-            ('002790', '아모레G'), ('000210', 'DL'), ('058650', '세아홀딩스'), ('000140', '하이트진로홀딩스'), 
-            ('005720', '넥센'), ('003550', 'LG')
-        ]
-        cursor.executemany("INSERT OR IGNORE INTO holding_companies (stock_code, corp_name) VALUES (?, ?)", default_holdings)
-    
-    connection.commit()
+    with db_schema_lock: # [패치 ③] 스레드 동시 진입으로 인한 SQLite Database Lock 원천 차단
+        connection = sqlite3.connect('market_analysis.db', check_same_thread=False, timeout=30)
+        cursor = connection.cursor()
+        cursor.execute('''CREATE TABLE IF NOT EXISTS scrapbook (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, link TEXT, summary TEXT, analysis TEXT, scrap_date TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, stock_name TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS sentiment_history (id INTEGER PRIMARY KEY AUTOINCREMENT, calc_date TEXT, score REAL)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS dart_corp_codes (corp_code TEXT, corp_name TEXT, stock_code TEXT PRIMARY KEY)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, k_factor REAL)''')
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS holding_companies (stock_code TEXT PRIMARY KEY, corp_name TEXT)''')
+        cursor.execute("SELECT count(*) FROM holding_companies")
+        if cursor.fetchone()[0] == 0:
+            default_holdings = [
+                ('078930', 'GS'), ('000880', '한화'), ('001040', 'CJ'), ('006260', 'LS'), 
+                ('034730', 'SK'), ('000150', '두산'), ('004800', '효성'), ('028260', '삼성물산'), 
+                ('267250', 'HD현대'), ('004990', '롯데지주'), ('002020', '코오롱'), ('000240', '한국앤컴퍼니'), 
+                ('002790', '아모레G'), ('000210', 'DL'), ('058650', '세아홀딩스'), ('000140', '하이트진로홀딩스'), 
+                ('005720', '넥xen'), ('003550', 'LG')
+            ]
+            cursor.executemany("INSERT OR IGNORE INTO holding_companies (stock_code, corp_name) VALUES (?, ?)", default_holdings)
+        
+        connection.commit()
 
-    columns_to_add = [
-        ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
-        ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("portfolio", "report_text", "TEXT"),
-        ("portfolio", "tp_s", "REAL DEFAULT 0.0"), ("portfolio", "tp_m", "REAL DEFAULT 0.0"), ("portfolio", "tp_l", "REAL DEFAULT 0.0"), 
-        ("portfolio", "bp", "REAL DEFAULT 0.0"),
-        ("portfolio", "sl_s", "REAL DEFAULT 0.0"), ("portfolio", "sl_m", "REAL DEFAULT 0.0"), ("portfolio", "sl_l", "REAL DEFAULT 0.0"), 
-        ("scrapbook", "stock_name", "TEXT"), ("scrapbook", "ticker", "TEXT"),
-        ("scrapbook", "saved_price", "REAL DEFAULT 0.0"), 
-        ("scrapbook", "target_price", "REAL DEFAULT 0.0"), ("scrapbook", "target_price_mid", "REAL DEFAULT 0.0"), ("scrapbook", "target_price_long", "REAL DEFAULT 0.0"),
-        ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0"), 
-        ("scrapbook", "sl_s", "REAL DEFAULT 0.0"), ("scrapbook", "sl_m", "REAL DEFAULT 0.0"), ("scrapbook", "sl_l", "REAL DEFAULT 0.0"), 
-        ("portfolio", "model_used", "TEXT"), ("portfolio", "report_time", "TEXT"), 
-        ("portfolio", "ticker", "TEXT"), ("scrapbook", "model_used", "TEXT"),
-        ("portfolio", "user_id", "TEXT DEFAULT 'dongsu'"), ("scrapbook", "user_id", "TEXT DEFAULT 'dongsu'")
-    ]
-    for table, col, dtype in columns_to_add:
-        try: 
-            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}")
-            connection.commit()
-        except Exception:
-            pass
-    return connection
+        columns_to_add = [
+            ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
+            ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("portfolio", "report_text", "TEXT"),
+            ("portfolio", "tp_s", "REAL DEFAULT 0.0"), ("portfolio", "tp_m", "REAL DEFAULT 0.0"), ("portfolio", "tp_l", "REAL DEFAULT 0.0"), 
+            ("portfolio", "bp", "REAL DEFAULT 0.0"),
+            ("portfolio", "sl_s", "REAL DEFAULT 0.0"), ("portfolio", "sl_m", "REAL DEFAULT 0.0"), ("portfolio", "sl_l", "REAL DEFAULT 0.0"), 
+            ("scrapbook", "stock_name", "TEXT"), ("scrapbook", "ticker", "TEXT"),
+            ("scrapbook", "saved_price", "REAL DEFAULT 0.0"), 
+            ("scrapbook", "target_price", "REAL DEFAULT 0.0"), ("scrapbook", "target_price_mid", "REAL DEFAULT 0.0"), ("scrapbook", "target_price_long", "REAL DEFAULT 0.0"),
+            ("scrapbook", "buy_recommend_price", "REAL DEFAULT 0.0"), 
+            ("scrapbook", "sl_s", "REAL DEFAULT 0.0"), ("scrapbook", "sl_m", "REAL DEFAULT 0.0"), ("scrapbook", "sl_l", "REAL DEFAULT 0.0"), 
+            ("portfolio", "model_used", "TEXT"), ("portfolio", "report_time", "TEXT"), 
+            ("portfolio", "ticker", "TEXT"), ("scrapbook", "model_used", "TEXT"),
+            ("portfolio", "user_id", "TEXT DEFAULT 'dongsu'"), ("scrapbook", "user_id", "TEXT DEFAULT 'dongsu'")
+        ]
+        for table, col, dtype in columns_to_add:
+            try: 
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}")
+                connection.commit()
+            except Exception:
+                pass
+        return connection
 
 conn = init_db()
 c = conn.cursor()
@@ -138,7 +140,9 @@ def fetch_holding_ticker_list_from_db():
     local_conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
     local_c = local_conn.cursor()
     local_c.execute("SELECT stock_code FROM holding_companies")
-    return [row[0] for row in local_c.fetchall()]
+    res = [row[0] for row in local_c.fetchall()]
+    local_conn.close()
+    return res
 
 @st.cache_resource
 def initialize_dart_codes():
@@ -589,7 +593,9 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     news_raw = fetch_stock_news(name, display=4)
     
     news_text = "\n".join([f"- 제목: {n['title']}\n  내용: {n.get('summary', '요약 없음')}" for n in news_raw])
-    lite_summary = call_gemini_lite_summary(f"뉴스/공시 요약:\n{dart_info}\n{news_text}")
+    
+    # [패치 ①] 글로벌 바구니 공유 차단을 위해 종목 단독 뉴스로만 고정 요약 수행
+    lite_summary = call_gemini_lite_summary(f"[{name}] 관련 기업 공시 및 뉴스 정보 요약:\n{dart_info}\n{news_text}")
     
     current_price = tech['current'] if tech else 0.0
     daily_vol = tech['daily_volatility'] if tech else 0.0
@@ -777,10 +783,19 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 # 상태 변수 선언 및 상단 레이아웃 제어
 # =======================================================
 cached_data = fetch_cached_global_data() or {}
+
+# [패치 ④] 람다 지연으로 인한 딕셔너리 미생성 및 렌더링 폭발(KeyError) 방지용 완벽 방어 초깃값 선언
 if "realtime_cache" not in st.session_state: 
     st.session_state.realtime_cache = {
-        "market_status": cached_data.get("market_status", {}), "realtime_news": cached_data.get("realtime_news", []),
-        "sectors": cached_data.get("sectors") or cached_data.get("sector_news", {}), "updated_at": cached_data.get("updated_at", "대기 중")
+        "market_status": cached_data.get("market_status") or {
+            "코스피": {"current": 0.0, "diff": 0.0, "diff_pct": 0.0},
+            "코스닥": {"current": 0.0, "diff": 0.0, "diff_pct": 0.0},
+            "S&P 500": {"current": 0.0, "diff": 0.0, "diff_pct": 0.0},
+            "원/달러 환율": {"current": 0.0, "diff": 0.0, "diff_pct": 0.0}
+        }, 
+        "realtime_news": cached_data.get("realtime_news", []),
+        "sectors": cached_data.get("sectors") or cached_data.get("sector_news", {}), 
+        "updated_at": cached_data.get("updated_at", "대기 중")
     }
 
 def merge_realtime_data(new_data):
@@ -793,8 +808,8 @@ def merge_realtime_data(new_data):
     merged_sec = {sec: dedupe_news(new_sec.get(sec, []) + old_sec.get(sec, [])) for sec in set(old_sec.keys()).union(new_sec.keys())}
     st.session_state.realtime_cache = {"market_status": old_market, "realtime_news": merged_news, "sectors": merged_sec, "updated_at": new_data.get("updated_at", old.get("updated_at", "알 수 없음"))}
 
-if not st.session_state.realtime_cache.get("realtime_news"):
-    with st.spinner("데이터 로딩 중..."):
+if not st.session_state.realtime_cache.get("realtime_news") or st.session_state.realtime_cache["market_status"]["코스피"]["current"] == 0.0:
+    with st.spinner("데이터 인프라 초기화 중..."):
         if new_data := fetch_realtime_data_direct(): merge_realtime_data(new_data)
 
 g_data = st.session_state.realtime_cache
@@ -1121,7 +1136,10 @@ with tab4:
                                 if len(extra_tickers) >= deficit: break
                     except: pass
 
-                    if not extra_tickers: break
+                    # [패치 ②] 만약 추가로 발굴된 신규 티커가 0개라면 무의미한 loop 돌지 않고 즉시 탈출(Break) 처리
+                    if not extra_tickers: 
+                        break
+                        
                     tried_tickers.update(extra_tickers)
 
                     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
@@ -1131,7 +1149,7 @@ with tab4:
                     retry_count += 1
 
             if len(valid_results) == 0:
-                st.warning("⚠️ 2회 재시도 보충을 진행했으나, 후보군 전부 밸류에이션상 상승여력이 없어 추천에서 제외되었습니다.")
+                st.warning("⚠️ 후보군 전부 밸류에이션상 상승여력이 없어 추천에서 제외되었습니다.")
                 st.session_state.today_recommendation = ""
                 st.session_state.valid_results_cache = []
             else:
