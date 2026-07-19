@@ -122,7 +122,8 @@ def init_db():
             ("scrapbook", "sl_s", "REAL DEFAULT 0.0"), ("scrapbook", "sl_m", "REAL DEFAULT 0.0"), ("scrapbook", "sl_l", "REAL DEFAULT 0.0"), 
             ("portfolio", "model_used", "TEXT"), ("portfolio", "report_time", "TEXT"), 
             ("portfolio", "ticker", "TEXT"), ("scrapbook", "model_used", "TEXT"),
-            ("portfolio", "user_id", "TEXT DEFAULT 'dongsu'"), ("scrapbook", "user_id", "TEXT DEFAULT 'dongsu'")
+            ("portfolio", "user_id", "TEXT DEFAULT 'dongsu'"), ("scrapbook", "user_id", "TEXT DEFAULT 'dongsu'"),
+            ("portfolio", "risk_flags", "INTEGER DEFAULT -1"), ("scrapbook", "risk_flags", "INTEGER DEFAULT -1")
         ]
         for table, col, dtype in columns_to_add:
             try: 
@@ -294,6 +295,40 @@ def call_gemini_stream_with_fallback(prompt):
             except Exception as e2: 
                 yield f"\n\n❌ [최종 호출 실패] 원인: {str(e2)}"
     finally: _gemini_semaphore.release()
+
+# =======================================================
+# [반자동 고도화] 스크랩북 연동형 동적 신뢰도 캘리브레이션 함수
+# =======================================================
+@st.cache_data(ttl=3600)
+def get_calibrated_confidence():
+    """탭6 스크랩 데이터에서 risk_flags별 실측 도달률 및 모수 인덱스 딕셔너리를 직접 가공"""
+    try:
+        local_conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
+        local_c = local_conn.cursor()
+        local_c.execute("SELECT risk_flags, saved_price, target_price, sl_s, scrap_date, ticker FROM scrapbook WHERE risk_flags >= 0")
+        rows = local_c.fetchall()
+        local_conn.close()
+    except:
+        return {}
+    
+    bucket = {}
+    for rf, saved_p, tp_s, sl_s, s_date, ticker in rows:
+        code = re.sub(r'[^\d]', '', ticker or "")
+        max_high, min_low = get_historical_high_low(code, s_date)
+        bucket.setdefault(rf, {"total": 0, "hit": 0})
+        bucket[rf]["total"] += 1
+        if tp_s > 0 and max_high >= tp_s: 
+            bucket[rf]["hit"] += 1
+    
+    result = {}
+    for rf, b in bucket.items():
+        # 하드캡 가이드: 표본 5건 이상 쌓였을 때만 실질 확률 교정 앵커로 채택
+        if b["total"] >= 5:   
+            result[rf] = {
+                "rate": round(b["hit"] / b["total"] * 100),
+                "count": b["total"]
+            }
+    return result
 
 # =======================================================
 # CAPM 전용 매크로 지표 추출
@@ -734,7 +769,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         if matched_report:
             tp_trend = matched_report.get("tp_trend", "유지/신규")
 
-    # 기존 강제 "유지" 할당을 제거하고 과거 EPS 히스토리를 기반으로 동적 판정
     eps_e_trend = "유지"
     if len(eps_history) >= 2:
         if eps_history[-1] > eps_history[-2] * 1.05:
@@ -767,9 +801,33 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         else:
             if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None 
 
-    flag_m = "정상" if tp_s <= tp_m else f"⚠️역전됨 (단기 모멘텀 {tp_s:,.0f}원 대비 중기 가치가 낮음)"
-    flag_l = "정상" if tp_m <= tp_l else f"⚠️역전됨 (중기 가치 대비 장기 RIM 가치({tp_l:,.0f}원)가 낮음)"
+    # =======================================================
+    # [반자동 가중치 설계] 시스템 실측 신뢰도 평가 연산부
+    # =======================================================
+    is_flag_m_inv = (tp_s > tp_m and tp_m > 0)
+    is_flag_l_inv = (tp_m > tp_l and tp_l > 0)
     
+    flag_m = f"⚠️역전됨 (단기 모멘텀 {tp_s:,.0f}원 대비 중기 가치가 낮음)" if is_flag_m_inv else "정상"
+    flag_l = f"⚠️역전됨 (중기 가치 대비 장기 RIM 가치({tp_l:,.0f}원)가 낮음)" if is_flag_l_inv else "정상"
+
+    risk_flags = sum([
+        tier == "Tier 3 (Fatal)",
+        tier == "Tier 2 (Warning)",
+        is_flag_l_inv,
+        is_flag_m_inv,
+        bool(structural_warning),
+        data_incomplete,
+    ])
+    
+    # [반자동 핵심] 실시간 캐시 DB에서 구간 적중률 호출 및 조건적 바인딩
+    calibrated_map = get_calibrated_confidence()
+    if risk_flags in calibrated_map:
+        system_confidence = calibrated_map[risk_flags]["rate"]
+        confidence_note = f" (실측 {calibrated_map[risk_flags]['count']}건 기반 자동 갱신)"
+    else:
+        system_confidence = max(30, 90 - risk_flags * 15)
+        confidence_note = " (표본 부족, 예비 추정치)"
+
     struct_warn_line = f"   - 구조적 분석: {structural_warning}\n" if structural_warning else ""
     bps_disp_val = f"{bps_val:,.0f}원" if bps_val is not None else "데이터 누락"
 
@@ -793,6 +851,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         f"   - 중기 시그널 상태: {flag_m}\n"
         f"   - 장기 시그널 상태: {flag_l}\n"
         f"   - 🧭 3x3 트렌드 매트릭스 판정: {tier} | 시그널: {cross_signal}\n"
+        f"   - 🧮 시스템 신뢰도 점수(파이썬 산출, 감점요인 {risk_flags}개): {system_confidence}%{confidence_note}\n"
         f"{consensus_log}"
         f"   - 참고 원본 BPS: {bps_disp_val}\n"
     )
@@ -822,6 +881,9 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         "current_price": current_price,
         "conservative_bps": conservative_bps,
         "tech_data_str": tech_data_str,
+        "is_flag_m_inv": is_flag_m_inv,
+        "is_flag_l_inv": is_flag_l_inv,
+        "risk_flags": risk_flags,
         "status": "PASSED"
     }
 
@@ -1228,14 +1290,14 @@ with tab4:
                         f"=== ⚠️ 시니어 애널리스트 분석 지침 ===\n"
                         f"1. 전달받은 전체 후보군 데이터를 비교 평가하여 최상위 Top 3 종목만 엄선해 서술하십시오.\n"
                         f"2. {strategy_guide}\n"
-                        f"3. 결론을 맨 앞에 배치하는 구조(BLUF)를 준수하십시오. 투자의견, 신뢰도, 핵심 이유를 먼저 출력한 뒤 스토리를 풀어내십시오.\n"
+                        f"3. 결론을 맨 앞에 배치하는 구조(BLUF)를 준수하십시오. 투자의견, 핵심 이유를 먼저 출력한 뒤 스토리를 풀어내십시오.\n"
                         f"4. 팩트 데이터 로그에 적힌 3x3 '교차검증 시그널'(예: True Bull 등) 인용 시, 괄호 안에 있는 친절한 해설을 포함하여 사용자가 쉽게 이해하도록 작성하십시오.\n"
                         f"5. [자기 검증 - 치명적 리스크] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 로그에 Tier 2 경고가 있다면 이를 1순위로 강력 경고하십시오.\n\n"
                         f"=== 리포트 작성 포맷 ===\n"
                         f"### 🏆 1차 후보군 스크리닝 요약 (전체 평가)\n\n"
                         f"<ANALYSIS_티커숫자>\n"
                         f"### 📌 [종목명] (티커)\n"
-                        f"**🎯 투자의견: [매수 / 관망 / 비중축소]** (신뢰도: 00%)\n"
+                        f"**🎯 투자의견: [매수 / 관망 / 비중축소]** (신뢰도: 팩트 데이터 로그의 '시스템 신뢰도 점수'를 그대로 인용)\n"
                         f"- **현재가:** 000원\n"
                         f"- **목표가:** [해당 기간 목표가 00원]\n"
                         f"- **손절가:** [해당 기간 손절선 00원]\n"
@@ -1293,12 +1355,18 @@ with tab4:
                                 c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}<br>장: {tp_l:,.0f}", unsafe_allow_html=True)
                                 c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
 
+                                # 파이썬 강제 게이트키퍼 경고 (Tab 4)
+                                if tick_data.get('is_flag_l_inv'):
+                                    st.warning(f"⚠️ **장기 시그널 역전**\n중기 목표가({tp_m:,.0f}원)가 장기 가치({tp_l:,.0f}원)를 초과. 구조적 리스크 추적 요망.")
+                                if tick_data.get('is_flag_m_inv'):
+                                    st.warning(f"⚠️ **중기 시그널 역전**\n단기 목표가({tp_s:,.0f}원)가 중기 가치({tp_m:,.0f}원)를 초과.")
+
                                 if st.button("스크랩", key=f"rec_s_{tick}", use_container_width=True):
                                     analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw, re.DOTALL)
                                     specific_analysis = analysis_match.group(1).strip() if analysis_match else display_text
 
-                                    c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                              (f"{name} 퀀트 심층분석", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, current, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user))
+                                    c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id, risk_flags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                              (f"{name} 퀀트 심층분석", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, current, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user, tick_data.get('risk_flags', -1)))
                                     conn.commit()
                                     st.success(f"✅ 리포트 스크랩 완료!")
 
@@ -1328,7 +1396,7 @@ with tab5:
             st.session_state["input_stock_name"], st.session_state["input_avg_price"], st.session_state["input_quantity"] = "", "0", 0
             st.rerun()
 
-    c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, model_used, report_time, ticker FROM portfolio WHERE user_id = ?", (current_user,))
+    c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, model_used, report_time, ticker, risk_flags FROM portfolio WHERE user_id = ?", (current_user,))
     portfolios = c.fetchall()
     
     if portfolios:
@@ -1345,7 +1413,7 @@ with tab5:
         my_stock_news_pool = cached_data.get("my_stock_news", {}) 
 
         for p in portfolios:
-            p_id, name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, model_used, report_time, ticker = p
+            p_id, name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, model_used, report_time, ticker, p_risk_flags = p
             code = re.sub(r'[^\d]', '', ticker or "")
             price_info = price_map_watch.get(code, {})
             current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
@@ -1398,7 +1466,7 @@ with tab5:
                             f"4. 파이썬 로그에 찍힌 3x3 크로스 매트릭스 시그널(예: Hidden Value Trap 등) 인용 시, 괄호 안에 있는 뜻풀이를 덧붙여 직관적으로 이해할 수 있게 하십시오.\n"
                             f"5. [자기 검증 - 치명적 리스크 강제 출력] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 만약 파이썬 로그에 Tier 2 경고가 적혀 있다면 무조건 Bear Case 1순위로 경고하십시오.\n\n"
                             f"=== 리포트 작성 포맷 ===\n"
-                            f"**🎯 투자의견: [매수 / 유지 / 비중축소 / 손절]** (신뢰도: 00%)\n"
+                            f"**🎯 투자의견: [매수 / 유지 / 비중축소 / 손절]** (신뢰도: 팩트 데이터 로그의 '시스템 신뢰도 점수'를 그대로 인용)\n"
                             f"- **현재가:** 000원\n"
                             f"- **목표가:** [{eval_horizon} 목표가 00원]\n"
                             f"- **시스템 손절가:** [{eval_horizon} 손절가 00원]\n"
@@ -1415,8 +1483,8 @@ with tab5:
                         n_tp_s, n_tp_m, n_tp_l = data_dict['tp_s'], data_dict['tp_m'], data_dict['tp_l']
                         n_sl_s, n_sl_m, n_sl_l = data_dict['sl_s'], data_dict['sl_m'], data_dict['sl_l']
 
-                        c.execute("UPDATE portfolio SET report_text=?, tp_s=?, tp_m=?, tp_l=?, bp=?, sl_s=?, sl_m=?, sl_l=?, model_used=?, report_time=? WHERE id=?", 
-                                  (report, n_tp_s, n_tp_m, n_tp_l, current, n_sl_s, n_sl_m, n_sl_l, MODEL_NAME, datetime.now().strftime("%Y-%m-%d %H:%M"), p_id))
+                        c.execute("UPDATE portfolio SET report_text=?, tp_s=?, tp_m=?, tp_l=?, bp=?, sl_s=?, sl_m=?, sl_l=?, model_used=?, report_time=?, risk_flags=? WHERE id=?", 
+                                  (report, n_tp_s, n_tp_m, n_tp_l, current, n_sl_s, n_sl_m, n_sl_l, MODEL_NAME, datetime.now().strftime("%Y-%m-%d %H:%M"), data_dict.get('risk_flags', -1), p_id))
                         conn.commit(); st.rerun()
             
             with col_del:
@@ -1447,6 +1515,12 @@ with tab5:
 
             if report_text:
                 with st.expander("진단 리포트", expanded=False):
+                    # 파이썬 게이트키퍼 가치 역전 하드코딩 표출 (Tab 5)
+                    if tp_m > tp_l and tp_l > 0:
+                        st.warning(f"⚠️ 시스템 경고: 중기 적정가({tp_m:,.0f}원)가 장기 RIM 내재가치({tp_l:,.0f}원)를 초과했습니다 (장기 가치 선행 역전 현상). AI 해설과 독립된 엔진 자체적 리스크 신호이므로 필히 확인하십시오.")
+                    if tp_s > tp_m and tp_m > 0:
+                        st.warning(f"⚠️ 시스템 경고: 단기 밴드 상단({tp_s:,.0f}원)이 중기 적정가({tp_m:,.0f}원)를 초과했습니다 (중기 모멘텀 역전 현상).")
+                        
                     st.write(report_text)
                     st.divider()
                     col_tgt, col_sl = st.columns(2)
@@ -1456,8 +1530,8 @@ with tab5:
                         st.markdown(f"**🔴 파이썬 연산 리스크 규격 (k={k_factor:.1f})**\n* **단기 손절선:** {sl_s:,.0f}원\n* **중기 손절선:** {sl_m:,.0f}원\n* **장기 손절선:** {sl_l:,.0f}원")
                     
                     if st.button("스크랩북에 저장하여 가격 추적하기", key=f"scrap_t5_{p_id}", use_container_width=True):
-                        c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                  (f"{name} 관심종목 진단", report_text, name, ticker, current, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), model_used, current_user))
+                        c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id, risk_flags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                  (f"{name} 관심종목 진단", report_text, name, ticker, current, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), model_used, current_user, p_risk_flags))
                         conn.commit(); st.success("스크랩북 저장 완료")
             st.divider()
 
@@ -1466,7 +1540,7 @@ with tab6:
     c.execute("""
         SELECT id, title, stock_name, ticker, scrap_date, analysis, model_used, 
                saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, 
-               sl_s, sl_m, sl_l 
+               sl_s, sl_m, sl_l, risk_flags
         FROM scrapbook 
         WHERE user_id = ? 
         ORDER BY id DESC
@@ -1481,6 +1555,9 @@ with tab6:
         stop_out_count_s, stop_out_count_m = 0, 0
         avg_current_yield = 0.0
         
+        # [실측 매핑 인프라] 버킷 분할 정의
+        bucket_stats = {}
+
         for row in scraps:
             s_saved_p, s_tp_s, s_tp_m, s_sl_s, s_sl_m, s_date = row[7], row[8], row[9], row[12], row[13], row[4]
             c_code = re.sub(r'[^\d]', '', row[3] or "")
@@ -1494,6 +1571,15 @@ with tab6:
                 if s_sl_s > 0 and min_low <= s_sl_s and min_low > 0: stop_out_count_s += 1
                 if s_sl_m > 0 and min_low <= s_sl_m and min_low > 0: stop_out_count_m += 1
                 
+            # 신뢰도 보정 연산용 risk_flags 그룹핑 바인딩
+            rf = row[15]
+            if rf is not None and rf >= 0:
+                if rf not in bucket_stats:
+                    bucket_stats[rf] = {"total": 0, "hit": 0, "stop": 0}
+                bucket_stats[rf]["total"] += 1
+                if s_tp_s > 0 and max_high >= s_tp_s: bucket_stats[rf]["hit"] += 1
+                if s_sl_s > 0 and min_low <= s_sl_s: bucket_stats[rf]["stop"] += 1
+
         avg_current_yield = avg_current_yield / total_evals if total_evals > 0 else 0.0
         
         with st.container(border=True):
@@ -1506,6 +1592,25 @@ with tab6:
             
         st.divider()
 
+        # [실측 통계 시각화] 자가 튜닝 진척도 가시화 대시보드
+        st.markdown("### 📊 위험 신호 개수별 실측 적중률 (신뢰도 자가 튜닝 인프라)")
+        if not bucket_stats:
+            st.info("실측 데이터를 집계할 유효 스크랩 팩트 로그(risk_flags 컬럼 포함)가 부족합니다. 스크랩이 지속되면 확률이 조율됩니다.")
+        else:
+            cols_rf = st.columns(max(len(bucket_stats), 4))
+            for idx, rf in enumerate(sorted(bucket_stats.keys())):
+                b = bucket_stats[rf]
+                if idx < len(cols_rf):
+                    with cols_rf[idx]:
+                        if b["total"] < 5:
+                            st.caption(f"**위험 신호 {rf}개**<br>샘플 {b['total']}건 누적<br>*(통계 신뢰도 구축 중, 최소 5건 필요)*", unsafe_allow_html=True)
+                        else:
+                            hit_rate = b["hit"] / b["total"] * 100
+                            stop_rate = b["stop"] / b["total"] * 100
+                            st.metric(f"위험 신호 {rf}개 (n={b['total']})", f"목표도달 {hit_rate:.0f}%", f"손절이탈 {stop_rate:.0f}%", delta_color="off")
+        
+        st.divider()
+
         col_bulk_scrap, _ = st.columns([2, 8])
         with col_bulk_scrap:
             if st.button("🗑️ 선택 항목 삭제", key="bulk_del_t6", use_container_width=True):
@@ -1514,7 +1619,7 @@ with tab6:
                     conn.commit(); st.rerun()
                     
         for row in scraps:
-            s_id, title, s_name, ticker, s_date, analysis, m_used, saved_p, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l = row
+            s_id, title, s_name, ticker, s_date, analysis, m_used, saved_p, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, risk_flags = row
             code = re.sub(r'[^\d]', '', ticker or "")
             price_info = price_map_scrap.get(code, {})
             current_p = price_info.get("current", 0.0)
@@ -1542,14 +1647,20 @@ with tab6:
                         
                     m_col3.markdown(f"**손절가 라인**<br>단기: <span style='color:red;'>{sl_s:,.0f}</span><br>중기: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
                     m_col4.markdown(f"**목표가 밴드**<br>단기: {tp_s:,.0f}<br>중기: {tp_m:,.0f}", unsafe_allow_html=True)
+
+                    # 파이썬 게이트키퍼 과거 저장 시점 역전 경고 강제 출력 (Tab 6)
+                    if tp_m > tp_l and tp_l > 0:
+                        st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 '중기 가치 > 장기 RIM 가치' 역전 플래그 상태였습니다.")
+                    if tp_s > tp_m and tp_m > 0:
+                        st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 '단기 가치 > 중기 가치' 역전 플래그 상태였습니다.")
                     
                     if current_p > 0 and tp_s > 0:
                         pct_s = (current_p / tp_s) * 100
                         st.progress(min(int(pct_s), 100), text=f"단기 목표가 대비 진행률: **{pct_s:.1f}%**")
                         if min_low > 0 and min_low <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 현재 반등했더라도 시스템 룰에 따른 리뷰가 필요합니다.")
+                            st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 현재 주가 흐름과 별개로 리스크 위반 이력이 존재합니다.")
                         elif current_p <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 손절을 고려하십시오.")
+                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 규칙에 의거해 청산을 고려하십시오.")
                     
                     st.markdown("---")
                     st.write(analysis)
