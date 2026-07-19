@@ -1335,6 +1335,7 @@ with tab5:
 
         price_map_watch = fetch_current_prices([p[15] for p in portfolios if p[15]])
         analyst_universe = cached_data.get("analyst_universe", {})
+        my_stock_news_pool = cached_data.get("my_stock_news", {})
 
         for p in portfolios:
             p_id, name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, model_used, report_time, ticker = p
