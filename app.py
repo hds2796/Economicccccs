@@ -311,7 +311,12 @@ def get_calibrated_confidence():
         return {}
     
     bucket = {}
-    for rf, saved_p, tp_s, sl_s, s_date, ticker in rows:
+    for rf_raw, saved_p, tp_s, sl_s, s_date, ticker in rows:
+        try:
+            rf = int(rf_raw)
+        except (ValueError, TypeError):
+            continue 
+            
         code = re.sub(r'[^\d]', '', ticker or "")
         max_high, min_low = get_historical_high_low(code, s_date)
         bucket.setdefault(rf, {"total": 0, "hit": 0})
@@ -511,7 +516,12 @@ def get_technical_data(code):
         returns = df_stock["stock_return"].dropna()
         
         current_price = prices[-1]
-        daily_volatility = returns.iloc[-20:].std() if len(returns) >= 20 else 0.0
+        
+        # [개선 적용] 단순 표준편차 -> 지수형 가중 이동평균(EWMA) 표준편차로 변동성 산출
+        if len(returns) >= 20:
+            daily_volatility = returns.ewm(span=20, adjust=False).std().iloc[-1]
+        else:
+            daily_volatility = 0.0
         
         df_series = pd.Series(prices)
         macd = df_series.ewm(span=12, adjust=False).mean() - df_series.ewm(span=26, adjust=False).mean()
@@ -688,12 +698,21 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     sl_m = current_price * (1 - min(user_k * daily_vol * np.sqrt(60), 0.30)) if daily_vol > 0 else current_price * 0.90
     sl_l = current_price * (1 - min(user_k * daily_vol * np.sqrt(250), 0.50)) if daily_vol > 0 else current_price * 0.80
     tp_s = current_price * min(1 + user_k * daily_vol * np.sqrt(20), 1.25) if daily_vol > 0 else current_price * 1.05
+    
     rf = get_risk_free_rate()
+    
+    # [개선 적용] 시가총액/유동성이 낮은 고위험군에 동적 사이즈 프리미엄 반영 (대용치: 고베타 or 고변동성)
+    risk_premium = 0.0
+    if beta > 1.2 or daily_vol > 0.035:
+        risk_premium = 0.02
 
     holding_ticker_list = fetch_holding_ticker_list_from_db()
     is_holding = any(kw in name for kw in ['지주', '홀딩스']) or (ticker in holding_ticker_list)
     
     structural_warning = ""
+
+    # [개선 적용] Ohlson 모델의 초과수익 지속계수(omega) 도입
+    omega_val = 0.8 if is_holding else 0.7 
 
     if bps_val is None:
         tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
@@ -713,9 +732,9 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         else:
             structural_warning = f"⚠️ [지주사 디스카운트] 타겟 PBR 0.5 수준({tp_m:,.0f}원) 앵커링."
             
-        required_return = rf + (beta * 0.06) 
-        tp_l = effective_bps + (effective_bps * (expected_roe - required_return) / required_return)
-        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f})"
+        required_return = rf + (beta * 0.06) + risk_premium
+        tp_l = effective_bps + (effective_bps * (expected_roe - required_return) / (1 + required_return - omega_val))
+        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, \u03C9 {omega_val})"
         conservative_bps = effective_bps
         data_incomplete = False
         
@@ -736,29 +755,31 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         data_incomplete = False
         
     else:
-        growth_pct = max(eps_growth * 100, 5.0) 
-        dynamic_per_cap = max(8.0, min(growth_pct * 1.2, 40.0)) 
+        # [개선 적용] PEG 동적 캡의 비선형 스케일링 (기저효과 억제)
+        growth_pct_val = max(eps_growth * 100, 5.0)
+        dynamic_per_cap = max(8.0, min(growth_pct_val * 1.2, 40.0)) 
 
-        adjusted_ind_per = float_ind_per * (1 + eps_growth) if float_ind_per > 0 else dynamic_per_cap
+        adjusted_ind_per = float_ind_per * (1 + np.log1p(max(0, eps_growth))) if float_ind_per > 0 else dynamic_per_cap
         current_per = (current_price / eps_val)
         
-        if float_ind_per > (dynamic_per_cap * 1.5):
-            fund_type = "상대 가치 (PEG 동적 캡 적용)"
-            structural_warning = f"⚠️ [Value Trap 방어] 업종 PER({float_ind_per:.1f}배)이 기업의 이익성장력(PEG 한계치 {dynamic_per_cap:.1f}배) 대비 비정상적으로 높아 동적 상한선을 강제 적용했습니다."
-            safe_per_cap = min(current_per * 1.5, dynamic_per_cap)
+        safe_per_cap = min(current_per * 1.5, float_ind_per * 1.5 if float_ind_per > 0 else 40.0, dynamic_per_cap)
+        
+        if adjusted_ind_per > safe_per_cap:
+            fund_type = "상대 가치 (비선형 PEG 동적 캡 적용)"
+            structural_warning = f"⚠️ [Value Trap 방어] 환상적인 이익성장 기저효과 필터링 작동. 한계 PER {safe_per_cap:.1f}배 강제 제한."
             tp_m = eps_val * safe_per_cap
         else:
-            fund_type = "기본 상대 가치 (업종 평균 수렴)"
+            fund_type = "기본 상대 가치 (로그 스케일 업종 평균 수렴)"
             tp_m = eps_val * adjusted_ind_per
             
-        required_return = rf + (beta * 0.06) 
-        tp_l = bps_val + (bps_val * (expected_roe - required_return) / required_return)
-        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f})"
+        required_return = rf + (beta * 0.06) + risk_premium
+        tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
+        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, \u03C9 {omega_val})"
         conservative_bps = bps_val
         data_incomplete = False
 
     # =======================================================
-    # [3x3 결합 트렌드 매트릭스 & Tier 필터 - 동적 실적 계산 연동]
+    # [3x3 결합 트렌드 매트릭스 & Tier 필터]
     # =======================================================
     tp_trend = "유지/신규"
     
@@ -800,7 +821,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None 
 
     # =======================================================
-    # [시스템 결정론적 신뢰도 점수 및 역전 플래그 산출]
+    # [반자동 가중치 설계] 시스템 실측 신뢰도 평가 연산부
     # =======================================================
     is_flag_m_inv = (tp_s > tp_m and tp_m > 0)
     is_flag_l_inv = (tp_m > tp_l and tp_l > 0)
@@ -808,9 +829,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     flag_m = f"⚠️역전됨 (단기 모멘텀 {tp_s:,.0f}원 대비 중기 가치가 낮음)" if is_flag_m_inv else "정상"
     flag_l = f"⚠️역전됨 (중기 가치 대비 장기 RIM 가치({tp_l:,.0f}원)가 낮음)" if is_flag_l_inv else "정상"
 
-    # --------------------------------=======================----------------
-    # [신규 추가] 파이썬 연산 단에서 구체적인 감점 사유 추적 텍스트 생성
-    # --------------------------------=======================----------------
     confidence_reasons = []
     if tier == "Tier 3 (Fatal)": confidence_reasons.append("3x3 매트릭스 치명적 위험 침체 국면(Tier 3) 진입")
     elif tier == "Tier 2 (Warning)": confidence_reasons.append("3x3 매트릭스 밸류 트랩 및 심리 과매도 경고 국면(Tier 2) 진입")
@@ -825,10 +843,10 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     calibrated_map = get_calibrated_confidence()
     if risk_flags in calibrated_map:
         system_confidence = calibrated_map[risk_flags]["rate"]
-        conf_str = f"{system_confidence}% (스크랩 {calibrated_map[risk_flags]['count']}건 기반 자동 갱신)"
+        confidence_note = f" (실측 {calibrated_map[risk_flags]['count']}건 기반 자동 갱신)"
     else:
         system_confidence = max(30, 90 - risk_flags * 15)
-        conf_str = f"{system_confidence}% (예비 추정치)"
+        confidence_note = " (표본 부족, 예비 추정치)"
 
     reasons_str = " | ".join(confidence_reasons) if confidence_reasons else "없음 (최상위 안정 규격 충족)"
 
@@ -855,7 +873,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         f"   - 중기 시그널 상태: {flag_m}\n"
         f"   - 장기 시그널 상태: {flag_l}\n"
         f"   - 🧭 3x3 트렌드 매트릭스 판정: {tier} | 시그널: {cross_signal}\n"
-        f"   - 🧮 시스템 신뢰도 점수(파이썬 산출, 감점요인 {risk_flags}개): {conf_str}\n"
+        f"   - 🧮 시스템 신뢰도 점수(파이썬 산출, 감점요인 {risk_flags}개): {system_confidence}%{confidence_note}\n"
         f"   - 🧩 시스템 신뢰도 감점 내역: {reasons_str}\n"
         f"{consensus_log}"
         f"   - 참고 원본 BPS: {bps_disp_val}\n"
@@ -865,7 +883,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     bps_str = f"{bps_val:,}원" if bps_val is not None else "데이터 누락"
 
     tech_data_str = f"[{name} ({ticker})]\n"
-    if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | Beta {beta:.2f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(일간) {daily_vol*100:.2f}%\n"
+    if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | Beta {beta:.2f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(EWMA) {daily_vol*100:.2f}%\n"
     
     fund_str = f"- 재무 비율: PER {fund.get('per', '-')} (업종PER {fund.get('industry_per', '-')}) | PBR {fund.get('pbr', '-')} | EPS {eps_str} | BPS {bps_str}\n"
     fund_str += f"- 분기 실적 추세(단위: 억원, %): 매출액 {fund.get('sales_history', [])} | 영업이익 {fund.get('op_history', [])} | EPS {fund.get('eps_history', [])} | ROE {fund.get('roe_history', [])}\n"
@@ -1303,11 +1321,11 @@ with tab4:
                         f"<ANALYSIS_티커숫자>\n"
                         f"### 📌 [종목명] (티커)\n"
                         f"**🎯 투자의견: [매수 / 관망 / 비중축소]** (신뢰도: 팩트 데이터 로그의 '시스템 신뢰도 점수'를 그대로 인용)\n"
+                        f"- **📋 시스템 신뢰도 차감 사유:** (파이썬 로그의 '시스템 신뢰도 감점 내역' 문자열을 토씨 하나 틀리지 말고 그대로 받아쓰기 하여 출력할 것. 자의적 수정 및 지어내기 절대 금지)\n"
                         f"- **현재가:** 000원\n"
                         f"- **목표가:** [해당 기간 목표가 00원]\n"
                         f"- **손절가:** [해당 기간 손절선 00원]\n"
                         f"- **💡 3x3 매트릭스 진단:** [Tier 등급 기입] (파이썬 로그를 참고하여 이 등급이 부여된 이유를 '목표가 XX + 실적 XX' 형태로 1줄 설명)\n"
-                        f"- **📋 시스템 신뢰도 차감 사유:** (파이썬 로그의 '시스템 신뢰도 감점 내역' 문자열을 토씨 하나 틀리지 말고 그대로 받아쓰기 하여 출력할 것. 자의적 수정 및 지어내기 절대 금지)\n"
                         f"- **한 줄 요약:** (가장 핵심이 되는 투자 논리 1줄)\n\n"
                         f"---\n"
                         f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
@@ -1472,11 +1490,11 @@ with tab5:
                             f"5. [자기 검증 - 치명적 리스크 강제 출력] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 만약 파이썬 로그에 Tier 2 경고가 적혀 있다면 무조건 Bear Case 1순위로 경고하십시오.\n\n"
                             f"=== 리포트 작성 포맷 ===\n"
                             f"**🎯 투자의견: [매수 / 유지 / 비중축소 / 손절]** (신뢰도: 팩트 데이터 로그의 '시스템 신뢰도 점수'를 그대로 인용)\n"
+                            f"- **📋 시스템 신뢰도 차감 사유:** (파이썬 로그의 '시스템 신뢰도 감점 내역' 문자열을 토씨 하나 틀리지 말고 그대로 받아쓰기 하여 출력할 것. 자의적 수정 및 지어내기 절대 금지)\n"
                             f"- **현재가:** 000원\n"
                             f"- **목표가:** [{eval_horizon} 목표가 00원]\n"
                             f"- **시스템 손절가:** [{eval_horizon} 손절가 00원]\n"
                             f"- **💡 3x3 매트릭스 진단:** [Tier 등급 기입] (파이썬 로그를 참고하여 이 등급이 부여된 이유를 '목표가 XX + 실적 XX' 형태로 1줄 설명)\n"
-                            f"- **📋 시스템 신뢰도 차감 사유:** (파이썬 로그의 '시스템 신뢰도 감점 내역' 문자열을 토씨 하나 틀리지 말고 그대로 받아쓰기 하여 출력할 것. 자의적 수정 및 지어내기 절대 금지)\n"
                             f"- **한 줄 요약:** (가장 핵심이 되는 판단 근거 1줄)\n\n"
                             f"---\n"
                             f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
@@ -1575,7 +1593,6 @@ with tab6:
                 if s_sl_s > 0 and min_low <= s_sl_s and min_low > 0: stop_out_count_s += 1
                 if s_sl_m > 0 and min_low <= s_sl_m and min_low > 0: stop_out_count_m += 1
                 
-           # 신뢰도 보정 연산용 risk_flags 그룹핑 바인딩 (문자열 방어 로직 추가)
             try:
                 rf = int(row[15]) if row[15] is not None else -1
             except (ValueError, TypeError):
@@ -1664,9 +1681,9 @@ with tab6:
                         pct_s = (current_p / tp_s) * 100
                         st.progress(min(int(pct_s), 100), text=f"단기 목표가 대비 진행률: **{pct_s:.1f}%**")
                         if min_low > 0 and min_low <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 현재 주가 흐름과 별개로 리스크 위반 이력이 존재합니다.")
+                            st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 현재 반등했더라도 시스템 룰에 따른 리뷰가 필요합니다.")
                         elif current_p <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 규칙에 의거해 청산을 고려하십시오.")
+                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 손절을 고려하십시오.")
                     
                     st.markdown("---")
                     st.write(analysis)
