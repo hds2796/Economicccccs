@@ -344,7 +344,7 @@ def get_dart_filings(stock_code):
         local_conn.close()
         
         if not row: return "DART 매핑 데이터 없음"
-        bgn_de = (datetime.now() - pd.Timedelta(days=90)).strftime("%Y%m%d")
+        bgn_de = (datetime.now() - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
         url = f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={row[0]}&bgn_de={bgn_de}&page_count=5"
         session = get_session()
         res = session.get(url, timeout=5).json()
@@ -1097,7 +1097,7 @@ with tab3:
                         with st.spinner("상위 30개 핵심 뉴스 요약 중..."):
                             top_30_titles = "\n".join([i['title'] for i in items[:30]])
                             l_sum = call_gemini_lite_summary(f"아래 상위 30개 뉴스를 바탕으로 {sec} 섹터의 핵심 모멘텀을 요약하라:\n{top_30_titles}")
-                            st.write(call_gemini_with_fallback(f"[{sec} 요약]\n{l_sum}\n\n위 요약을 바탕으로 해당 섹터의 주도주 흐름과 향후 모멘텀을 심층 분석하라."))
+                            st.write(call_gemini_with_fallback(f"[{sec} 요약]\n{l_sum}\n\n위 요약을 바탕으로 해당 섹터의 주도주 흐름และ 향후 모멘텀을 심층 분석하라."))
 
 with tab4:
     st.subheader("종목 발굴 (시니어 애널리스트 퀀트 분석)")
@@ -1253,6 +1253,7 @@ with tab4:
                 for k_item in cached_killed:
                     st.error(f"**[KILLED]** 종목: `{k_item['name']}` ({k_item['ticker']}) ➡️ 사유: `{k_item['reason']}`")
 
+        # 새로고침 시 접힌 상태가 기본이 되도록 expanded=False 설정
         with st.expander("추천 리포트", expanded=False):
             display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw.split("[SELECTED_TICKERS]")[0].strip())
             st.write(display_text)
@@ -1351,7 +1352,7 @@ with tab5:
                     if current > 0 and avg_price > 0: st.markdown(f"수익률: {((current - avg_price) / avg_price * 100):+.1f}%")
             with col_price:
                 if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
-           with col_btn:
+            with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
                     with st.spinner("파이썬 연산 및 수치 방어 논리 작성 중..."):
                         data_dict = process_single_ticker(ticker, eval_horizon, k_factor, False, analyst_universe)
@@ -1362,13 +1363,15 @@ with tab5:
                         extra_ctx = f"\n현재가: {current:,.0f}\n"
                         if is_owned and avg_price > 0: extra_ctx += f"[내 계좌 정보] 평단가: {avg_price:,.0f} | 현재 수익률: {((current - avg_price) / avg_price * 100):+.1f}%\n"
 
-                        # ▼▼▼ [신규 추가] 람다가 수집해둔 해당 종목의 전용 뉴스를 불러와 분석 재료에 추가합니다. ▼▼▼
+                        # =======================================================
+                        # [뉴스 전용 주입] 람다가 수집해둔 해당 관심종목 뉴스를 컨텍스트 재료에 가두어 추가
+                        # =======================================================
                         my_stock_news_pool = cached_data.get("my_stock_news", {})
                         target_news = my_stock_news_pool.get(name, [])
                         if target_news:
-                            extra_ctx += f"\n[{name} 최근 핵심 뉴스]\n"
-                            extra_ctx += "\n".join([f"- {n['title']}: {n.get('summary', '')}" for n in target_news[:5]])
-                            extra_ctx += "\n
+                            extra_ctx += f"\n[{name} 최근 핵심 뉴스 요약 및 모멘텀 소스]\n"
+                            extra_ctx += "\n".join([f"- 제목: {n['title']}\n  내용: {n.get('summary', '')}" for n in target_news[:5]])
+                            extra_ctx += "\n"
 
                         if "단기" in eval_horizon:
                             persona_t5 = "단기 스윙 트레이더"
@@ -1415,6 +1418,7 @@ with tab5:
                     conn.commit(); st.rerun()
 
             if report_text:
+                # 새로고침 시 접힌 상태가 기본이 되도록 expanded=False 설정
                 with st.expander("진단 리포트", expanded=False):
                     st.write(report_text)
                     st.divider()
@@ -1495,7 +1499,6 @@ with tab6:
                 with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
                     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
                     
-                    # 1. 저장 당시 주가 + 스크랩 이후 누적 수익률 표시
                     if saved_p and current_p > 0:
                         scrap_diff = current_p - saved_p
                         scrap_diff_pct = (scrap_diff / saved_p) * 100
@@ -1503,7 +1506,6 @@ with tab6:
                     else: 
                         m_col1.metric("저장 당시 주가", f"{saved_p:,.0f}원" if saved_p else "정보 없음")
                     
-                    # 2. 실시간 현재가 + 전 거래일 대비 실시간 등락률 표시
                     if current_p > 0:
                         daily_diff = price_info.get("diff", 0.0)
                         daily_diff_pct = price_info.get("diff_pct", 0.0)
