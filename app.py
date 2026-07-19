@@ -1474,7 +1474,7 @@ with tab6:
                     c.execute(f"DELETE FROM scrapbook WHERE id IN ({','.join(['?']*len(to_del))})", to_del)
                     conn.commit(); st.rerun()
                     
-        for row in scraps:
+       for row in scraps:
             s_id, title, s_name, ticker, s_date, analysis, m_used, saved_p, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l = row
             code = re.sub(r'[^\d]', '', ticker or "")
             price_info = price_map_scrap.get(code, {})
@@ -1486,12 +1486,23 @@ with tab6:
             with col_exp_s:
                 with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
                     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-                    m_col1.metric("저장 당시 주가", f"{saved_p:,.0f}원" if saved_p else "정보 없음")
+                    
+                    # 1. 저장 당시 주가 + 스크랩 이후 누적 수익률 표시
+                    if saved_p and current_p > 0:
+                        scrap_diff = current_p - saved_p
+                        scrap_diff_pct = (scrap_diff / saved_p) * 100
+                        m_col1.metric("저장 당시 주가", f"{saved_p:,.0f}원", delta=f"스크랩 누적 {scrap_diff:+,.0f}원 ({scrap_diff_pct:+.2f}%)")
+                    else: 
+                        m_col1.metric("저장 당시 주가", f"{saved_p:,.0f}원" if saved_p else "정보 없음")
+                    
+                    # 2. 실시간 현재가 + 전 거래일 대비 실시간 등락률 표시
                     if current_p > 0:
-                        diff = current_p - saved_p if saved_p else 0.0
-                        diff_pct = (diff / saved_p * 100) if saved_p else 0.0
-                        m_col2.metric("실시간 현재가", f"{current_p:,.0f}원", delta=f"{diff:+,.0f}원 ({diff_pct:+.2f}%)")
-                    else: m_col2.metric("실시간 현재가", "조회 실패")
+                        daily_diff = price_info.get("diff", 0.0)
+                        daily_diff_pct = price_info.get("diff_pct", 0.0)
+                        m_col2.metric("실시간 현재가", f"{current_p:,.0f}원", delta=f"전일 대비 {daily_diff:+,.0f}원 ({daily_diff_pct:+.2f}%)")
+                    else: 
+                        m_col2.metric("실시간 현재가", "조회 실패")
+                        
                     m_col3.markdown(f"**손절가 라인**<br>단기: <span style='color:red;'>{sl_s:,.0f}</span><br>중기: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
                     m_col4.markdown(f"**목표가 밴드**<br>단기: {tp_s:,.0f}<br>중기: {tp_m:,.0f}", unsafe_allow_html=True)
                     
