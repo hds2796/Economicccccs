@@ -297,11 +297,10 @@ def call_gemini_stream_with_fallback(prompt):
     finally: _gemini_semaphore.release()
 
 # =======================================================
-# [반자동 고도화] 스크랩북 연동형 동적 신뢰도 캘리브레이션 함수
+# 신뢰도 자가 튜닝 인프라 (스크랩북 실측 데이터 평가)
 # =======================================================
 @st.cache_data(ttl=3600)
 def get_calibrated_confidence():
-    """탭6 스크랩 데이터에서 risk_flags별 실측 도달률 및 모수 인덱스 딕셔너리를 직접 가공"""
     try:
         local_conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
         local_c = local_conn.cursor()
@@ -322,7 +321,6 @@ def get_calibrated_confidence():
     
     result = {}
     for rf, b in bucket.items():
-        # 하드캡 가이드: 표본 5건 이상 쌓였을 때만 실질 확률 교정 앵커로 채택
         if b["total"] >= 5:   
             result[rf] = {
                 "rate": round(b["hit"] / b["total"] * 100),
@@ -802,7 +800,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None 
 
     # =======================================================
-    # [반자동 가중치 설계] 시스템 실측 신뢰도 평가 연산부
+    # [시스템 결정론적 신뢰도 점수 및 역전 플래그 산출]
     # =======================================================
     is_flag_m_inv = (tp_s > tp_m and tp_m > 0)
     is_flag_l_inv = (tp_m > tp_l and tp_l > 0)
@@ -810,23 +808,29 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     flag_m = f"⚠️역전됨 (단기 모멘텀 {tp_s:,.0f}원 대비 중기 가치가 낮음)" if is_flag_m_inv else "정상"
     flag_l = f"⚠️역전됨 (중기 가치 대비 장기 RIM 가치({tp_l:,.0f}원)가 낮음)" if is_flag_l_inv else "정상"
 
-    risk_flags = sum([
-        tier == "Tier 3 (Fatal)",
-        tier == "Tier 2 (Warning)",
-        is_flag_l_inv,
-        is_flag_m_inv,
-        bool(structural_warning),
-        data_incomplete,
-    ])
+    # --------------------------------=======================----------------
+    # [신규 추가] 파이썬 연산 단에서 구체적인 감점 사유 추적 텍스트 생성
+    # --------------------------------=======================----------------
+    confidence_reasons = []
+    if tier == "Tier 3 (Fatal)": confidence_reasons.append("3x3 매트릭스 치명적 위험 침체 국면(Tier 3) 진입")
+    elif tier == "Tier 2 (Warning)": confidence_reasons.append("3x3 매트릭스 밸류 트랩 및 심리 과매도 경고 국면(Tier 2) 진입")
     
-    # [반자동 핵심] 실시간 캐시 DB에서 구간 적중률 호출 및 조건적 바인딩
+    if is_flag_l_inv: confidence_reasons.append("장기 가치 선행 역전 현상 감지 (중기 가치 > 장기 RIM 내재가치)")
+    if is_flag_m_inv: confidence_reasons.append("중기 모멘텀 역전 현상 감지 (단기 밴드 상단 > 중기 적정가)")
+    if bool(structural_warning): confidence_reasons.append(f"구조적 데이터 밸류에이션 변형 제약 작동 ({structural_warning.replace('⚠️', '').strip()})")
+    if data_incomplete: confidence_reasons.append("기업의 핵심 재무 팩트 데이터(EPS/BPS) 누락 발생")
+
+    risk_flags = len(confidence_reasons)
+    
     calibrated_map = get_calibrated_confidence()
     if risk_flags in calibrated_map:
         system_confidence = calibrated_map[risk_flags]["rate"]
-        confidence_note = f" (실측 {calibrated_map[risk_flags]['count']}건 기반 자동 갱신)"
+        conf_str = f"{system_confidence}% (스크랩 {calibrated_map[risk_flags]['count']}건 기반 자동 갱신)"
     else:
         system_confidence = max(30, 90 - risk_flags * 15)
-        confidence_note = " (표본 부족, 예비 추정치)"
+        conf_str = f"{system_confidence}% (예비 추정치)"
+
+    reasons_str = " | ".join(confidence_reasons) if confidence_reasons else "없음 (최상위 안정 규격 충족)"
 
     struct_warn_line = f"   - 구조적 분석: {structural_warning}\n" if structural_warning else ""
     bps_disp_val = f"{bps_val:,.0f}원" if bps_val is not None else "데이터 누락"
@@ -851,7 +855,8 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         f"   - 중기 시그널 상태: {flag_m}\n"
         f"   - 장기 시그널 상태: {flag_l}\n"
         f"   - 🧭 3x3 트렌드 매트릭스 판정: {tier} | 시그널: {cross_signal}\n"
-        f"   - 🧮 시스템 신뢰도 점수(파이썬 산출, 감점요인 {risk_flags}개): {system_confidence}%{confidence_note}\n"
+        f"   - 🧮 시스템 신뢰도 점수(파이썬 산출, 감점요인 {risk_flags}개): {conf_str}\n"
+        f"   - 🧩 시스템 신뢰도 감점 내역: {reasons_str}\n"
         f"{consensus_log}"
         f"   - 참고 원본 BPS: {bps_disp_val}\n"
     )
@@ -1302,6 +1307,7 @@ with tab4:
                         f"- **목표가:** [해당 기간 목표가 00원]\n"
                         f"- **손절가:** [해당 기간 손절선 00원]\n"
                         f"- **💡 3x3 매트릭스 진단:** [Tier 등급 기입] (파이썬 로그를 참고하여 이 등급이 부여된 이유를 '목표가 XX + 실적 XX' 형태로 1줄 설명)\n"
+                        f"- **📋 시스템 신뢰도 차감 사유:** (파이썬 로그의 '시스템 신뢰도 감점 내역' 문자열을 토씨 하나 틀리지 말고 그대로 받아쓰기 하여 출력할 것. 자의적 수정 및 지어내기 절대 금지)\n"
                         f"- **한 줄 요약:** (가장 핵심이 되는 투자 논리 1줄)\n\n"
                         f"---\n"
                         f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
@@ -1355,7 +1361,6 @@ with tab4:
                                 c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}<br>장: {tp_l:,.0f}", unsafe_allow_html=True)
                                 c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
 
-                                # 파이썬 강제 게이트키퍼 경고 (Tab 4)
                                 if tick_data.get('is_flag_l_inv'):
                                     st.warning(f"⚠️ **장기 시그널 역전**\n중기 목표가({tp_m:,.0f}원)가 장기 가치({tp_l:,.0f}원)를 초과. 구조적 리스크 추적 요망.")
                                 if tick_data.get('is_flag_m_inv'):
@@ -1471,6 +1476,7 @@ with tab5:
                             f"- **목표가:** [{eval_horizon} 목표가 00원]\n"
                             f"- **시스템 손절가:** [{eval_horizon} 손절가 00원]\n"
                             f"- **💡 3x3 매트릭스 진단:** [Tier 등급 기입] (파이썬 로그를 참고하여 이 등급이 부여된 이유를 '목표가 XX + 실적 XX' 형태로 1줄 설명)\n"
+                            f"- **📋 시스템 신뢰도 차감 사유:** (파이썬 로그의 '시스템 신뢰도 감점 내역' 문자열을 토씨 하나 틀리지 말고 그대로 받아쓰기 하여 출력할 것. 자의적 수정 및 지어내기 절대 금지)\n"
                             f"- **한 줄 요약:** (가장 핵심이 되는 판단 근거 1줄)\n\n"
                             f"---\n"
                             f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
@@ -1515,7 +1521,6 @@ with tab5:
 
             if report_text:
                 with st.expander("진단 리포트", expanded=False):
-                    # 파이썬 게이트키퍼 가치 역전 하드코딩 표출 (Tab 5)
                     if tp_m > tp_l and tp_l > 0:
                         st.warning(f"⚠️ 시스템 경고: 중기 적정가({tp_m:,.0f}원)가 장기 RIM 내재가치({tp_l:,.0f}원)를 초과했습니다 (장기 가치 선행 역전 현상). AI 해설과 독립된 엔진 자체적 리스크 신호이므로 필히 확인하십시오.")
                     if tp_s > tp_m and tp_m > 0:
@@ -1555,7 +1560,6 @@ with tab6:
         stop_out_count_s, stop_out_count_m = 0, 0
         avg_current_yield = 0.0
         
-        # [실측 매핑 인프라] 버킷 분할 정의
         bucket_stats = {}
 
         for row in scraps:
@@ -1571,7 +1575,6 @@ with tab6:
                 if s_sl_s > 0 and min_low <= s_sl_s and min_low > 0: stop_out_count_s += 1
                 if s_sl_m > 0 and min_low <= s_sl_m and min_low > 0: stop_out_count_m += 1
                 
-            # 신뢰도 보정 연산용 risk_flags 그룹핑 바인딩
             rf = row[15]
             if rf is not None and rf >= 0:
                 if rf not in bucket_stats:
@@ -1592,7 +1595,6 @@ with tab6:
             
         st.divider()
 
-        # [실측 통계 시각화] 자가 튜닝 진척도 가시화 대시보드
         st.markdown("### 📊 위험 신호 개수별 실측 적중률 (신뢰도 자가 튜닝 인프라)")
         if not bucket_stats:
             st.info("실측 데이터를 집계할 유효 스크랩 팩트 로그(risk_flags 컬럼 포함)가 부족합니다. 스크랩이 지속되면 확률이 조율됩니다.")
@@ -1648,7 +1650,6 @@ with tab6:
                     m_col3.markdown(f"**손절가 라인**<br>단기: <span style='color:red;'>{sl_s:,.0f}</span><br>중기: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
                     m_col4.markdown(f"**목표가 밴드**<br>단기: {tp_s:,.0f}<br>중기: {tp_m:,.0f}", unsafe_allow_html=True)
 
-                    # 파이썬 게이트키퍼 과거 저장 시점 역전 경고 강제 출력 (Tab 6)
                     if tp_m > tp_l and tp_l > 0:
                         st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 '중기 가치 > 장기 RIM 가치' 역전 플래그 상태였습니다.")
                     if tp_s > tp_m and tp_m > 0:
