@@ -807,7 +807,7 @@ market_data = g_data.get("market_status", {})
 metrics_html = ""
 
 # 파이썬이 네이버에서 수집한 지표를 제목 옆에 나란히 배치하기 위한 HTML 포매팅
-for key in ["코스피", "코스닥", "S&P 500", "원/달러 환율"]:
+for key in ["코스피", "코스닥"]:
     if key in market_data:
         val = market_data[key].get("current", 0.0)
         diff = market_data[key].get("diff", 0.0)
