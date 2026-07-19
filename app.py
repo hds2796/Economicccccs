@@ -1575,8 +1575,13 @@ with tab6:
                 if s_sl_s > 0 and min_low <= s_sl_s and min_low > 0: stop_out_count_s += 1
                 if s_sl_m > 0 and min_low <= s_sl_m and min_low > 0: stop_out_count_m += 1
                 
-            rf = row[15]
-            if rf is not None and rf >= 0:
+           # 신뢰도 보정 연산용 risk_flags 그룹핑 바인딩 (문자열 방어 로직 추가)
+            try:
+                rf = int(row[15]) if row[15] is not None else -1
+            except (ValueError, TypeError):
+                rf = -1
+
+            if rf >= 0:
                 if rf not in bucket_stats:
                     bucket_stats[rf] = {"total": 0, "hit": 0, "stop": 0}
                 bucket_stats[rf]["total"] += 1
