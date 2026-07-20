@@ -1061,10 +1061,10 @@ with tab2:
     st.markdown("### 🌐 실시간 마켓 데이터 및 리포트 유니버스 상황")
     
     analyst_universe = cached_data.get("analyst_universe", {})
-    today_active_reps = cached_data.get("today_active_reports", [])
+    today_active_reps = []
     
-    # 람다가 today_active_reports 배열을 분리하지 않았을 경우를 대비한 자체 추출 로직
-    if not today_active_reps and analyst_universe:
+    # 백엔드 캐시를 무시하고 프론트엔드에서 무조건 최신 날짜를 강제 추출
+    if analyst_universe:
         sorted_reps = sorted([r for r in analyst_universe.values() if isinstance(r, dict)], key=lambda x: x.get('date', '1900-01-01'), reverse=True)
         if sorted_reps:
             latest_date = sorted_reps[0].get('date', '')
@@ -1076,6 +1076,7 @@ with tab2:
 
     if "us_news_limit" not in st.session_state: st.session_state.us_news_limit = 6
     if "kr_news_limit" not in st.session_state: st.session_state.kr_news_limit = 6
+    if "rep_news_limit" not in st.session_state: st.session_state.rep_news_limit = 6
 
     c_us_news, c_kr_news, c_rep_news = st.columns(3)
     
@@ -1110,8 +1111,65 @@ with tab2:
             st.markdown("🔥 **당일 신규 애널리스트 리포트**")
             if today_active_reps:
                 st.success(f"오늘자 신규/수정 리포트 **{len(today_active_reps)}건**")
-                for idx, r in enumerate(today_active_reps[:6]):
-                    st.markdown(f"- **{r['stock_name']}** ({r['broker']})<br>&nbsp;&nbsp;<span style='font-size:0.9em; color:gray;'>{r['title']}</span>", unsafe_allow_html=True)
+                
+                for idx, r in enumerate(today_active_reps[:st.session_state.rep_news_limit]):
+                    stock_name = r.get('stock_name', '종목명')
+                    broker = r.get('broker', '증권사')
+                    curr_date = r.get('date', '9999-12-31')
+                    
+                    # 동일 종목 & 동일 증권사의 과거 리포트 역추적
+                    past_reps = [
+                        pr for pr in analyst_universe.values() 
+                        if isinstance(pr, dict) 
+                        and pr.get('stock_name') == stock_name 
+                        and pr.get('broker') == broker 
+                        and pr.get('date', '') < curr_date
+                    ]
+                    
+                    tp_change_html = ""
+                    op_change_html = ""
+                    
+                    if past_reps:
+                        # 가장 최근 과거 리포트 추출
+                        prev_rep = sorted(past_reps, key=lambda x: x.get('date', ''), reverse=True)[0]
+                        
+                        # 목표가 변동 검사 및 수치 비교
+                        curr_tp_str = re.sub(r'[^\d]', '', str(r.get('target_price', '0')))
+                        prev_tp_str = re.sub(r'[^\d]', '', str(prev_rep.get('target_price', '0')))
+                        curr_tp = float(curr_tp_str) if curr_tp_str else 0.0
+                        prev_tp = float(prev_tp_str) if prev_tp_str else 0.0
+                        
+                        if curr_tp > 0 and prev_tp > 0 and curr_tp != prev_tp:
+                            direction = "🔺상향" if curr_tp > prev_tp else "🔻하향"
+                            color = "#ff4b4b" if curr_tp > prev_tp else "#1c83e1"
+                            bg_color = "rgba(255,75,75,0.1)" if curr_tp > prev_tp else "rgba(28,131,225,0.1)"
+                            tp_change_html = f"<span style='color:{color}; font-weight:bold; background-color:{bg_color}; padding:2px 4px; border-radius:4px; font-size:0.85em;'>[목표가 {direction}] {prev_tp:,.0f} → {curr_tp:,.0f}</span>"
+                        
+                        # 투자의견(Rating) 변동 검사
+                        curr_op = str(r.get('opinion') or r.get('rating') or '').strip()
+                        prev_op = str(prev_rep.get('opinion') or prev_rep.get('rating') or '').strip()
+                        
+                        if curr_op and prev_op and curr_op != prev_op and curr_op.lower() != 'none' and prev_op.lower() != 'none':
+                            op_change_html = f"<span style='color:#FF8C00; font-weight:bold; background-color:rgba(255,140,0,0.1); padding:2px 4px; border-radius:4px; font-size:0.85em;'>[의견 변경] {prev_op} → {curr_op}</span>"
+                    
+                    # 과거 리포트가 없어도 백엔드가 꼬리표를 줬다면 폴백 적용
+                    if not tp_change_html and r.get('tp_trend') in ['상향', '하향']:
+                        color = "#ff4b4b" if r['tp_trend'] == '상향' else "#1c83e1"
+                        bg_color = "rgba(255,75,75,0.1)" if r['tp_trend'] == '상향' else "rgba(28,131,225,0.1)"
+                        tp_change_html = f"<span style='color:{color}; font-weight:bold; background-color:{bg_color}; padding:2px 4px; border-radius:4px; font-size:0.85em;'>[목표가 {r['tp_trend']}]</span>"
+
+                    badges = []
+                    if tp_change_html: badges.append(tp_change_html)
+                    if op_change_html: badges.append(op_change_html)
+                    
+                    badge_str = "<br>" + " ".join(badges) if badges else ""
+                    
+                    st.markdown(f"- **{stock_name}** ({broker}){badge_str}<br>&nbsp;&nbsp;<span style='font-size:0.9em; color:gray;'>{r.get('title', '제목 없음')}</span>", unsafe_allow_html=True)
+                    
+                if len(today_active_reps) > st.session_state.rep_news_limit:
+                    if st.button("🔽 6개 더보기", key="more_rep", use_container_width=True):
+                        st.session_state.rep_news_limit += 6
+                        st.rerun()
             else:
                 st.info("오늘 자 신규 리포트 없음 (최근 100% 리포트 유니버스 자동 대기 중)")
 
