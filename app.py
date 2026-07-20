@@ -432,7 +432,6 @@ def get_advanced_fundamental_data(code):
                 thead_trs = cop_table.find("thead").find_all("tr")
                 forward_idx = -1
                 
-                # 날짜 배열은 thead의 두 번째 tr에 위치함 (main.naver 구조 기준)
                 if len(thead_trs) > 1:
                     date_ths = thead_trs[1].find_all("th")
                     headers_text = [th.get_text().strip() for th in date_ths]
@@ -505,7 +504,6 @@ def get_advanced_fundamental_data(code):
         if count > 0:
             data["supply_demand"] = f"[수급 동향] 최근 5일(기관 {inst_sum_5:+,}주 / 외인 {fore_sum_5:+,}주) | 최근 20일(기관 {inst_sum_20:+,}주 / 외인 {fore_sum_20:+,}주)"
             
-        # [신규 추가] Forward ROE 근사 계산 (컨센서스 ROE 부재 시 Forward EPS와 BPS 활용)
         if data.get("forward_roe_e") is None:
             if data.get("forward_eps_e") is not None and data.get("bps") is not None and data["bps"] > 0:
                 data["forward_roe_e"] = round((data["forward_eps_e"] / data["bps"]) * 100, 2)
@@ -537,7 +535,6 @@ def get_technical_data(code):
         
         current_price = prices[-1]
         
-        # [개선 적용] 단순 표준편차 -> 지수형 가중 이동평균(EWMA) 표준편차로 변동성 산출
         if len(returns) >= 20:
             daily_volatility = returns.ewm(span=20, adjust=False).std().iloc[-1]
         else:
@@ -721,7 +718,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     
     rf = get_risk_free_rate()
     
-    # [개선 적용] 시가총액/유동성이 낮은 고위험군에 동적 사이즈 프리미엄 반영 (대용치: 고베타 or 고변동성)
     risk_premium = 0.0
     if beta > 1.2 or daily_vol > 0.035:
         risk_premium = 0.02
@@ -730,8 +726,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     is_holding = any(kw in name for kw in ['지주', '홀딩스']) or (ticker in holding_ticker_list)
     
     structural_warning = ""
-
-    # [개선 적용] Ohlson 모델의 초과수익 지속계수(omega) 도입
     omega_val = 0.8 if is_holding else 0.7 
 
     if bps_val is None:
@@ -775,28 +769,32 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         data_incomplete = False
         
     else:
-        # [개선 적용] PEG 동적 캡의 비선형 스케일링 (성장 구간 로그 억제, 악화 구간 선형 페널티 유지)
-        growth_pct_val = max(eps_growth * 100, 5.0) 
-        dynamic_per_cap = max(8.0, min(growth_pct_val * 1.2, 40.0)) 
-
-        if float_ind_per > 0:
-            eps_multiplier = (1 + np.log1p(eps_growth)) if eps_growth > 0 else (1 + eps_growth)
-            adjusted_ind_per = float_ind_per * eps_multiplier
-        else:
-            adjusted_ind_per = dynamic_per_cap
-            
+        # [개선 수정 적용] 극단적 저평가 왜곡 방지를 위한 PER 하방 스무딩 
         current_per = (current_price / eps_val)
+        val_growth = max(-0.5, min(eps_growth, 1.0))
         
-        safe_per_cap = min(current_per * 1.5, float_ind_per * 1.5 if float_ind_per > 0 else 40.0, dynamic_per_cap)
-        
-        if adjusted_ind_per > safe_per_cap:
-            fund_type = "상대 가치 (비선형 PEG 동적 캡 적용)"
-            structural_warning = f"⚠️ [Value Trap 방어] 환상적인 이익성장 기저효과 필터링 작동. 한계 PER {safe_per_cap:.1f}배 강제 제한."
-            tp_m = eps_val * safe_per_cap
+        base_per = float_ind_per if float_ind_per > 0 else max(8.0, min(val_growth * 100 * 1.2, 40.0))
+
+        if val_growth > 0:
+            target_per = base_per * (1 + np.log1p(val_growth))
         else:
-            fund_type = "기본 상대 가치 (로그 스케일 업종 평균 수렴)"
-            tp_m = eps_val * adjusted_ind_per
+            target_per = base_per * (1 + val_growth)
+
+        floor_per = min(current_per * 0.8, base_per)
+        ceiling_per = max(current_per * 1.5, 40.0) 
+
+        final_per = max(floor_per, min(target_per, ceiling_per))
+
+        if final_per <= floor_per and final_per < current_per * 0.5:
+            fund_type = "상대 가치 (고평가 극단 조정 방어)"
+            structural_warning = f"⚠️ [가치 함정 억제] 시장 PER({current_per:.1f}배) 대비 보수적 스무딩 PER({final_per:.1f}배) 적용."
+        elif final_per == ceiling_per:
+            fund_type = "상대 가치 (성장 캡 상한 적용)"
+            structural_warning = f"⚠️ [Value Trap 방어] 이익성장 기저효과 억제. 상한 PER {final_per:.1f}배 강제 적용."
+        else:
+            fund_type = "기본 상대 가치 (동적 PEG 스케일링)"
             
+        tp_m = eps_val * final_per
         required_return = rf + (beta * 0.06) + risk_premium
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
         fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, \u03C9 {omega_val})"
@@ -845,9 +843,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         else:
             if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None 
 
-    # =======================================================
-    # [반자동 가중치 설계] 시스템 실측 신뢰도 평가 연산부
-    # =======================================================
     is_flag_m_inv = (tp_s > tp_m and tp_m > 0)
     is_flag_l_inv = (tp_m > tp_l and tp_l > 0)
     
@@ -1010,6 +1005,7 @@ col_title, col_refresh = st.columns([5, 1.2])
 with col_refresh:
     if st.button("뉴스/리포트 갱신", use_container_width=True):
         with st.spinner("AI 서버와 동기화 중..."):
+            fetch_cached_global_data.clear() # [수정 적용] 구글 드라이브 캐시 강제 무효화로 리포트 즉시 업데이트
             if new_data := fetch_realtime_data_direct(): merge_realtime_data(new_data)
             st.rerun()
 with col_title: 
