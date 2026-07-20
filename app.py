@@ -824,7 +824,13 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             # 하단 eps_multiplier 연산을 위해 eps_growth 변수도 상향 동기화
             eps_growth = max(eps_growth, forward_growth_pct / 100)
 
-        dynamic_per_cap = max(8.0, min(growth_pct_val * 1.2, 40.0)) 
+        # [수정] 40배 하드 캡 폐지. 현재 시장이 부여한 멀티플을 일정 부분 인정하여 유연한 상한선 적용
+        current_per = (current_price / eps_val) if eps_val > 0 else 40.0
+        
+        # 고성장 시 현재 PER의 80% 수준까지는 목표 밸류에이션으로 인정 (단, 최대 150배 제한)
+        flexible_upper_limit = max(40.0, min(current_per * 0.8, 150.0))
+        
+        dynamic_per_cap = max(8.0, min(growth_pct_val * 1.2, flexible_upper_limit)) 
 
         if float_ind_per > 0:
             eps_multiplier = (1 + np.log1p(eps_growth)) if eps_growth > 0 else (1 + eps_growth)
@@ -832,9 +838,8 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         else:
             adjusted_ind_per = dynamic_per_cap
             
-        current_per = (current_price / eps_val)
-        
-        safe_per_cap = min(current_per * 1.5, float_ind_per * 1.5 if float_ind_per > 0 else 40.0, dynamic_per_cap)
+        # 안전 마진(safe_per_cap) 역시 flexible_upper_limit을 존중하도록 수정
+        safe_per_cap = min(current_per * 1.5, float_ind_per * 1.5 if float_ind_per > 0 else flexible_upper_limit, dynamic_per_cap)
         
         if adjusted_ind_per > safe_per_cap:
             fund_type = "상대 가치 (비선형 PEG 동적 캡 적용)"
