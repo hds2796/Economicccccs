@@ -32,7 +32,7 @@ FALLBACK_MODEL_NAME = "gemini-3-flash-preview"
 db_backup_lock = threading.Lock()
 db_schema_lock = threading.Lock() 
 xml_parse_lock = threading.Lock()
-db_write_lock = threading.Lock() # 3-A SQLite 동시성 통제를 위한 락 추가
+db_write_lock = threading.Lock() 
 thread_local = threading.local()  
 
 def get_session():
@@ -549,7 +549,6 @@ def get_technical_data(code):
         macd = df_series.ewm(span=12, adjust=False).mean() - df_series.ewm(span=26, adjust=False).mean()
         signal = macd.ewm(span=9, adjust=False).mean()
 
-        # [1-A] 블렌딩 베타 적용 (장기 250일과 단기 60일 5:5 융합)
         beta = 1.0
         if not kospi_returns.empty and not returns.empty:
             combined_df = pd.concat([returns, kospi_returns], axis=1, join="inner").dropna()
@@ -753,7 +752,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     else: 
         fund['pbr'] = "-"
 
-    # [1-B] 과거 3년 평균 EPS(Normalized) 반영 및 턴어라운드 하드리밋(2.0) 해제
     eps_growth = 0.0
     if len(eps_history) >= 2 and eps_history[0] != 0:
         avg_past_eps = sum(eps_history[:-1]) / len(eps_history[:-1]) if len(eps_history) > 1 else eps_history[0]
@@ -761,7 +759,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             eps_growth = (eps_history[-1] - avg_past_eps) / abs(avg_past_eps)
         else:
             eps_growth = (eps_history[-1] - eps_history[0]) / abs(eps_history[0])
-        # 하드리밋 해제 (극단적 무한대만 방지)
         eps_growth = min(max(eps_growth, -0.5), 10.0)
 
     sl_s = current_price * (1 - min(user_k * daily_vol * np.sqrt(20), 0.15)) if daily_vol > 0 else current_price * 0.95
@@ -776,10 +773,13 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         risk_premium = 0.02
 
     holding_ticker_list = fetch_holding_ticker_list_from_db()
-    is_holding = any(kw in name for kw in ['지주', '홀딩스']) or (ticker in holding_ticker_list)
+    
+    # [금융지주 특수 분리 로직]
+    is_financial = any(kw in name for kw in ['금융지주']) or name in ['KB금융', '신한지주', '하나금융지주', '우리금융지주', '메리츠금융지주', 'BNK금융지주', 'DGB금융지주', 'JB금융지주']
+    is_holding = (any(kw in name for kw in ['지주', '홀딩스']) or (ticker in holding_ticker_list)) and not is_financial
     
     structural_warning = ""
-    omega_val = 0.8 if is_holding else 0.7 
+    omega_val = 0.8 if (is_holding or is_financial) else 0.7 
 
     if bps_val is None:
         tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
@@ -789,11 +789,25 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         conservative_bps = 0.0
         data_incomplete = True
         
+    elif is_financial:
+        # 주주환원(ROE) 기반 금융지주 타겟 PBR 동적 산출 (0.4 ~ 1.2 밴드)
+        required_return = rf + (beta * 0.06) + risk_premium
+        target_pbr_financial = max(0.4, min(expected_roe / required_return, 1.2))
+        
+        tp_m = bps_val * target_pbr_financial
+        fund_type = f"금융지주 특수 모델 (자본효율성 기반 Target PBR {target_pbr_financial:.2f}배)"
+        structural_warning = f"⚠️ [금융지주 밸류에이션] ROE({expected_roe*100:.1f}%) 연동 적정 PBR 산출."
+        
+        tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
+        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, \u03C9 {omega_val})"
+        conservative_bps = bps_val
+        data_incomplete = False
+        
     elif is_holding:
         holding_discount = 0.5  
         effective_bps = bps_val * holding_discount
         tp_m = effective_bps
-        fund_type = "지주사 특수 모델 (NAV 50% 할인 앵커링)"
+        fund_type = "일반 지주사 특수 모델 (NAV 50% 할인 앵커링)"
         if eps_val is None:
             structural_warning = "⚠️ [지주사 디스카운트] 지주사 할인 0.5 적용. EPS 누락."
         else:
@@ -934,14 +948,13 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 
     if is_discovery_mode:
         if data_incomplete: pass 
-        elif is_holding:
+        elif (is_holding or is_financial):
             if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None
         elif eps_val <= 0:
             if current_price > 0 and conservative_bps < current_price: return None
         else:
             if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None 
 
-    # [1-C] 장단기 혼재된 역전 비교 삭제 및 4분면 진단 매핑 도입
     quadrant_str = "정상"
     is_overvalued_flag = False
     if tp_m > 0 and tp_l > 0 and current_price > 0:
@@ -1660,7 +1673,7 @@ with tab5:
                             f"---\n"
                             f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
                             f"**📊 {eval_horizon} 맞춤형 팩트 분석 (국면 매핑 해설 포함)**\n\n"
-                            f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n\n"
+                            f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear 고증)**\n\n"
                             f"**🏢 [참고] 주요 증권사 목표가 변동 내역**\n"
                             f"(파이썬 로그에 제공된 증권사별 변동 내역을 빠짐없이 목록화하여 기재)\n"
                         )
