@@ -661,6 +661,45 @@ def fetch_realtime_data_direct():
         return res.json()
     except: return None
 
+# [신규 추가] 뱃지 생성 공통 함수 (Tab 2, Tab 5 등에서 모두 재사용)
+def generate_report_badges(r):
+    tp_change_html = ""
+    op_change_html = ""
+    
+    tp_history = r.get('tp_history', [])
+    op_history = r.get('op_history', [])
+    opinion = r.get('opinion', '').strip()
+    
+    # 1. 목표가 뱃지
+    if len(tp_history) >= 2:
+        prev_tp = tp_history[-2]
+        curr_tp = tp_history[-1]
+        if curr_tp > prev_tp:
+            tp_change_html = f"<span style='color:#ff4b4b; font-weight:bold; background-color:rgba(255,75,75,0.1); padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 🔺상향] {prev_tp:,.0f} → {curr_tp:,.0f}</span>"
+        elif curr_tp < prev_tp:
+            tp_change_html = f"<span style='color:#1c83e1; font-weight:bold; background-color:rgba(28,131,225,0.1); padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 🔻하향] {prev_tp:,.0f} → {curr_tp:,.0f}</span>"
+        elif curr_tp > 0:
+            tp_change_html = f"<span style='color:#666; font-weight:bold; background-color:#eee; padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 유지] {curr_tp:,.0f}</span>"
+    else:
+        curr_tp_str = re.sub(r'[^\d]', '', str(r.get('target_price', '0')))
+        curr_tp = float(curr_tp_str) if curr_tp_str else 0.0
+        if curr_tp > 0:
+            tp_change_html = f"<span style='color:#666; font-weight:bold; background-color:#eee; padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 신규/유지] {curr_tp:,.0f}</span>"
+
+    # 2. 투자의견 뱃지 (op_history 활용하여 변경 추적)
+    if len(op_history) >= 2 and op_history[-1] != op_history[-2]:
+        op_change_html = f"<span style='color:#FF8C00; font-weight:bold; background-color:rgba(255,140,0,0.1); padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[의견 변경] {op_history[-2]} → {op_history[-1]}</span>"
+    elif opinion and opinion.lower() != 'none':
+        op_color = "#FF8C00" if "buy" in opinion.lower() or "매수" in opinion else "#666"
+        op_bg = "rgba(255,140,0,0.1)" if "buy" in opinion.lower() or "매수" in opinion else "#eee"
+        op_change_html = f"<span style='color:{op_color}; font-weight:bold; background-color:{op_bg}; padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[{opinion}]</span>"
+
+    badges = []
+    if tp_change_html: badges.append(tp_change_html)
+    if op_change_html: badges.append(op_change_html)
+    
+    return " ".join(badges) if badges else ""
+
 # =======================================================
 # 핵심 퀀트 엔진: 퀀트/차트/뉴스 및 컨센서스 트렌드 조인
 # =======================================================
@@ -771,27 +810,31 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         data_incomplete = False
         
     else:
-        growth_pct_val = max(eps_growth * 100, 5.0) 
-        dynamic_per_cap = max(8.0, min(growth_pct_val * 1.2, 40.0)) 
-
-        if float_ind_per > 0:
-            eps_multiplier = (1 + np.log1p(eps_growth)) if eps_growth > 0 else (1 + eps_growth)
-            adjusted_ind_per = float_ind_per * eps_multiplier
-        else:
-            adjusted_ind_per = dynamic_per_cap
-            
         current_per = (current_price / eps_val)
+        val_growth = max(-0.5, min(eps_growth, 1.0))
         
-        safe_per_cap = min(current_per * 1.5, float_ind_per * 1.5 if float_ind_per > 0 else 40.0, dynamic_per_cap)
-        
-        if adjusted_ind_per > safe_per_cap:
-            fund_type = "상대 가치 (비선형 PEG 동적 캡 적용)"
-            structural_warning = f"⚠️ [Value Trap 방어] 환상적인 이익성장 기저효과 필터링 작동. 한계 PER {safe_per_cap:.1f}배 강제 제한."
-            tp_m = eps_val * safe_per_cap
+        base_per = float_ind_per if float_ind_per > 0 else max(8.0, min(val_growth * 100 * 1.2, 40.0))
+
+        if val_growth > 0:
+            target_per = base_per * (1 + np.log1p(val_growth))
         else:
-            fund_type = "기본 상대 가치 (로그 스케일 업종 평균 수렴)"
-            tp_m = eps_val * adjusted_ind_per
+            target_per = base_per * (1 + val_growth)
+
+        floor_per = min(current_per * 0.8, base_per)
+        ceiling_per = max(current_per * 1.5, 40.0) 
+
+        final_per = max(floor_per, min(target_per, ceiling_per))
+
+        if final_per <= floor_per and final_per < current_per * 0.5:
+            fund_type = "상대 가치 (고평가 극단 조정 방어)"
+            structural_warning = f"⚠️ [가치 함정 억제] 시장 PER({current_per:.1f}배) 대비 보수적 스무딩 PER({final_per:.1f}배) 적용."
+        elif final_per == ceiling_per:
+            fund_type = "상대 가치 (성장 캡 상한 적용)"
+            structural_warning = f"⚠️ [Value Trap 방어] 이익성장 기저효과 억제. 상한 PER {final_per:.1f}배 강제 적용."
+        else:
+            fund_type = "기본 상대 가치 (동적 PEG 스케일링)"
             
+        tp_m = eps_val * final_per
         required_return = rf + (beta * 0.06) + risk_premium
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
         fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, \u03C9 {omega_val})"
@@ -802,11 +845,33 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     # [3x3 결합 트렌드 매트릭스 & Tier 필터]
     # =======================================================
     tp_trend = "유지/신규"
+    broker_log_str = ""
     
     if analyst_data:
-        matched_report = next((rep for rep in analyst_data.values() if rep.get("ticker") == ticker), None)
+        # 수정: 가장 최신 리포트 매칭 및 증권사별 변동 내역 요약 생성
+        reps_for_ticker = sorted([rep for rep in analyst_data.values() if rep.get("ticker") == ticker], key=lambda x: x.get('date', ''), reverse=True)
+        matched_report = reps_for_ticker[0] if reps_for_ticker else None
         if matched_report:
             tp_trend = matched_report.get("tp_trend", "유지/신규")
+            
+        if reps_for_ticker:
+            broker_log_str = "▶ [최근 증권사별 목표가 및 의견 변동 요약]\n"
+            for r in reps_for_ticker[:5]:
+                b_name = r.get('broker', '알수없음')
+                b_date = r.get('date', '')
+                t_hist = r.get('tp_history', [])
+                op_hist = r.get('op_history', [])
+                
+                op_str = op_hist[-1] if op_hist else r.get('opinion', 'None')
+                
+                if len(t_hist) >= 2:
+                    p_tp = t_hist[-2]
+                    c_tp = t_hist[-1]
+                    trend_dir = "상향" if c_tp > p_tp else "하향" if c_tp < p_tp else "유지"
+                    broker_log_str += f"   - {b_name} ({b_date}): {p_tp:,.0f}원 ➡️ {c_tp:,.0f}원 ({trend_dir}) | 의견: {op_str}\n"
+                else:
+                    c_tp = r.get('target_price', 0)
+                    broker_log_str += f"   - {b_name} ({b_date}): 신규/유지 {c_tp:,.0f}원 | 의견: {op_str}\n"
 
     eps_e_trend = "유지"
     if len(eps_history) >= 2:
@@ -894,6 +959,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         f"   - 🧩 시스템 신뢰도 감점 내역: {reasons_str}\n"
         f"{consensus_log}"
         f"   - 참고 원본 BPS: {bps_disp_val}\n"
+        f"{broker_log_str}"
     )
 
     eps_str = f"{eps_val:,}원" if eps_val is not None else "데이터 누락"
@@ -1059,15 +1125,14 @@ with tab2:
     analyst_universe = cached_data.get("analyst_universe", {})
     today_active_reps = []
     
-    # 람다 데이터 구조 오판 수정 및 타임존(KST) 보정 반영
+    now_kst = datetime.now(timezone(timedelta(hours=9)))
+    today_str = now_kst.strftime('%Y-%m-%d')
+    
     if analyst_universe:
         all_reps = [r for r in analyst_universe.values() if isinstance(r, dict)]
-        if all_reps:
-            # 타임존 이슈 및 주말 방어: DB 내 '가장 최근 날짜'를 당일로 간주
-            latest_date = max(r.get('date', '1900-01-01') for r in all_reps)
-            today_active_reps = [r for r in all_reps if r.get('date', '') == latest_date]
-            # 람다 수집 순서 보정을 위한 날짜/시간 역순 정렬
-            today_active_reps.sort(key=lambda x: x.get('date', ''), reverse=True)
+        valid_reps = [r for r in all_reps if re.match(r'\d{4}-\d{2}-\d{2}', str(r.get('date', '')))]
+        today_active_reps = [r for r in valid_reps if str(r.get('date', '')) == today_str]
+        today_active_reps.sort(key=lambda x: x.get('date', ''), reverse=True)
 
     us_news_pool = cached_data.get("us_market_news", [])
     eco_news_pool = cached_data.get("eco_news", [])
@@ -1107,37 +1172,18 @@ with tab2:
 
     with c_rep_news:
         with st.container(border=True):
-            disp_date = latest_date if today_active_reps else "데이터 없음"
-            st.markdown(f"🔥 **당일 신규 애널리스트 리포트** ({disp_date})")
+            st.markdown(f"🔥 **당일 신규 애널리스트 리포트** ({today_str})")
             
             if today_active_reps:
-                st.success(f"신규/수정 리포트 **{len(today_active_reps)}건**")
+                st.success(f"오늘자 신규/수정 리포트 **{len(today_active_reps)}건**")
                 
                 for idx, r in enumerate(today_active_reps[:st.session_state.rep_news_limit]):
                     stock_name = r.get('stock_name', '종목명')
                     broker = r.get('broker', '증권사')
                     
-                    tp_change_html = ""
-                    
-                    # 람다가 기록해둔 목표가 히스토리(tp_history) 배열 활용
-                    tp_history = r.get('tp_history', [])
-                    
-                    if len(tp_history) >= 2:
-                        prev_tp = tp_history[-2]
-                        curr_tp = tp_history[-1]
-                        
-                        if curr_tp > prev_tp:
-                            tp_change_html = f"<span style='color:#ff4b4b; font-weight:bold; background-color:rgba(255,75,75,0.1); padding:2px 4px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 🔺상향] {prev_tp:,.0f} → {curr_tp:,.0f}</span>"
-                        elif curr_tp < prev_tp:
-                            tp_change_html = f"<span style='color:#1c83e1; font-weight:bold; background-color:rgba(28,131,225,0.1); padding:2px 4px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 🔻하향] {prev_tp:,.0f} → {curr_tp:,.0f}</span>"
-                    else:
-                        # 히스토리가 1개거나 없으면 유지/신규로 처리
-                        curr_tp_str = re.sub(r'[^\d]', '', str(r.get('target_price', '0')))
-                        curr_tp = float(curr_tp_str) if curr_tp_str else 0.0
-                        if curr_tp > 0:
-                            tp_change_html = f"<span style='color:#666; font-weight:bold; background-color:#eee; padding:2px 4px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 신규/유지] {curr_tp:,.0f}</span>"
-
-                    badge_str = "<br>" + tp_change_html if tp_change_html else ""
+                    # 새롭게 생성한 뱃지 함수 이용
+                    badge_html = generate_report_badges(r)
+                    badge_str = "<br>" + badge_html if badge_html else ""
                     
                     st.markdown(f"- **{stock_name}** ({broker}){badge_str}<br>&nbsp;&nbsp;<span style='font-size:0.9em; color:gray;'>{r.get('title', '제목 없음')}</span>", unsafe_allow_html=True)
                     
@@ -1147,7 +1193,7 @@ with tab2:
                         st.session_state.rep_news_limit += 6
                         st.rerun()
             else:
-                st.info("수집된 리포트가 없습니다.")
+                st.info("오늘 자 신규 리포트 없음 (현재 DB에 수집된 당일 리포트가 없습니다. 람다 백엔드 파싱 상태를 점검하세요.)")
 
     st.divider()
 
@@ -1396,7 +1442,9 @@ with tab4:
                         f"---\n"
                         f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
                         f"**📊 집중 전략 팩트 분석 (3x3 교차 라벨 해설 포함)**\n\n"
-                        f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n"
+                        f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n\n"
+                        f"**🏢 [참고] 주요 증권사 목표가 변동 내역**\n"
+                        f"(파이썬 로그에 제공된 증권사별 변동 내역을 빠짐없이 목록화하여 기재)\n"
                         f"</ANALYSIS_티커숫자>\n\n"
                         f"[SELECTED_TICKERS]: 000000, 111111, 222222"
                     )
@@ -1560,13 +1608,13 @@ with tab5:
                             f"**🎯 투자의견: [매수 / 유지 / 비중축소 / 손절]**\n"
                             f"- **현재가:** 000원\n"
                             f"- **목표가:** [{eval_horizon} 목표가 00원]\n"
-                            f"- **시스템 손절가:** [{eval_horizon} 손절가 00원]\n"
-                            f"- **💡 3x3 매트릭스 진단:** [Tier 등급 기입] (파이썬 로그를 참고하여 이 등급이 부여된 이유를 '목표가 XX + 실적 XX' 형태로 1줄 설명)\n"
-                            f"- **한 줄 요약:** (가장 핵심이 되는 판단 근거 1줄)\n\n"
+                            f"**한 줄 요약:** (가장 핵심이 되는 판단 근거 1줄)\n\n"
                             f"---\n"
                             f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
                             f"**📊 {eval_horizon} 맞춤형 팩트 분석 (3x3 크로스 시그널 해설 포함)**\n\n"
-                            f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n"
+                            f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n\n"
+                            f"**🏢 [참고] 주요 증권사 목표가 변동 내역**\n"
+                            f"(파이썬 로그에 제공된 증권사별 변동 내역을 빠짐없이 목록화하여 기재)\n"
                         )
                         
                         report = call_gemini_with_fallback(prompt)
@@ -1604,19 +1652,17 @@ with tab5:
             else:
                 st.info(f"ℹ️ {name} 관련 수집된 뉴스가 없습니다. (드라이브 백업 후 람다 스케줄러 실행 대기 필요)")
 
-            matched_report = next((rep for rep in analyst_universe.values() if rep.get("ticker") == ticker), None)
+            # [핵심 수술] 진단 탭의 애널리스트 리포트 표시에도 동일한 뱃지 생성 함수 적용
+            reports_for_ticker = sorted([rep for rep in analyst_universe.values() if rep.get("ticker") == ticker], key=lambda x: x.get('date', ''), reverse=True)
+            matched_report = reports_for_ticker[0] if reports_for_ticker else None
+            
             if matched_report:
                 broker = matched_report.get('broker', '증권사')
-                tp = matched_report.get('target_price', 0)
-                try:
-                    if isinstance(tp, str): tp = tp.replace(',', '')
-                    tp_str = f"{float(tp):,.0f}원"
-                except:
-                    tp_str = f"{tp}"
-                    
+                badge_html = generate_report_badges(matched_report)
+                
                 with st.expander(f"📑 {name} 최신 애널리스트 리포트 ({broker})", expanded=False):
                     st.markdown(f"**제목:** {matched_report.get('title', '제목 없음')}")
-                    st.markdown(f"**목표가 추세:** {tp_str} ({matched_report.get('tp_trend', '유지/신규')})")
+                    st.markdown(f"**투자의견 및 목표가:** {badge_html}", unsafe_allow_html=True)
                     if matched_report.get('summary'):
                         st.info(f"{matched_report.get('summary')}")
 
