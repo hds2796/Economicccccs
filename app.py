@@ -661,7 +661,7 @@ def fetch_realtime_data_direct():
         return res.json()
     except: return None
 
-# [뱃지 생성 로직 유지]
+# [방어 추가] 목표가 데이터가 없을 경우 에러 대신 회색 '미제시' 뱃지로 렌더링하도록 캡슐화
 def generate_report_badges(r):
     tp_change_html = ""
     op_change_html = ""
@@ -670,6 +670,7 @@ def generate_report_badges(r):
     op_history = r.get('op_history', [])
     opinion = r.get('opinion', '').strip()
     
+    # 1. 목표가 뱃지
     if len(tp_history) >= 2:
         prev_tp = tp_history[-2]
         curr_tp = tp_history[-1]
@@ -689,6 +690,7 @@ def generate_report_badges(r):
         else:
             tp_change_html = f"<span style='color:#999; font-weight:bold; background-color:#f5f5f5; padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 미제시]</span>"
 
+    # 2. 투자의견 뱃지 (op_history 활용하여 변경 추적)
     if len(op_history) >= 2 and op_history[-1] != op_history[-2] and op_history[-1].lower() != 'none':
         op_change_html = f"<span style='color:#FF8C00; font-weight:bold; background-color:rgba(255,140,0,0.1); padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[의견 변경] {op_history[-2]} → {op_history[-1]}</span>"
     elif opinion and opinion.lower() != 'none' and opinion != '-':
@@ -813,6 +815,15 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         
     else:
         growth_pct_val = max(eps_growth * 100, 5.0) 
+
+        # ▼ 신규 추가: forward EPS가 존재할 경우, 과거 실적 대비 forward 성장률 반영
+        if fund.get('forward_eps_e') is not None and eps_history and eps_history[-1] != 0:
+            forward_growth_pct = ((fund['forward_eps_e'] - eps_history[-1]) / abs(eps_history[-1])) * 100
+            growth_pct_val = max(growth_pct_val, forward_growth_pct, 5.0)
+            
+            # 하단 eps_multiplier 연산을 위해 eps_growth 변수도 상향 동기화
+            eps_growth = max(eps_growth, forward_growth_pct / 100)
+
         dynamic_per_cap = max(8.0, min(growth_pct_val * 1.2, 40.0)) 
 
         if float_ind_per > 0:
@@ -841,20 +852,10 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 
     # =======================================================
     # [수정] 증권사 전체 컨센서스(평균) 추세 산출 방식 적용
-    # =======================================================
-    tp_trend = "유지/신규"
-    broker_log_str = ""
-    avg_curr = 0
-    
-    if analyst_data:
-        reps_for_ticker = sorted([rep for rep in analyst_data.values() if rep.get("ticker") == ticker], key=lambda x: x.get('date', ''), reverse=True)
-        
-        if reps_for_ticker:
-            valid_curr_tps = []
-            valid_prev_tps = []
             
-            broker_log_str = "▶ [증권사 전체 컨센서스 및 목표가 변동 요약]\n"
-            for r in reps_for_ticker:
+        if reps_for_ticker:
+            broker_log_str = "▶ [최근 증권사별 목표가 및 의견 변동 요약]\n"
+            for r in reps_for_ticker[:5]:
                 b_name = r.get('broker', '알수없음')
                 b_date = r.get('date', '')
                 t_hist = r.get('tp_history', [])
@@ -865,33 +866,11 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
                 if len(t_hist) >= 2:
                     p_tp = t_hist[-2]
                     c_tp = t_hist[-1]
-                elif len(t_hist) == 1:
-                    p_tp = t_hist[0]
-                    c_tp = t_hist[0]
+                    trend_dir = "상향" if c_tp > p_tp else "하향" if c_tp < p_tp else "유지"
+                    broker_log_str += f"   - {b_name} ({b_date}): {p_tp:,.0f}원 ➡️ {c_tp:,.0f}원 ({trend_dir}) | 의견: {op_str}\n"
                 else:
                     c_tp = r.get('target_price', 0)
-                    p_tp = c_tp
-                    
-                if c_tp > 0:
-                    valid_curr_tps.append(c_tp)
-                    valid_prev_tps.append(p_tp)
-                    
-                trend_dir = "🔺상향" if c_tp > p_tp else "🔻하향" if c_tp < p_tp else "유지"
-                broker_log_str += f"   - {b_name} ({b_date}): {p_tp:,.0f}원 ➡️ {c_tp:,.0f}원 ({trend_dir}) | 의견: {op_str}\n"
-
-            # 3x3 매트릭스를 위한 전체 증권사 시장 평균 트렌드 산출
-            if valid_curr_tps:
-                avg_curr = sum(valid_curr_tps) / len(valid_curr_tps)
-                avg_prev = sum(valid_prev_tps) / len(valid_prev_tps)
-                
-                if avg_curr > avg_prev * 1.005:
-                    tp_trend = "상향"
-                elif avg_curr < avg_prev * 0.995:
-                    tp_trend = "하향"
-                else:
-                    tp_trend = "유지"
-                    
-                broker_log_str += f"   => 📊 [종합 컨센서스 판정] 이전 평균 {avg_prev:,.0f}원 ➡️ 현재 평균 {avg_curr:,.0f}원 ({tp_trend})\n"
+                    broker_log_str += f"   - {b_name} ({b_date}): 신규/유지 {c_tp:,.0f}원 | 의견: {op_str}\n"
 
     eps_e_trend = "유지"
     if len(eps_history) >= 2:
@@ -901,17 +880,17 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             eps_e_trend = "하향"
 
     if "상향" in tp_trend:
-        if "상향" in eps_e_trend: cross_signal, tier, penalty = "True Bull (목표가 컨센상향 + 실적 상향 ➡️ 건전한 동반 성장)", "Tier 1 (Pass)", 0
-        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Critical Value Trap (목표가 컨센상향 + 실적 하향 ➡️ 목표가 거품 리스크)", "Tier 3 (Fatal)", -20
-        else: cross_signal, tier, penalty = "Momentum Driven (목표가 컨센상향 + 실적 유지 ➡️ 수급 주도 모멘텀)", "Tier 1 (Pass)", -5
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "True Bull (목표가 상향 + 실적 상향 ➡️ 펀더멘털과 가격이 동행하는 건전한 성장)", "Tier 1 (Pass)", 0
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Critical Value Trap (목표가 상향 + 실적 하향 ➡️ 실적은 꺾이는데 목표가만 높은 위험한 거품)", "Tier 3 (Fatal)", -20
+        else: cross_signal, tier, penalty = "Momentum Driven (목표가 상향 + 실적 유지 ➡️ 실적 상향 없이 가격만 오르는 수급 주도)", "Tier 1 (Pass)", -5
     elif "하향" in tp_trend:
-        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Turnaround (목표가 컨센하향 + 실적 상향 ➡️ 소외 우량주)", "Tier 1 (Pass)", 10
-        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Genuine Bear (목표가 컨센하향 + 실적 하향 ➡️ 구조적 침체)", "Tier 3 (Fatal)", 0
-        else: cross_signal, tier, penalty = "Sentiment Driven Drop (목표가 컨센하향 + 실적 유지 ➡️ 심리적 과매도)", "Tier 2 (Warning)", 0
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Turnaround (목표가 하향 + 실적 상향 ➡️ 주가는 빠지지만 실적 체력은 오르는 소외된 우량주)", "Tier 1 (Pass)", 10
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Genuine Bear (목표가 하향 + 실적 하향 ➡️ 이익과 가격이 모두 부러진 구조적 침체)", "Tier 3 (Fatal)", 0
+        else: cross_signal, tier, penalty = "Sentiment Driven Drop (목표가 하향 + 실적 유지 ➡️ 실적 하향은 멈췄으나 심리적 과매도로 하락)", "Tier 2 (Warning)", 0
     else:
-        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Quiet Accumulation (목표가 컨센유지 + 실적 상향 ➡️ 선취매 구간)", "Tier 1 (Pass)", 5
-        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Value Trap (목표가 컨센유지 + 실적 하향 ➡️ 눈치보기 하락장)", "Tier 2 (Warning)", -10
-        else: cross_signal, tier, penalty = "Neutral (목표가 컨센유지 + 실적 유지 ➡️ 뚜렷한 방향성 없음)", "Tier 1 (Pass)", 0
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Quiet Accumulation (목표가 유지 + 실적 상향 ➡️ 시장은 조용하나 실적 추정치가 개선되는 선취매 구간)", "Tier 1 (Pass)", 5
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Value Trap (목표가 유지 + 실적 하향 ➡️ 목표가는 방어 중이나 이익은 몰래 하향 중인 눈치보기 장세)", "Tier 2 (Warning)", -10
+        else: cross_signal, tier, penalty = "Neutral (목표가 유지 + 실적 유지 ➡️ 뚜렷한 방향성 없음)", "Tier 1 (Pass)", 0
 
     if is_discovery_mode and tier == "Tier 3 (Fatal)":
         return {"ticker": ticker, "name": name, "status": "KILLED", "reason": f"{cross_signal} ({tier} 치명적 리스크 제어 작동)"}
@@ -956,9 +935,11 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     bps_disp_val = f"{bps_val:,.0f}원" if bps_val is not None else "데이터 누락"
 
     consensus_log = ""
-    if avg_curr > 0 and tp_m > 0:
-        divergence = (tp_m - avg_curr) / avg_curr
-        consensus_log = f"   - ⚖️ 종합 컨센서스 교차검증: 시장 평균 목표가 {avg_curr:,.0f}원(추세: {tp_trend}) vs 퀀트 중기 적정가 {tp_m:,.0f}원 (괴리율: {divergence*100:+.1f}%) ➡️ 판정 (페널티 계수: {penalty}%)\n"
+    if analyst_data and matched_report:
+        a_target = float(matched_report.get("target_price", 0))
+        if a_target > 0 and tp_m > 0:
+            divergence = (tp_m - a_target) / a_target
+            consensus_log = f"   - ⚖️ 컨센서스 교차검증: 증권사 목표가 {a_target:,.0f}원({tp_trend}) vs 퀀트 중기 적정가 {tp_m:,.0f}원 (괴리율: {divergence*100:+.1f}%) ➡️ 판정 (페널티 계수: {penalty}%)\n"
 
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
@@ -1778,72 +1759,4 @@ with tab6:
                 if idx < len(cols_rf):
                     with cols_rf[idx]:
                         if b["total"] < 5:
-                            st.caption(f"**위험 신호 {rf}개**<br>샘플 {b['total']}건 누적<br>*(통계 신뢰도 구축 중, 최소 5건 필요)*", unsafe_allow_html=True)
-                        else:
-                            hit_rate = b["hit"] / b["total"] * 100
-                            stop_rate = b["stop"] / b["total"] * 100
-                            st.metric(f"위험 신호 {rf}개 (n={b['total']})", f"목표도달 {hit_rate:.0f}%", f"손절이탈 {stop_rate:.0f}%", delta_color="off")
-        
-        st.divider()
-
-        col_bulk_scrap, _ = st.columns([2, 8])
-        with col_bulk_scrap:
-            if st.button("🗑️ 선택 항목 삭제", key="bulk_del_t6", use_container_width=True):
-                if to_del := [s[0] for s in scraps if st.session_state.get(f"chk_t6_{s[0]}", False)]:
-                    c.execute(f"DELETE FROM scrapbook WHERE id IN ({','.join(['?']*len(to_del))})", to_del)
-                    conn.commit(); st.rerun()
-                    
-        for row in scraps:
-            s_id, title, s_name, ticker, s_date, analysis, m_used, saved_p, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, risk_flags, s_sys_conf, s_reasons = row
-            code = re.sub(r'[^\d]', '', ticker or "")
-            price_info = price_map_scrap.get(code, {})
-            current_p = price_info.get("current", 0.0)
-            max_high, min_low = get_historical_high_low(code, s_date)
-            
-            col_sel_s, col_exp_s = st.columns([0.5, 9.5])
-            with col_sel_s: st.checkbox("선택", key=f"chk_t6_{s_id}", label_visibility="collapsed")
-            with col_exp_s:
-                with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
-                    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-                    
-                    if saved_p and current_p > 0:
-                        scrap_diff = current_p - saved_p
-                        scrap_diff_pct = (scrap_diff / saved_p) * 100
-                        m_col1.metric("저장 당시 주가", f"{saved_p:,.0f}원", delta=f"스크랩 누적 {scrap_diff:+,.0f}원 ({scrap_diff_pct:+.2f}%)")
-                    else: 
-                        m_col1.metric("저장 당시 주가", f"{saved_p:,.0f}원" if saved_p else "정보 없음")
-                    
-                    if current_p > 0:
-                        daily_diff = price_info.get("diff", 0.0)
-                        daily_diff_pct = price_info.get("diff_pct", 0.0)
-                        m_col2.metric("실시간 현재가", f"{current_p:,.0f}원", delta=f"전일 대비 {daily_diff:+,.0f}원 ({daily_diff_pct:+.2f}%)")
-                    else: 
-                        m_col2.metric("실시간 현재가", "조회 실패")
-                        
-                    m_col3.markdown(f"**손절가 라인**<br>단기: <span style='color:red;'>{sl_s:,.0f}</span><br>중기: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
-                    m_col4.markdown(f"**목표가 밴드**<br>단기: {tp_s:,.0f}<br>중기: {tp_m:,.0f}", unsafe_allow_html=True)
-
-                    if s_sys_conf is not None and s_sys_conf > 0:
-                        st.info(f"**🧮 파이썬 산출 시스템 신뢰도: {s_sys_conf}%**\n\n*(감점 사유: {s_reasons if s_reasons else '없음'})*")
-
-                    if tp_m > tp_l and tp_l > 0:
-                        st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 '중기 가치 > 장기 RIM 가치' 역전 플래그 상태였습니다.")
-                    if tp_s > tp_m and tp_m > 0:
-                        st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 '단기 가치 > 중기 가치' 역전 플래그 상태였습니다.")
-                    
-                    if current_p > 0 and tp_s > 0:
-                        pct_s = (current_p / tp_s) * 100
-                        st.progress(min(int(pct_s), 100), text=f"단기 목표가 대비 진행률: **{pct_s:.1f}%**")
-                        if min_low > 0 and min_low <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 현재 반등했더라도 시스템 룰에 따른 리뷰가 필요합니다.")
-                        elif current_p <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 규칙에 의거해 청산을 고려하십시오.")
-                    
-                    st.markdown("---")
-                    st.write(analysis)
-                    
-                    if st.button("개별 삭제", key=f"del_t6_{s_id}", use_container_width=True):
-                        c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,))
-                        conn.commit(); st.rerun()
-    else:
-        st.info("저장된 분석 리포트가 없습니다.")
+                            st.caption(f"**위험 신호 {rf}개**<br>샘플 {b['total']}건 누적<br>*(통계 신뢰도 구축 중, 최소 5건 필요)*", unsafe_allow_html=True
