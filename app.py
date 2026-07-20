@@ -1723,9 +1723,9 @@ with tab5:
                     if p_sys_conf is not None and p_sys_conf > 0:
                         st.info(f"**🧮 파이썬 산출 시스템 신뢰도: {p_sys_conf}%**\n\n*(감점 사유: {p_reasons if p_reasons else '없음'})*")
 
-                    if "고평가 국면" in p_reasons:
+                    if "고평가 국면" in (p_reasons or ""):
                         st.warning(f"⚠️ 시스템 경고: 해당 종목은 4분면 진단 상 상대가치 및 절대가치를 모두 초과한 '고평가 국면'입니다.")
-                    elif "가치 함정" in p_reasons:
+                    elif "가치 함정" in (p_reasons or ""):
                         st.warning(f"⚠️ 시스템 경고: 절대가치(BPS+ROE)는 저평가이나 상대가치(PER)가 고평가된 '가치 함정' 의심 국면입니다.")
                         
                     st.write(report_text)
