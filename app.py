@@ -661,7 +661,7 @@ def fetch_realtime_data_direct():
         return res.json()
     except: return None
 
-# [신규 추가] 뱃지 생성 공통 함수 (Tab 2, Tab 5 등에서 모두 재사용)
+# [방어 추가] 목표가 데이터가 없을 경우 에러 대신 회색 '미제시' 뱃지로 렌더링하도록 캡슐화
 def generate_report_badges(r):
     tp_change_html = ""
     op_change_html = ""
@@ -680,16 +680,20 @@ def generate_report_badges(r):
             tp_change_html = f"<span style='color:#1c83e1; font-weight:bold; background-color:rgba(28,131,225,0.1); padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 🔻하향] {prev_tp:,.0f} → {curr_tp:,.0f}</span>"
         elif curr_tp > 0:
             tp_change_html = f"<span style='color:#666; font-weight:bold; background-color:#eee; padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 유지] {curr_tp:,.0f}</span>"
+        else:
+            tp_change_html = f"<span style='color:#999; font-weight:bold; background-color:#f5f5f5; padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 미제시]</span>"
     else:
         curr_tp_str = re.sub(r'[^\d]', '', str(r.get('target_price', '0')))
         curr_tp = float(curr_tp_str) if curr_tp_str else 0.0
         if curr_tp > 0:
             tp_change_html = f"<span style='color:#666; font-weight:bold; background-color:#eee; padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 신규/유지] {curr_tp:,.0f}</span>"
+        else:
+            tp_change_html = f"<span style='color:#999; font-weight:bold; background-color:#f5f5f5; padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 미제시]</span>"
 
     # 2. 투자의견 뱃지 (op_history 활용하여 변경 추적)
-    if len(op_history) >= 2 and op_history[-1] != op_history[-2]:
+    if len(op_history) >= 2 and op_history[-1] != op_history[-2] and op_history[-1].lower() != 'none':
         op_change_html = f"<span style='color:#FF8C00; font-weight:bold; background-color:rgba(255,140,0,0.1); padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[의견 변경] {op_history[-2]} → {op_history[-1]}</span>"
-    elif opinion and opinion.lower() != 'none':
+    elif opinion and opinion.lower() != 'none' and opinion != '-':
         op_color = "#FF8C00" if "buy" in opinion.lower() or "매수" in opinion else "#666"
         op_bg = "rgba(255,140,0,0.1)" if "buy" in opinion.lower() or "매수" in opinion else "#eee"
         op_change_html = f"<span style='color:{op_color}; font-weight:bold; background-color:{op_bg}; padding:2px 6px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[{opinion}]</span>"
@@ -810,31 +814,27 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         data_incomplete = False
         
     else:
-        current_per = (current_price / eps_val)
-        val_growth = max(-0.5, min(eps_growth, 1.0))
-        
-        base_per = float_ind_per if float_ind_per > 0 else max(8.0, min(val_growth * 100 * 1.2, 40.0))
+        growth_pct_val = max(eps_growth * 100, 5.0) 
+        dynamic_per_cap = max(8.0, min(growth_pct_val * 1.2, 40.0)) 
 
-        if val_growth > 0:
-            target_per = base_per * (1 + np.log1p(val_growth))
+        if float_ind_per > 0:
+            eps_multiplier = (1 + np.log1p(eps_growth)) if eps_growth > 0 else (1 + eps_growth)
+            adjusted_ind_per = float_ind_per * eps_multiplier
         else:
-            target_per = base_per * (1 + val_growth)
-
-        floor_per = min(current_per * 0.8, base_per)
-        ceiling_per = max(current_per * 1.5, 40.0) 
-
-        final_per = max(floor_per, min(target_per, ceiling_per))
-
-        if final_per <= floor_per and final_per < current_per * 0.5:
-            fund_type = "상대 가치 (고평가 극단 조정 방어)"
-            structural_warning = f"⚠️ [가치 함정 억제] 시장 PER({current_per:.1f}배) 대비 보수적 스무딩 PER({final_per:.1f}배) 적용."
-        elif final_per == ceiling_per:
-            fund_type = "상대 가치 (성장 캡 상한 적용)"
-            structural_warning = f"⚠️ [Value Trap 방어] 이익성장 기저효과 억제. 상한 PER {final_per:.1f}배 강제 적용."
-        else:
-            fund_type = "기본 상대 가치 (동적 PEG 스케일링)"
+            adjusted_ind_per = dynamic_per_cap
             
-        tp_m = eps_val * final_per
+        current_per = (current_price / eps_val)
+        
+        safe_per_cap = min(current_per * 1.5, float_ind_per * 1.5 if float_ind_per > 0 else 40.0, dynamic_per_cap)
+        
+        if adjusted_ind_per > safe_per_cap:
+            fund_type = "상대 가치 (비선형 PEG 동적 캡 적용)"
+            structural_warning = f"⚠️ [Value Trap 방어] 환상적인 이익성장 기저효과 필터링 작동. 한계 PER {safe_per_cap:.1f}배 강제 제한."
+            tp_m = eps_val * safe_per_cap
+        else:
+            fund_type = "기본 상대 가치 (로그 스케일 업종 평균 수렴)"
+            tp_m = eps_val * adjusted_ind_per
+            
         required_return = rf + (beta * 0.06) + risk_premium
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
         fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, \u03C9 {omega_val})"
@@ -848,7 +848,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     broker_log_str = ""
     
     if analyst_data:
-        # 수정: 가장 최신 리포트 매칭 및 증권사별 변동 내역 요약 생성
         reps_for_ticker = sorted([rep for rep in analyst_data.values() if rep.get("ticker") == ticker], key=lambda x: x.get('date', ''), reverse=True)
         matched_report = reps_for_ticker[0] if reps_for_ticker else None
         if matched_report:
@@ -1181,7 +1180,6 @@ with tab2:
                     stock_name = r.get('stock_name', '종목명')
                     broker = r.get('broker', '증권사')
                     
-                    # 새롭게 생성한 뱃지 함수 이용
                     badge_html = generate_report_badges(r)
                     badge_str = "<br>" + badge_html if badge_html else ""
                     
@@ -1608,7 +1606,9 @@ with tab5:
                             f"**🎯 투자의견: [매수 / 유지 / 비중축소 / 손절]**\n"
                             f"- **현재가:** 000원\n"
                             f"- **목표가:** [{eval_horizon} 목표가 00원]\n"
-                            f"**한 줄 요약:** (가장 핵심이 되는 판단 근거 1줄)\n\n"
+                            f"- **시스템 손절가:** [{eval_horizon} 손절가 00원]\n"
+                            f"- **💡 3x3 매트릭스 진단:** [Tier 등급 기입] (파이썬 로그를 참고하여 이 등급이 부여된 이유를 '목표가 XX + 실적 XX' 형태로 1줄 설명)\n"
+                            f"- **한 줄 요약:** (가장 핵심이 되는 판단 근거 1줄)\n\n"
                             f"---\n"
                             f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
                             f"**📊 {eval_horizon} 맞춤형 팩트 분석 (3x3 크로스 시그널 해설 포함)**\n\n"
@@ -1652,7 +1652,6 @@ with tab5:
             else:
                 st.info(f"ℹ️ {name} 관련 수집된 뉴스가 없습니다. (드라이브 백업 후 람다 스케줄러 실행 대기 필요)")
 
-            # [핵심 수술] 진단 탭의 애널리스트 리포트 표시에도 동일한 뱃지 생성 함수 적용
             reports_for_ticker = sorted([rep for rep in analyst_universe.values() if rep.get("ticker") == ticker], key=lambda x: x.get('date', ''), reverse=True)
             matched_report = reports_for_ticker[0] if reports_for_ticker else None
             
@@ -1760,72 +1759,4 @@ with tab6:
                 if idx < len(cols_rf):
                     with cols_rf[idx]:
                         if b["total"] < 5:
-                            st.caption(f"**위험 신호 {rf}개**<br>샘플 {b['total']}건 누적<br>*(통계 신뢰도 구축 중, 최소 5건 필요)*", unsafe_allow_html=True)
-                        else:
-                            hit_rate = b["hit"] / b["total"] * 100
-                            stop_rate = b["stop"] / b["total"] * 100
-                            st.metric(f"위험 신호 {rf}개 (n={b['total']})", f"목표도달 {hit_rate:.0f}%", f"손절이탈 {stop_rate:.0f}%", delta_color="off")
-        
-        st.divider()
-
-        col_bulk_scrap, _ = st.columns([2, 8])
-        with col_bulk_scrap:
-            if st.button("🗑️ 선택 항목 삭제", key="bulk_del_t6", use_container_width=True):
-                if to_del := [s[0] for s in scraps if st.session_state.get(f"chk_t6_{s[0]}", False)]:
-                    c.execute(f"DELETE FROM scrapbook WHERE id IN ({','.join(['?']*len(to_del))})", to_del)
-                    conn.commit(); st.rerun()
-                    
-        for row in scraps:
-            s_id, title, s_name, ticker, s_date, analysis, m_used, saved_p, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, risk_flags, s_sys_conf, s_reasons = row
-            code = re.sub(r'[^\d]', '', ticker or "")
-            price_info = price_map_scrap.get(code, {})
-            current_p = price_info.get("current", 0.0)
-            max_high, min_low = get_historical_high_low(code, s_date)
-            
-            col_sel_s, col_exp_s = st.columns([0.5, 9.5])
-            with col_sel_s: st.checkbox("선택", key=f"chk_t6_{s_id}", label_visibility="collapsed")
-            with col_exp_s:
-                with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
-                    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-                    
-                    if saved_p and current_p > 0:
-                        scrap_diff = current_p - saved_p
-                        scrap_diff_pct = (scrap_diff / saved_p) * 100
-                        m_col1.metric("저장 당시 주가", f"{saved_p:,.0f}원", delta=f"스크랩 누적 {scrap_diff:+,.0f}원 ({scrap_diff_pct:+.2f}%)")
-                    else: 
-                        m_col1.metric("저장 당시 주가", f"{saved_p:,.0f}원" if saved_p else "정보 없음")
-                    
-                    if current_p > 0:
-                        daily_diff = price_info.get("diff", 0.0)
-                        daily_diff_pct = price_info.get("diff_pct", 0.0)
-                        m_col2.metric("실시간 현재가", f"{current_p:,.0f}원", delta=f"전일 대비 {daily_diff:+,.0f}원 ({daily_diff_pct:+.2f}%)")
-                    else: 
-                        m_col2.metric("실시간 현재가", "조회 실패")
-                        
-                    m_col3.markdown(f"**손절가 라인**<br>단기: <span style='color:red;'>{sl_s:,.0f}</span><br>중기: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
-                    m_col4.markdown(f"**목표가 밴드**<br>단기: {tp_s:,.0f}<br>중기: {tp_m:,.0f}", unsafe_allow_html=True)
-
-                    if s_sys_conf is not None and s_sys_conf > 0:
-                        st.info(f"**🧮 파이썬 산출 시스템 신뢰도: {s_sys_conf}%**\n\n*(감점 사유: {s_reasons if s_reasons else '없음'})*")
-
-                    if tp_m > tp_l and tp_l > 0:
-                        st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 '중기 가치 > 장기 RIM 가치' 역전 플래그 상태였습니다.")
-                    if tp_s > tp_m and tp_m > 0:
-                        st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 '단기 가치 > 중기 가치' 역전 플래그 상태였습니다.")
-                    
-                    if current_p > 0 and tp_s > 0:
-                        pct_s = (current_p / tp_s) * 100
-                        st.progress(min(int(pct_s), 100), text=f"단기 목표가 대비 진행률: **{pct_s:.1f}%**")
-                        if min_low > 0 and min_low <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 현재 반등했더라도 시스템 룰에 따른 리뷰가 필요합니다.")
-                        elif current_p <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 규칙에 의거해 청산을 고려하십시오.")
-                    
-                    st.markdown("---")
-                    st.write(analysis)
-                    
-                    if st.button("개별 삭제", key=f"del_t6_{s_id}", use_container_width=True):
-                        c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,))
-                        conn.commit(); st.rerun()
-    else:
-        st.info("저장된 분석 리포트가 없습니다.")
+                            st.caption(f"**위험 신호 {rf}개**<br>샘플 {b['total']}건 누적<br>*(통계 신뢰도 구축 중, 최소 5건 필요)*", unsafe_allow_html=True
