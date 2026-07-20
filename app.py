@@ -14,7 +14,7 @@ import io
 import zipfile
 import xml.etree.ElementTree as ET
 import concurrent.futures
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -109,7 +109,6 @@ def init_db():
         
         connection.commit()
 
-        # 시스템 신뢰도 및 사유 컬럼 추가
         columns_to_add = [
             ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
             ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("portfolio", "report_text", "TEXT"),
@@ -772,31 +771,27 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         data_incomplete = False
         
     else:
-        current_per = (current_price / eps_val)
-        val_growth = max(-0.5, min(eps_growth, 1.0))
-        
-        base_per = float_ind_per if float_ind_per > 0 else max(8.0, min(val_growth * 100 * 1.2, 40.0))
+        growth_pct_val = max(eps_growth * 100, 5.0) 
+        dynamic_per_cap = max(8.0, min(growth_pct_val * 1.2, 40.0)) 
 
-        if val_growth > 0:
-            target_per = base_per * (1 + np.log1p(val_growth))
+        if float_ind_per > 0:
+            eps_multiplier = (1 + np.log1p(eps_growth)) if eps_growth > 0 else (1 + eps_growth)
+            adjusted_ind_per = float_ind_per * eps_multiplier
         else:
-            target_per = base_per * (1 + val_growth)
-
-        floor_per = min(current_per * 0.8, base_per)
-        ceiling_per = max(current_per * 1.5, 40.0) 
-
-        final_per = max(floor_per, min(target_per, ceiling_per))
-
-        if final_per <= floor_per and final_per < current_per * 0.5:
-            fund_type = "상대 가치 (고평가 극단 조정 방어)"
-            structural_warning = f"⚠️ [가치 함정 억제] 시장 PER({current_per:.1f}배) 대비 보수적 스무딩 PER({final_per:.1f}배) 적용."
-        elif final_per == ceiling_per:
-            fund_type = "상대 가치 (성장 캡 상한 적용)"
-            structural_warning = f"⚠️ [Value Trap 방어] 이익성장 기저효과 억제. 상한 PER {final_per:.1f}배 강제 적용."
-        else:
-            fund_type = "기본 상대 가치 (동적 PEG 스케일링)"
+            adjusted_ind_per = dynamic_per_cap
             
-        tp_m = eps_val * final_per
+        current_per = (current_price / eps_val)
+        
+        safe_per_cap = min(current_per * 1.5, float_ind_per * 1.5 if float_ind_per > 0 else 40.0, dynamic_per_cap)
+        
+        if adjusted_ind_per > safe_per_cap:
+            fund_type = "상대 가치 (비선형 PEG 동적 캡 적용)"
+            structural_warning = f"⚠️ [Value Trap 방어] 환상적인 이익성장 기저효과 필터링 작동. 한계 PER {safe_per_cap:.1f}배 강제 제한."
+            tp_m = eps_val * safe_per_cap
+        else:
+            fund_type = "기본 상대 가치 (로그 스케일 업종 평균 수렴)"
+            tp_m = eps_val * adjusted_ind_per
+            
         required_return = rf + (beta * 0.06) + risk_premium
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
         fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, \u03C9 {omega_val})"
@@ -1044,7 +1039,8 @@ with tab2:
         df_sent['date'] = pd.to_datetime(df_sent['date']).dt.strftime('%Y-%m-%d')
         df_avg = df_sent.groupby('date')['score'].mean().reset_index().set_index('date')
         df_avg_7d = df_avg.tail(7)
-        today_str = datetime.now().strftime('%Y-%m-%d')
+        now_kst = datetime.now(timezone(timedelta(hours=9)))
+        today_str = now_kst.strftime('%Y-%m-%d')
         if not df_avg.empty:
             today_score = df_avg.loc[today_str, 'score'] if today_str in df_avg.index else df_avg.iloc[-1]['score']
             prev_score = df_avg.iloc[-2]['score'] if len(df_avg) > 1 else today_score
@@ -1063,12 +1059,15 @@ with tab2:
     analyst_universe = cached_data.get("analyst_universe", {})
     today_active_reps = []
     
-    # 백엔드 캐시를 무시하고 프론트엔드에서 무조건 최신 날짜를 강제 추출
+    # 람다 데이터 구조 오판 수정 및 타임존(KST) 보정 반영
     if analyst_universe:
-        sorted_reps = sorted([r for r in analyst_universe.values() if isinstance(r, dict)], key=lambda x: x.get('date', '1900-01-01'), reverse=True)
-        if sorted_reps:
-            latest_date = sorted_reps[0].get('date', '')
-            today_active_reps = [r for r in sorted_reps if r.get('date', '') == latest_date]
+        all_reps = [r for r in analyst_universe.values() if isinstance(r, dict)]
+        if all_reps:
+            # 타임존 이슈 및 주말 방어: DB 내 '가장 최근 날짜'를 당일로 간주
+            latest_date = max(r.get('date', '1900-01-01') for r in all_reps)
+            today_active_reps = [r for r in all_reps if r.get('date', '') == latest_date]
+            # 람다 수집 순서 보정을 위한 날짜/시간 역순 정렬
+            today_active_reps.sort(key=lambda x: x.get('date', ''), reverse=True)
 
     us_news_pool = cached_data.get("us_market_news", [])
     eco_news_pool = cached_data.get("eco_news", [])
@@ -1108,70 +1107,47 @@ with tab2:
 
     with c_rep_news:
         with st.container(border=True):
-            st.markdown("🔥 **당일 신규 애널리스트 리포트**")
+            disp_date = latest_date if today_active_reps else "데이터 없음"
+            st.markdown(f"🔥 **당일 신규 애널리스트 리포트** ({disp_date})")
+            
             if today_active_reps:
-                st.success(f"오늘자 신규/수정 리포트 **{len(today_active_reps)}건**")
+                st.success(f"신규/수정 리포트 **{len(today_active_reps)}건**")
                 
                 for idx, r in enumerate(today_active_reps[:st.session_state.rep_news_limit]):
                     stock_name = r.get('stock_name', '종목명')
                     broker = r.get('broker', '증권사')
-                    curr_date = r.get('date', '9999-12-31')
-                    
-                    # 동일 종목 & 동일 증권사의 과거 리포트 역추적
-                    past_reps = [
-                        pr for pr in analyst_universe.values() 
-                        if isinstance(pr, dict) 
-                        and pr.get('stock_name') == stock_name 
-                        and pr.get('broker') == broker 
-                        and pr.get('date', '') < curr_date
-                    ]
                     
                     tp_change_html = ""
-                    op_change_html = ""
                     
-                    if past_reps:
-                        # 가장 최근 과거 리포트 추출
-                        prev_rep = sorted(past_reps, key=lambda x: x.get('date', ''), reverse=True)[0]
+                    # 람다가 기록해둔 목표가 히스토리(tp_history) 배열 활용
+                    tp_history = r.get('tp_history', [])
+                    
+                    if len(tp_history) >= 2:
+                        prev_tp = tp_history[-2]
+                        curr_tp = tp_history[-1]
                         
-                        # 목표가 변동 검사 및 수치 비교
+                        if curr_tp > prev_tp:
+                            tp_change_html = f"<span style='color:#ff4b4b; font-weight:bold; background-color:rgba(255,75,75,0.1); padding:2px 4px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 🔺상향] {prev_tp:,.0f} → {curr_tp:,.0f}</span>"
+                        elif curr_tp < prev_tp:
+                            tp_change_html = f"<span style='color:#1c83e1; font-weight:bold; background-color:rgba(28,131,225,0.1); padding:2px 4px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 🔻하향] {prev_tp:,.0f} → {curr_tp:,.0f}</span>"
+                    else:
+                        # 히스토리가 1개거나 없으면 유지/신규로 처리
                         curr_tp_str = re.sub(r'[^\d]', '', str(r.get('target_price', '0')))
-                        prev_tp_str = re.sub(r'[^\d]', '', str(prev_rep.get('target_price', '0')))
                         curr_tp = float(curr_tp_str) if curr_tp_str else 0.0
-                        prev_tp = float(prev_tp_str) if prev_tp_str else 0.0
-                        
-                        if curr_tp > 0 and prev_tp > 0 and curr_tp != prev_tp:
-                            direction = "🔺상향" if curr_tp > prev_tp else "🔻하향"
-                            color = "#ff4b4b" if curr_tp > prev_tp else "#1c83e1"
-                            bg_color = "rgba(255,75,75,0.1)" if curr_tp > prev_tp else "rgba(28,131,225,0.1)"
-                            tp_change_html = f"<span style='color:{color}; font-weight:bold; background-color:{bg_color}; padding:2px 4px; border-radius:4px; font-size:0.85em;'>[목표가 {direction}] {prev_tp:,.0f} → {curr_tp:,.0f}</span>"
-                        
-                        # 투자의견(Rating) 변동 검사
-                        curr_op = str(r.get('opinion') or r.get('rating') or '').strip()
-                        prev_op = str(prev_rep.get('opinion') or prev_rep.get('rating') or '').strip()
-                        
-                        if curr_op and prev_op and curr_op != prev_op and curr_op.lower() != 'none' and prev_op.lower() != 'none':
-                            op_change_html = f"<span style='color:#FF8C00; font-weight:bold; background-color:rgba(255,140,0,0.1); padding:2px 4px; border-radius:4px; font-size:0.85em;'>[의견 변경] {prev_op} → {curr_op}</span>"
-                    
-                    # 과거 리포트가 없어도 백엔드가 꼬리표를 줬다면 폴백 적용
-                    if not tp_change_html and r.get('tp_trend') in ['상향', '하향']:
-                        color = "#ff4b4b" if r['tp_trend'] == '상향' else "#1c83e1"
-                        bg_color = "rgba(255,75,75,0.1)" if r['tp_trend'] == '상향' else "rgba(28,131,225,0.1)"
-                        tp_change_html = f"<span style='color:{color}; font-weight:bold; background-color:{bg_color}; padding:2px 4px; border-radius:4px; font-size:0.85em;'>[목표가 {r['tp_trend']}]</span>"
+                        if curr_tp > 0:
+                            tp_change_html = f"<span style='color:#666; font-weight:bold; background-color:#eee; padding:2px 4px; border-radius:4px; font-size:0.85em; margin-right:4px;'>[목표가 신규/유지] {curr_tp:,.0f}</span>"
 
-                    badges = []
-                    if tp_change_html: badges.append(tp_change_html)
-                    if op_change_html: badges.append(op_change_html)
-                    
-                    badge_str = "<br>" + " ".join(badges) if badges else ""
+                    badge_str = "<br>" + tp_change_html if tp_change_html else ""
                     
                     st.markdown(f"- **{stock_name}** ({broker}){badge_str}<br>&nbsp;&nbsp;<span style='font-size:0.9em; color:gray;'>{r.get('title', '제목 없음')}</span>", unsafe_allow_html=True)
                     
                 if len(today_active_reps) > st.session_state.rep_news_limit:
-                    if st.button("🔽 6개 더보기", key="more_rep", use_container_width=True):
+                    remain_count = min(6, len(today_active_reps) - st.session_state.rep_news_limit)
+                    if st.button(f"🔽 {remain_count}개 더보기", key="more_rep", use_container_width=True):
                         st.session_state.rep_news_limit += 6
                         st.rerun()
             else:
-                st.info("오늘 자 신규 리포트 없음 (최근 100% 리포트 유니버스 자동 대기 중)")
+                st.info("수집된 리포트가 없습니다.")
 
     st.divider()
 
@@ -1397,7 +1373,6 @@ with tab4:
                         persona = "장기 구조적 성장 전략가"
                         strategy_guide = "▶ [장기 전략]: 선행 ROE(E)와 잔여이익모델(RIM)의 장기 내재가치 팩트에 전적으로 집중하십시오. 단기 차트 노이즈는 기사 요약과 함께 배제하십시오."
 
-                    # [수정] AI에게 신뢰도를 강제로 적으라고 시키는 로직 제거. (오직 정성적 분석만 요구)
                     step3_prompt = (
                         f"당신은 월스트리트 헤지펀드의 {persona}입니다. 투자 타임라인은 {investment_horizon}입니다.\n\n"
                         f"[시장 모멘텀]\n{momentum_context}\n\n"
@@ -1470,7 +1445,6 @@ with tab4:
                                 c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}<br>장: {tp_l:,.0f}", unsafe_allow_html=True)
                                 c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
 
-                                # [수정] 파이썬 UI 강제 렌더링 - 신뢰도 및 사유 박스 추가 (Tab 4)
                                 st.info(f"**🧮 파이썬 산출 시스템 신뢰도: {tick_data.get('system_confidence', 0)}%**\n\n*(감점 사유: {tick_data.get('reasons_str', '없음')})*")
 
                                 if tick_data.get('is_flag_l_inv'):
@@ -1513,7 +1487,6 @@ with tab5:
             st.session_state["input_stock_name"], st.session_state["input_avg_price"], st.session_state["input_quantity"] = "", "0", 0
             st.rerun()
 
-    # DB 컬럼 업데이트 반영
     c.execute("SELECT id, stock_name, is_owned, avg_price, quantity, report_text, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, model_used, report_time, ticker, risk_flags, system_confidence, reasons_str FROM portfolio WHERE user_id = ?", (current_user,))
     portfolios = c.fetchall()
     
@@ -1574,7 +1547,6 @@ with tab5:
                             persona_t5 = "장기 구조적 매크로 전략가"
                             t5_strategy = "▶ [장기 전략]: 단기 수급이나 차트 노이즈는 배제하고, 선행 ROE(E)에 근거한 본질적 잔여이익 펀더멘털만 평가하십시오."
 
-                        # [수정] AI에게 신뢰도 작성을 지시하는 프롬프트 제거
                         prompt = (
                             f"[{name} 진단]\n[팩트 데이터 로그]\n{data_dict['tech_data_str']}\n{extra_ctx}\n\n"
                             f"당신은 리스크와 기회를 종합적으로 분석하는 {persona_t5}입니다. 투자 타임라인은 {eval_horizon}입니다.\n\n"
@@ -1651,7 +1623,6 @@ with tab5:
             if report_text:
                 with st.expander("진단 리포트", expanded=False):
                     
-                    # [수정] 파이썬 UI 강제 렌더링 - 신뢰도 및 사유 박스 (Tab 5)
                     if p_sys_conf is not None and p_sys_conf > 0:
                         st.info(f"**🧮 파이썬 산출 시스템 신뢰도: {p_sys_conf}%**\n\n*(감점 사유: {p_reasons if p_reasons else '없음'})*")
 
@@ -1676,7 +1647,6 @@ with tab5:
 
 with tab6:
     st.subheader("저장된 분석 리포트 및 모델 검증")
-    # DB 컬럼 업데이트 반영
     c.execute("""
         SELECT id, title, stock_name, ticker, scrap_date, analysis, model_used, 
                saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, 
@@ -1789,7 +1759,6 @@ with tab6:
                     m_col3.markdown(f"**손절가 라인**<br>단기: <span style='color:red;'>{sl_s:,.0f}</span><br>중기: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
                     m_col4.markdown(f"**목표가 밴드**<br>단기: {tp_s:,.0f}<br>중기: {tp_m:,.0f}", unsafe_allow_html=True)
 
-                    # [수정] 파이썬 UI 강제 렌더링 - 신뢰도 및 사유 박스 (Tab 6)
                     if s_sys_conf is not None and s_sys_conf > 0:
                         st.info(f"**🧮 파이썬 산출 시스템 신뢰도: {s_sys_conf}%**\n\n*(감점 사유: {s_reasons if s_reasons else '없음'})*")
 
@@ -1814,3 +1783,4 @@ with tab6:
                         conn.commit(); st.rerun()
     else:
         st.info("저장된 분석 리포트가 없습니다.")
+    
