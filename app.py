@@ -416,17 +416,31 @@ def get_advanced_fundamental_data(code):
                     data["eps"] = float(val)
             except: pass
 
+        cns_eps_elem = soup.find(id="_cns_eps")
+        if cns_eps_elem:
+            try:
+                val = cns_eps_elem.get_text().strip().replace(',', '')
+                if val and val.replace('.', '', 1).replace('-', '', 1).isdigit():
+                    data["forward_eps_e"] = float(val)
+                    data["consensus_source"] = "Forward Estimate (_cns_eps)"
+            except: pass
+
         cop_table = soup.find("div", class_="cop_analysis")
         if cop_table:
-            data["quarter_trend"] = "최근 실적 및 컨센서스 테이블 파싱 완료"
+            data["quarter_trend"] = "기업실적분석 테이블 파싱 완료"
             try:
-                thead_tr = cop_table.find("thead").find("tr")
-                headers_text = [th.get_text().strip() for th in thead_tr.find_all("th")] if thead_tr else []
-                
+                thead_trs = cop_table.find("thead").find_all("tr")
                 forward_idx = -1
-                for idx, h_txt in enumerate(headers_text):
-                    if "(E)" in h_txt:
-                        forward_idx = idx
+                
+                # 날짜 배열은 thead의 두 번째 tr에 위치함 (main.naver 구조 기준)
+                if len(thead_trs) > 1:
+                    date_ths = thead_trs[1].find_all("th")
+                    headers_text = [th.get_text().strip() for th in date_ths]
+                    
+                    for idx, h_txt in enumerate(headers_text):
+                        if "(E)" in h_txt:
+                            forward_idx = idx
+                            break
                 
                 tbody = cop_table.find("tbody")
                 if tbody:
@@ -437,26 +451,26 @@ def get_advanced_fundamental_data(code):
                         
                         valid_nums = [float(v) for v in td_values if v and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
                         
-                        if "매출액" in th_title:
+                        if "매출액" == th_title or "매출액" in th_title:
                             if valid_nums: data["sales_history"] = valid_nums[-3:]
-                        elif "영업이익" in th_title:
+                        elif "영업이익" == th_title or th_title.startswith("영업이익"):
                             if valid_nums: data["op_history"] = valid_nums[-3:]
                         elif "EPS" in th_title:
                             if valid_nums:
                                 if data["eps"] is None: data["eps"] = valid_nums[-1]
                                 data["eps_history"] = valid_nums[-3:]
-                            if forward_idx != -1 and len(td_values) >= forward_idx:
-                                target_v = td_values[forward_idx-1]
+                            if data["forward_eps_e"] is None and forward_idx != -1 and len(td_values) > forward_idx:
+                                target_v = td_values[forward_idx]
                                 if target_v and target_v.replace('.', '', 1).replace('-', '', 1).isdigit():
                                     data["forward_eps_e"] = float(target_v)
-                                    data["consensus_source"] = f"Forward Estimate (E) Column Match"
+                                    data["consensus_source"] = f"Forward Estimate (E)"
                         elif "BPS" in th_title:
                             if valid_nums:
                                 data["bps"] = valid_nums[-1]
                         elif "ROE" in th_title:
                             if valid_nums: data["roe_history"] = valid_nums[-3:]
-                            if forward_idx != -1 and len(td_values) >= forward_idx:
-                                target_v = td_values[forward_idx-1]
+                            if forward_idx != -1 and len(td_values) > forward_idx:
+                                target_v = td_values[forward_idx]
                                 if target_v and target_v.replace('.', '', 1).replace('-', '', 1).isdigit():
                                     data["forward_roe_e"] = float(target_v)
             except Exception as e:
@@ -490,6 +504,12 @@ def get_advanced_fundamental_data(code):
                 except: pass
         if count > 0:
             data["supply_demand"] = f"[수급 동향] 최근 5일(기관 {inst_sum_5:+,}주 / 외인 {fore_sum_5:+,}주) | 최근 20일(기관 {inst_sum_20:+,}주 / 외인 {fore_sum_20:+,}주)"
+            
+        # [신규 추가] Forward ROE 근사 계산 (컨센서스 ROE 부재 시 Forward EPS와 BPS 활용)
+        if data.get("forward_roe_e") is None:
+            if data.get("forward_eps_e") is not None and data.get("bps") is not None and data["bps"] > 0:
+                data["forward_roe_e"] = round((data["forward_eps_e"] / data["bps"]) * 100, 2)
+
     except: pass
     return data
 
@@ -755,11 +775,16 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         data_incomplete = False
         
     else:
-        # [개선 적용] PEG 동적 캡의 비선형 스케일링 (기저효과 억제)
-        growth_pct_val = max(eps_growth * 100, 5.0)
+        # [개선 적용] PEG 동적 캡의 비선형 스케일링 (성장 구간 로그 억제, 악화 구간 선형 페널티 유지)
+        growth_pct_val = max(eps_growth * 100, 5.0) 
         dynamic_per_cap = max(8.0, min(growth_pct_val * 1.2, 40.0)) 
 
-        adjusted_ind_per = float_ind_per * (1 + np.log1p(max(0, eps_growth))) if float_ind_per > 0 else dynamic_per_cap
+        if float_ind_per > 0:
+            eps_multiplier = (1 + np.log1p(eps_growth)) if eps_growth > 0 else (1 + eps_growth)
+            adjusted_ind_per = float_ind_per * eps_multiplier
+        else:
+            adjusted_ind_per = dynamic_per_cap
+            
         current_per = (current_price / eps_val)
         
         safe_per_cap = min(current_per * 1.5, float_ind_per * 1.5 if float_ind_per > 0 else 40.0, dynamic_per_cap)
@@ -1683,7 +1708,7 @@ with tab6:
                         if min_low > 0 and min_low <= sl_s and sl_s > 0:
                             st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 현재 반등했더라도 시스템 룰에 따른 리뷰가 필요합니다.")
                         elif current_p <= sl_s and sl_s > 0:
-                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 손절을 고려하십시오.")
+                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 규칙에 의거해 청산을 고려하십시오.")
                     
                     st.markdown("---")
                     st.write(analysis)
