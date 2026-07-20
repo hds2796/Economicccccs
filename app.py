@@ -1783,4 +1783,3 @@ with tab6:
                         conn.commit(); st.rerun()
     else:
         st.info("저장된 분석 리포트가 없습니다.")
-    
