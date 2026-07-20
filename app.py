@@ -852,10 +852,22 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 
     # =======================================================
     # [수정] 증권사 전체 컨센서스(평균) 추세 산출 방식 적용
-            
+    # =======================================================
+    tp_trend = "유지/신규"
+    broker_log_str = ""
+    avg_curr = 0
+    matched_report = None
+    
+    if analyst_data:
+        reps_for_ticker = sorted([rep for rep in analyst_data.values() if rep.get("ticker") == ticker], key=lambda x: x.get('date', ''), reverse=True)
+        matched_report = reps_for_ticker[0] if reps_for_ticker else None
+        
         if reps_for_ticker:
-            broker_log_str = "▶ [최근 증권사별 목표가 및 의견 변동 요약]\n"
-            for r in reps_for_ticker[:5]:
+            valid_curr_tps = []
+            valid_prev_tps = []
+            
+            broker_log_str = "▶ [증권사 전체 컨센서스 및 목표가 변동 요약]\n"
+            for r in reps_for_ticker:
                 b_name = r.get('broker', '알수없음')
                 b_date = r.get('date', '')
                 t_hist = r.get('tp_history', [])
@@ -866,11 +878,33 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
                 if len(t_hist) >= 2:
                     p_tp = t_hist[-2]
                     c_tp = t_hist[-1]
-                    trend_dir = "상향" if c_tp > p_tp else "하향" if c_tp < p_tp else "유지"
-                    broker_log_str += f"   - {b_name} ({b_date}): {p_tp:,.0f}원 ➡️ {c_tp:,.0f}원 ({trend_dir}) | 의견: {op_str}\n"
+                elif len(t_hist) == 1:
+                    p_tp = t_hist[0]
+                    c_tp = t_hist[0]
                 else:
                     c_tp = r.get('target_price', 0)
-                    broker_log_str += f"   - {b_name} ({b_date}): 신규/유지 {c_tp:,.0f}원 | 의견: {op_str}\n"
+                    p_tp = c_tp
+                    
+                if c_tp > 0:
+                    valid_curr_tps.append(c_tp)
+                    valid_prev_tps.append(p_tp)
+                    
+                trend_dir = "🔺상향" if c_tp > p_tp else "🔻하향" if c_tp < p_tp else "유지"
+                broker_log_str += f"   - {b_name} ({b_date}): {p_tp:,.0f}원 ➡️ {c_tp:,.0f}원 ({trend_dir}) | 의견: {op_str}\n"
+
+            # 3x3 매트릭스를 위한 전체 증권사 시장 평균 트렌드 산출
+            if valid_curr_tps:
+                avg_curr = sum(valid_curr_tps) / len(valid_curr_tps)
+                avg_prev = sum(valid_prev_tps) / len(valid_prev_tps)
+                
+                if avg_curr > avg_prev * 1.005:
+                    tp_trend = "상향"
+                elif avg_curr < avg_prev * 0.995:
+                    tp_trend = "하향"
+                else:
+                    tp_trend = "유지"
+                    
+                broker_log_str += f"   => 📊 [종합 컨센서스 판정] 이전 평균 {avg_prev:,.0f}원 ➡️ 현재 평균 {avg_curr:,.0f}원 ({tp_trend})\n"
 
     eps_e_trend = "유지"
     if len(eps_history) >= 2:
@@ -880,17 +914,17 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             eps_e_trend = "하향"
 
     if "상향" in tp_trend:
-        if "상향" in eps_e_trend: cross_signal, tier, penalty = "True Bull (목표가 상향 + 실적 상향 ➡️ 펀더멘털과 가격이 동행하는 건전한 성장)", "Tier 1 (Pass)", 0
-        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Critical Value Trap (목표가 상향 + 실적 하향 ➡️ 실적은 꺾이는데 목표가만 높은 위험한 거품)", "Tier 3 (Fatal)", -20
-        else: cross_signal, tier, penalty = "Momentum Driven (목표가 상향 + 실적 유지 ➡️ 실적 상향 없이 가격만 오르는 수급 주도)", "Tier 1 (Pass)", -5
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "True Bull (목표가 컨센상향 + 실적 상향 ➡️ 건전한 동반 성장)", "Tier 1 (Pass)", 0
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Critical Value Trap (목표가 컨센상향 + 실적 하향 ➡️ 목표가 거품 리스크)", "Tier 3 (Fatal)", -20
+        else: cross_signal, tier, penalty = "Momentum Driven (목표가 컨센상향 + 실적 유지 ➡️ 수급 주도 모멘텀)", "Tier 1 (Pass)", -5
     elif "하향" in tp_trend:
-        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Turnaround (목표가 하향 + 실적 상향 ➡️ 주가는 빠지지만 실적 체력은 오르는 소외된 우량주)", "Tier 1 (Pass)", 10
-        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Genuine Bear (목표가 하향 + 실적 하향 ➡️ 이익과 가격이 모두 부러진 구조적 침체)", "Tier 3 (Fatal)", 0
-        else: cross_signal, tier, penalty = "Sentiment Driven Drop (목표가 하향 + 실적 유지 ➡️ 실적 하향은 멈췄으나 심리적 과매도로 하락)", "Tier 2 (Warning)", 0
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Turnaround (목표가 컨센하향 + 실적 상향 ➡️ 소외 우량주)", "Tier 1 (Pass)", 10
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Genuine Bear (목표가 컨센하향 + 실적 하향 ➡️ 구조적 침체)", "Tier 3 (Fatal)", 0
+        else: cross_signal, tier, penalty = "Sentiment Driven Drop (목표가 컨센하향 + 실적 유지 ➡️ 심리적 과매도)", "Tier 2 (Warning)", 0
     else:
-        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Quiet Accumulation (목표가 유지 + 실적 상향 ➡️ 시장은 조용하나 실적 추정치가 개선되는 선취매 구간)", "Tier 1 (Pass)", 5
-        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Value Trap (목표가 유지 + 실적 하향 ➡️ 목표가는 방어 중이나 이익은 몰래 하향 중인 눈치보기 장세)", "Tier 2 (Warning)", -10
-        else: cross_signal, tier, penalty = "Neutral (목표가 유지 + 실적 유지 ➡️ 뚜렷한 방향성 없음)", "Tier 1 (Pass)", 0
+        if "상향" in eps_e_trend: cross_signal, tier, penalty = "Quiet Accumulation (목표가 컨센유지 + 실적 상향 ➡️ 선취매 구간)", "Tier 1 (Pass)", 5
+        elif "하향" in eps_e_trend: cross_signal, tier, penalty = "Hidden Value Trap (목표가 컨센유지 + 실적 하향 ➡️ 눈치보기 하락장)", "Tier 2 (Warning)", -10
+        else: cross_signal, tier, penalty = "Neutral (목표가 컨센유지 + 실적 유지 ➡️ 뚜렷한 방향성 없음)", "Tier 1 (Pass)", 0
 
     if is_discovery_mode and tier == "Tier 3 (Fatal)":
         return {"ticker": ticker, "name": name, "status": "KILLED", "reason": f"{cross_signal} ({tier} 치명적 리스크 제어 작동)"}
@@ -935,11 +969,9 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     bps_disp_val = f"{bps_val:,.0f}원" if bps_val is not None else "데이터 누락"
 
     consensus_log = ""
-    if analyst_data and matched_report:
-        a_target = float(matched_report.get("target_price", 0))
-        if a_target > 0 and tp_m > 0:
-            divergence = (tp_m - a_target) / a_target
-            consensus_log = f"   - ⚖️ 컨센서스 교차검증: 증권사 목표가 {a_target:,.0f}원({tp_trend}) vs 퀀트 중기 적정가 {tp_m:,.0f}원 (괴리율: {divergence*100:+.1f}%) ➡️ 판정 (페널티 계수: {penalty}%)\n"
+    if avg_curr > 0 and tp_m > 0:
+        divergence = (tp_m - avg_curr) / avg_curr
+        consensus_log = f"   - ⚖️ 종합 컨센서스 교차검증: 시장 평균 목표가 {avg_curr:,.0f}원(추세: {tp_trend}) vs 퀀트 중기 적정가 {tp_m:,.0f}원 (괴리율: {divergence*100:+.1f}%) ➡️ 판정 (페널티 계수: {penalty}%)\n"
 
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
