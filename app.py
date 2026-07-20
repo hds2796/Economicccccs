@@ -1759,4 +1759,72 @@ with tab6:
                 if idx < len(cols_rf):
                     with cols_rf[idx]:
                         if b["total"] < 5:
-                            st.caption(f"**위험 신호 {rf}개**<br>샘플 {b['total']}건 누적<br>*(통계 신뢰도 구축 중, 최소 5건 필요)*", unsafe_allow_html=True
+                            st.caption(f"**위험 신호 {rf}개**<br>샘플 {b['total']}건 누적<br>*(통계 신뢰도 구축 중, 최소 5건 필요)*", unsafe_allow_html=True)
+                        else:
+                            hit_rate = b["hit"] / b["total"] * 100
+                            stop_rate = b["stop"] / b["total"] * 100
+                            st.metric(f"위험 신호 {rf}개 (n={b['total']})", f"목표도달 {hit_rate:.0f}%", f"손절이탈 {stop_rate:.0f}%", delta_color="off")
+        
+        st.divider()
+
+        col_bulk_scrap, _ = st.columns([2, 8])
+        with col_bulk_scrap:
+            if st.button("🗑️ 선택 항목 삭제", key="bulk_del_t6", use_container_width=True):
+                if to_del := [s[0] for s in scraps if st.session_state.get(f"chk_t6_{s[0]}", False)]:
+                    c.execute(f"DELETE FROM scrapbook WHERE id IN ({','.join(['?']*len(to_del))})", to_del)
+                    conn.commit(); st.rerun()
+                    
+        for row in scraps:
+            s_id, title, s_name, ticker, s_date, analysis, m_used, saved_p, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, risk_flags, s_sys_conf, s_reasons = row
+            code = re.sub(r'[^\d]', '', ticker or "")
+            price_info = price_map_scrap.get(code, {})
+            current_p = price_info.get("current", 0.0)
+            max_high, min_low = get_historical_high_low(code, s_date)
+            
+            col_sel_s, col_exp_s = st.columns([0.5, 9.5])
+            with col_sel_s: st.checkbox("선택", key=f"chk_t6_{s_id}", label_visibility="collapsed")
+            with col_exp_s:
+                with st.expander(f"📌 {title} ({s_name} | {ticker}) - {s_date}"):
+                    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                    
+                    if saved_p and current_p > 0:
+                        scrap_diff = current_p - saved_p
+                        scrap_diff_pct = (scrap_diff / saved_p) * 100
+                        m_col1.metric("저장 당시 주가", f"{saved_p:,.0f}원", delta=f"스크랩 누적 {scrap_diff:+,.0f}원 ({scrap_diff_pct:+.2f}%)")
+                    else: 
+                        m_col1.metric("저장 당시 주가", f"{saved_p:,.0f}원" if saved_p else "정보 없음")
+                    
+                    if current_p > 0:
+                        daily_diff = price_info.get("diff", 0.0)
+                        daily_diff_pct = price_info.get("diff_pct", 0.0)
+                        m_col2.metric("실시간 현재가", f"{current_p:,.0f}원", delta=f"전일 대비 {daily_diff:+,.0f}원 ({daily_diff_pct:+.2f}%)")
+                    else: 
+                        m_col2.metric("실시간 현재가", "조회 실패")
+                        
+                    m_col3.markdown(f"**손절가 라인**<br>단기: <span style='color:red;'>{sl_s:,.0f}</span><br>중기: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
+                    m_col4.markdown(f"**목표가 밴드**<br>단기: {tp_s:,.0f}<br>중기: {tp_m:,.0f}", unsafe_allow_html=True)
+
+                    if s_sys_conf is not None and s_sys_conf > 0:
+                        st.info(f"**🧮 파이썬 산출 시스템 신뢰도: {s_sys_conf}%**\n\n*(감점 사유: {s_reasons if s_reasons else '없음'})*")
+
+                    if tp_m > tp_l and tp_l > 0:
+                        st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 '중기 가치 > 장기 RIM 가치' 역전 플래그 상태였습니다.")
+                    if tp_s > tp_m and tp_m > 0:
+                        st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 '단기 가치 > 중기 가치' 역전 플래그 상태였습니다.")
+                    
+                    if current_p > 0 and tp_s > 0:
+                        pct_s = (current_p / tp_s) * 100
+                        st.progress(min(int(pct_s), 100), text=f"단기 목표가 대비 진행률: **{pct_s:.1f}%**")
+                        if min_low > 0 and min_low <= sl_s and sl_s > 0:
+                            st.error(f"⚠️ **과거 단기 손절선({sl_s:,.0f}원) 이탈 이력 발생!** 현재 반등했더라도 시스템 룰에 따른 리뷰가 필요합니다.")
+                        elif current_p <= sl_s and sl_s > 0:
+                            st.error(f"⚠️ **단기 손절선({sl_s:,.0f}원) 이탈 진행 중!** 기계적 규칙에 의거해 청산을 고려하십시오.")
+                    
+                    st.markdown("---")
+                    st.write(analysis)
+                    
+                    if st.button("개별 삭제", key=f"del_t6_{s_id}", use_container_width=True):
+                        c.execute("DELETE FROM scrapbook WHERE id=?", (s_id,))
+                        conn.commit(); st.rerun()
+    else:
+        st.info("저장된 분석 리포트가 없습니다.")
