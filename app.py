@@ -96,20 +96,25 @@ def init_db():
         cursor.execute('''CREATE TABLE IF NOT EXISTS dart_corp_codes (corp_code TEXT, corp_name TEXT, stock_code TEXT PRIMARY KEY)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, k_factor REAL)''')
         
-        cursor.execute('''CREATE TABLE IF NOT EXISTS holding_companies (stock_code TEXT PRIMARY KEY, corp_name TEXT)''')
+        # [수정] holding_companies 스키마에 is_financial 컬럼 추가 확정
+        cursor.execute('''CREATE TABLE IF NOT EXISTS holding_companies (stock_code TEXT PRIMARY KEY, corp_name TEXT, is_financial INTEGER DEFAULT 0)''')
+        
         cursor.execute("SELECT count(*) FROM holding_companies")
         if cursor.fetchone()[0] == 0:
             default_holdings = [
-                ('078930', 'GS'), ('000880', '한화'), ('001040', 'CJ'), ('006260', 'LS'), 
-                ('034730', 'SK'), ('000150', '두산'), ('004800', '효성'), ('028260', '삼성물산'), 
-                ('267250', 'HD현대'), ('004990', '롯데지주'), ('002020', '코오롱'), ('000240', '한국앤컴퍼니'), 
-                ('002790', '아모레G'), ('000210', 'DL'), ('058650', '세아홀딩스'), ('000140', '하이트진로홀딩스'), 
-                ('005720', '넥센'), ('003550', 'LG')
+                ('078930', 'GS', 0), ('000880', '한화', 0), ('001040', 'CJ', 0), ('006260', 'LS', 0), 
+                ('034730', 'SK', 0), ('000150', '두산', 0), ('004800', '효성', 0), ('028260', '삼성물산', 0), 
+                ('267250', 'HD현대', 0), ('004990', '롯데지주', 0), ('002020', '코오롱', 0), ('000240', '한국앤컴퍼니', 0), 
+                ('002790', '아모레G', 0), ('000210', 'DL', 0), ('058650', '세아홀딩스', 0), ('000140', '하이트진로홀딩스', 0), 
+                ('005720', '넥센', 0), ('003550', 'LG', 0),
+                ('105560', 'KB금융', 1), ('055550', '신한지주', 1), ('086790', '하나금융지주', 1), ('316140', '우리금융지주', 1),
+                ('138040', '메리츠금융지주', 1), ('138930', 'BNK금융지주', 1), ('139130', 'DGB금융지주', 1), ('175330', 'JB금융지주', 1)
             ]
-            cursor.executemany("INSERT OR IGNORE INTO holding_companies (stock_code, corp_name) VALUES (?, ?)", default_holdings)
+            cursor.executemany("INSERT OR IGNORE INTO holding_companies (stock_code, corp_name, is_financial) VALUES (?, ?, ?)", default_holdings)
         
         connection.commit()
 
+        # [수정] 기존 운영 중이던 DB와의 하위 호환성 (is_financial 컬럼 강제 추가)
         columns_to_add = [
             ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
             ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("portfolio", "report_text", "TEXT"),
@@ -126,7 +131,8 @@ def init_db():
             ("portfolio", "user_id", "TEXT DEFAULT 'dongsu'"), ("scrapbook", "user_id", "TEXT DEFAULT 'dongsu'"),
             ("portfolio", "risk_flags", "INTEGER DEFAULT -1"), ("scrapbook", "risk_flags", "INTEGER DEFAULT -1"),
             ("portfolio", "system_confidence", "INTEGER DEFAULT 0"), ("scrapbook", "system_confidence", "INTEGER DEFAULT 0"),
-            ("portfolio", "reasons_str", "TEXT"), ("scrapbook", "reasons_str", "TEXT")
+            ("portfolio", "reasons_str", "TEXT"), ("scrapbook", "reasons_str", "TEXT"),
+            ("holding_companies", "is_financial", "INTEGER DEFAULT 0")
         ]
         for table, col, dtype in columns_to_add:
             try: 
@@ -134,19 +140,38 @@ def init_db():
                 connection.commit()
             except Exception:
                 pass
+                
+        # 구조 패치 이후, 기존 DB에 금융지주가 누락되어 있을 경우를 대비한 병합 처리
+        try:
+            financial_defaults = [
+                ('105560', 'KB금융', 1), ('055550', '신한지주', 1), ('086790', '하나금융지주', 1), ('316140', '우리금융지주', 1),
+                ('138040', '메리츠금융지주', 1), ('138930', 'BNK금융지주', 1), ('139130', 'DGB금융지주', 1), ('175330', 'JB금융지주', 1)
+            ]
+            cursor.executemany("INSERT OR IGNORE INTO holding_companies (stock_code, corp_name, is_financial) VALUES (?, ?, ?)", financial_defaults)
+            connection.commit()
+        except: pass
+        
         return connection
 
 conn = init_db()
 c = conn.cursor()
 
+# [수정] 단일 함수에서 일반 지주사와 금융지주사를 각각 분리하여 반환
 @st.cache_data(ttl=86400)
 def fetch_holding_ticker_list_from_db():
     local_conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
     local_c = local_conn.cursor()
-    local_c.execute("SELECT stock_code FROM holding_companies")
-    res = [row[0] for row in local_c.fetchall()]
+    try:
+        local_c.execute("SELECT stock_code, is_financial FROM holding_companies")
+        rows = local_c.fetchall()
+    except:
+        local_c.execute("SELECT stock_code FROM holding_companies")
+        rows = [(r[0], 0) for r in local_c.fetchall()]
     local_conn.close()
-    return res
+    
+    normal_holdings = [row[0] for row in rows if row[1] == 0]
+    financial_holdings = [row[0] for row in rows if row[1] == 1]
+    return normal_holdings, financial_holdings
 
 @st.cache_resource
 def initialize_dart_codes():
@@ -553,14 +578,10 @@ def get_technical_data(code):
         if not kospi_returns.empty and not returns.empty:
             combined_df = pd.concat([returns, kospi_returns], axis=1, join="inner").dropna()
             if len(combined_df) > 30:
-                cov_matrix_250 = np.cov(combined_df.iloc[-250:, 0], combined_df.iloc[-250:, 1])
-                beta_250 = cov_matrix_250[0, 1] / cov_matrix_250[1, 1] if cov_matrix_250[1, 1] != 0 else 1.0
-                
-                cov_matrix_60 = np.cov(combined_df.iloc[-60:, 0], combined_df.iloc[-60:, 1]) if len(combined_df) >= 60 else cov_matrix_250
-                beta_60 = cov_matrix_60[0, 1] / cov_matrix_60[1, 1] if cov_matrix_60[1, 1] != 0 else beta_250
-                
-                beta = (0.5 * beta_60) + (0.5 * beta_250)
-                beta = max(0.5, min(beta, 2.5)) 
+                cov_matrix = np.cov(combined_df.iloc[:, 0], combined_df.iloc[:, 1])
+                if cov_matrix[1, 1] != 0:
+                    beta = cov_matrix[0, 1] / cov_matrix[1, 1]
+                    beta = max(0.5, min(beta, 2.5)) 
 
         return {"current": current_price, "high_52": max(prices), "low_52": min(prices), "ma20": sum(prices[-20:])/20, "ma60": sum(prices[-60:])/60, "macd": macd.iloc[-1], "signal": signal.iloc[-1], "daily_volatility": daily_volatility, "beta": beta}
     except: return None
@@ -754,123 +775,23 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 
     eps_growth = 0.0
     if len(eps_history) >= 2 and eps_history[0] != 0:
-        avg_past_eps = sum(eps_history[:-1]) / len(eps_history[:-1]) if len(eps_history) > 1 else eps_history[0]
-        if avg_past_eps != 0:
-            eps_growth = (eps_history[-1] - avg_past_eps) / abs(avg_past_eps)
+        eps_growth = (eps_history[-1] - eps_history[0]) / abs(eps_history[0])
+        if eps_history[0] < 0 and eps_history[-1] > 0:
+            eps_growth = min(eps_growth, 2.0) 
         else:
-            eps_growth = (eps_history[-1] - eps_history[0]) / abs(eps_history[0])
-        eps_growth = min(max(eps_growth, -0.5), 10.0)
+            eps_growth = min(max(eps_growth, -0.5), 2.0)
 
+    # 1. 기술적 리스크/손절 밴드 산출
     sl_s = current_price * (1 - min(user_k * daily_vol * np.sqrt(20), 0.15)) if daily_vol > 0 else current_price * 0.95
     sl_m = current_price * (1 - min(user_k * daily_vol * np.sqrt(60), 0.30)) if daily_vol > 0 else current_price * 0.90
     sl_l = current_price * (1 - min(user_k * daily_vol * np.sqrt(250), 0.50)) if daily_vol > 0 else current_price * 0.80
     tp_s = current_price * min(1 + user_k * daily_vol * np.sqrt(20), 1.25) if daily_vol > 0 else current_price * 1.05
     
     rf = get_risk_free_rate()
-    
-    risk_premium = 0.0
-    if beta > 1.2 or daily_vol > 0.035:
-        risk_premium = 0.02
+    risk_premium = 0.02 if (beta > 1.2 or daily_vol > 0.035) else 0.0
+    required_return = rf + (beta * 0.06) + risk_premium
 
-    holding_ticker_list = fetch_holding_ticker_list_from_db()
-    
-    # [금융지주 특수 분리 로직]
-    is_financial = any(kw in name for kw in ['금융지주']) or name in ['KB금융', '신한지주', '하나금융지주', '우리금융지주', '메리츠금융지주', 'BNK금융지주', 'DGB금융지주', 'JB금융지주']
-    is_holding = (any(kw in name for kw in ['지주', '홀딩스']) or (ticker in holding_ticker_list)) and not is_financial
-    
-    structural_warning = ""
-    omega_val = 0.8 if (is_holding or is_financial) else 0.7 
-
-    if bps_val is None:
-        tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
-        tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
-        fund_type = "BPS 데이터 누락 (기술적 밴드 대체)"
-        structural_warning = "⚠️ [핵심 데이터 누락] BPS 누락으로 기술적 밴드 연산."
-        conservative_bps = 0.0
-        data_incomplete = True
-        
-    elif is_financial:
-        # 주주환원(ROE) 기반 금융지주 타겟 PBR 동적 산출 (0.4 ~ 1.2 밴드)
-        required_return = rf + (beta * 0.06) + risk_premium
-        target_pbr_financial = max(0.4, min(expected_roe / required_return, 1.2))
-        
-        tp_m = bps_val * target_pbr_financial
-        fund_type = f"금융지주 특수 모델 (자본효율성 기반 Target PBR {target_pbr_financial:.2f}배)"
-        structural_warning = f"⚠️ [금융지주 밸류에이션] ROE({expected_roe*100:.1f}%) 연동 적정 PBR 산출."
-        
-        tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
-        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, \u03C9 {omega_val})"
-        conservative_bps = bps_val
-        data_incomplete = False
-        
-    elif is_holding:
-        holding_discount = 0.5  
-        effective_bps = bps_val * holding_discount
-        tp_m = effective_bps
-        fund_type = "일반 지주사 특수 모델 (NAV 50% 할인 앵커링)"
-        if eps_val is None:
-            structural_warning = "⚠️ [지주사 디스카운트] 지주사 할인 0.5 적용. EPS 누락."
-        else:
-            structural_warning = f"⚠️ [지주사 디스카운트] 타겟 PBR 0.5 수준({tp_m:,.0f}원) 앵커링."
-            
-        required_return = rf + (beta * 0.06) + risk_premium
-        tp_l = effective_bps + (effective_bps * (expected_roe - required_return) / (1 + required_return - omega_val))
-        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, \u03C9 {omega_val})"
-        conservative_bps = effective_bps
-        data_incomplete = False
-        
-    elif eps_val is None:
-        tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
-        tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
-        fund_type = "EPS 데이터 누락 (기술적 밴드 대체)"
-        structural_warning = "⚠️ [실적 데이터 누락] 일반 사업회사 EPS 미수집."
-        conservative_bps = bps_val
-        data_incomplete = True
-        
-    elif eps_val <= 0:
-        tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
-        tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
-        fund_type = "적자 운영 기업 (기술적 밴드 대용)"
-        bps_discount = 0.8 if len(eps_history) >= 2 and eps_history[-1] < 0 and eps_history[0] < 0 and eps_history[-1] < eps_history[0] else 1.0
-        conservative_bps = bps_val * bps_discount
-        data_incomplete = False
-        
-    else:
-        growth_pct_val = max(eps_growth * 100, 5.0) 
-
-        if fund.get('forward_eps_e') is not None and eps_history and eps_history[-1] != 0:
-            forward_growth_pct = ((fund['forward_eps_e'] - eps_history[-1]) / abs(eps_history[-1])) * 100
-            growth_pct_val = max(growth_pct_val, forward_growth_pct, 5.0)
-            eps_growth = max(eps_growth, forward_growth_pct / 100)
-
-        current_per = (current_price / eps_val) if eps_val > 0 else 40.0
-        flexible_upper_limit = max(40.0, min(current_per * 0.9, 150.0))
-        
-        base_cap = max(8.0, float_ind_per * 0.8 if float_ind_per > 0 else 8.0)
-        dynamic_per_cap = max(base_cap, min(growth_pct_val * 1.2, flexible_upper_limit)) 
-
-        if float_ind_per > 0:
-            eps_multiplier = (1 + np.log1p(eps_growth)) if eps_growth > 0 else (1 + eps_growth)
-            adjusted_ind_per = float_ind_per * eps_multiplier
-        else:
-            adjusted_ind_per = dynamic_per_cap
-            
-        safe_per_cap = min(current_per * 1.2, max(float_ind_per * 1.5 if float_ind_per > 0 else 0, dynamic_per_cap))
-        
-        if adjusted_ind_per > safe_per_cap:
-            fund_type = "상대 가치 (비선형 PEG 동적 캡 적용)"
-            structural_warning = f"⚠️ [Value Trap 방어] 환상적인 이익성장 기저효과 필터링 작동. 한계 PER {safe_per_cap:.1f}배 강제 제한."
-            tp_m = eps_val * safe_per_cap
-        else:
-            fund_type = "기본 상대 가치 (로그 스케일 업종 평균 수렴)"
-            tp_m = eps_val * adjusted_ind_per
-            
-        required_return = rf + (beta * 0.06) + risk_premium
-        tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
-        fund_type += f" | 장기 RIM(Rf {rf*100:.1f}%, Beta {beta:.2f}, \u03C9 {omega_val})"
-        conservative_bps = bps_val
-        data_incomplete = False
-
+    # 2. 증권사 컨센서스 선제 산출 (분류 체계 및 3x3 매트릭스에 공통 활용)
     tp_trend = "유지/신규"
     broker_log_str = ""
     avg_curr = 0
@@ -883,25 +804,20 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         if reps_for_ticker:
             valid_curr_tps = []
             valid_prev_tps = []
-            
             broker_log_str = "▶ [증권사 전체 컨센서스 및 목표가 변동 요약]\n"
             for r in reps_for_ticker:
                 b_name = r.get('broker', '알수없음')
                 b_date = r.get('date', '')
                 t_hist = r.get('tp_history', [])
                 op_hist = r.get('op_history', [])
-                
                 op_str = op_hist[-1] if op_hist else r.get('opinion', 'None')
                 
                 if len(t_hist) >= 2:
-                    p_tp = t_hist[-2]
-                    c_tp = t_hist[-1]
+                    p_tp, c_tp = t_hist[-2], t_hist[-1]
                 elif len(t_hist) == 1:
-                    p_tp = t_hist[0]
-                    c_tp = t_hist[0]
+                    p_tp = c_tp = t_hist[0]
                 else:
-                    c_tp = r.get('target_price', 0)
-                    p_tp = c_tp
+                    p_tp = c_tp = r.get('target_price', 0)
                     
                 if c_tp > 0:
                     valid_curr_tps.append(c_tp)
@@ -913,22 +829,114 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             if valid_curr_tps:
                 avg_curr = sum(valid_curr_tps) / len(valid_curr_tps)
                 avg_prev = sum(valid_prev_tps) / len(valid_prev_tps)
-                
-                if avg_curr > avg_prev * 1.005:
-                    tp_trend = "상향"
-                elif avg_curr < avg_prev * 0.995:
-                    tp_trend = "하향"
-                else:
-                    tp_trend = "유지"
-                    
+                if avg_curr > avg_prev * 1.005: tp_trend = "상향"
+                elif avg_curr < avg_prev * 0.995: tp_trend = "하향"
+                else: tp_trend = "유지"
                 broker_log_str += f"   => 📊 [종합 컨센서스 판정] 이전 평균 {avg_prev:,.0f}원 ➡️ 현재 평균 {avg_curr:,.0f}원 ({tp_trend})\n"
 
+    # 3. 밸류에이션 체제(Regime) 명시적 분류
+    # [수정] DB 통합을 통해 금융지주(is_financial=1)와 일반지주(is_financial=0)를 테이블 기반으로 판별
+    normal_holdings, financial_holdings = fetch_holding_ticker_list_from_db()
+    
+    is_financial = any(kw in name for kw in ['금융지주']) or (ticker in financial_holdings)
+    is_holding = (any(kw in name for kw in ['지주', '홀딩스']) or (ticker in normal_holdings)) and not is_financial
+    
+    current_per = (current_price / eps_val) if (eps_val and eps_val > 0) else 999.0
+    PER_METHOD_LIMIT = 80.0
+
+    if bps_val is None or eps_val is None:
+        regime = "TECHNICAL_ONLY"
+    elif is_holding or is_financial:
+        regime = "NAV_ANCHOR"
+    elif eps_val <= 0:
+        regime = "DEFICIT_TECHNICAL"
+    elif current_per > PER_METHOD_LIMIT:
+        regime = "CONSENSUS_ANCHOR"
+    else:
+        regime = "STANDARD_PER"
+
+    # 4. 체제(Regime)별 독립적 밸류에이션 연산
+    structural_warning = ""
+    data_incomplete = False
+    conservative_bps = bps_val if bps_val else 0.0
+    omega_val = 0.8 if regime == "NAV_ANCHOR" else 0.7 
+    tp_l = 0.0
+
+    if bps_val is not None:
+        tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
+
+    if regime == "TECHNICAL_ONLY":
+        tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
+        tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
+        fund_type = "BPS/EPS 데이터 누락 (기술적 밴드 대체)"
+        structural_warning = "⚠️ [핵심 데이터 누락] 재무 데이터 누락으로 기술적 밴드 연산으로 갈음합니다."
+        data_incomplete = True
+
+    elif regime == "DEFICIT_TECHNICAL":
+        tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
+        tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
+        fund_type = "적자 운영 기업 (기술적 밴드 대용)"
+        bps_discount = 0.8 if len(eps_history) >= 2 and eps_history[-1] < 0 and eps_history[0] < 0 and eps_history[-1] < eps_history[0] else 1.0
+        conservative_bps = bps_val * bps_discount
+
+    elif regime == "NAV_ANCHOR":
+        if is_financial:
+            target_pbr_financial = max(0.4, min(expected_roe / required_return, 1.2))
+            tp_m = bps_val * target_pbr_financial
+            fund_type = f"금융지주 특수 모델 (자본효율성 기반 Target PBR {target_pbr_financial:.2f}배)"
+            structural_warning = f"⚠️ [금융지주 밸류에이션] ROE({expected_roe*100:.1f}%) 연동 적정 PBR 산출."
+        else: # 일반 지주사
+            holding_discount = 0.5  
+            effective_bps = bps_val * holding_discount
+            tp_m = effective_bps
+            fund_type = "일반 지주사 특수 모델 (NAV 50% 할인 앵커링)"
+            structural_warning = f"⚠️ [지주사 디스카운트] 타겟 PBR 0.5 수준({tp_m:,.0f}원) 앵커링."
+            conservative_bps = effective_bps
+            tp_l = effective_bps + (effective_bps * (expected_roe - required_return) / (1 + required_return - omega_val))
+
+    elif regime == "CONSENSUS_ANCHOR":
+        if avg_curr > 0:
+            tp_m = avg_curr
+            fund_type = f"PER 방식 부적합 (현재 PER {current_per:.0f}배) ➡️ 시장 컨센서스 앵커링"
+            structural_warning = (
+                f"⚠️ [PER 연산 무력화] 현재 시장 PER({current_per:.0f}배)이 EPS 곱셈 밸류에이션의 한계치(80배)를 초과했습니다. "
+                f"시장은 파이프라인/수주잔고 등 테마성 프리미엄으로 이 종목을 평가하고 있습니다. "
+                f"퀀트 엔진은 자체 PER 상한 계산을 포기하고 증권사 평균 목표가({avg_curr:,.0f}원)를 중기 적정가로 잠정 채택합니다."
+            )
+        else:
+            tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
+            fund_type = f"PER 80배 초과 및 컨센서스 부재 (기술적 밴드 풀백)"
+            structural_warning = f"⚠️ [PER 무력화] EPS 기반 밸류에이션 불가 국면이나, 컨센서스 데이터가 없어 기술적 밴드로 대용합니다."
+
+    elif regime == "STANDARD_PER":
+        growth_pct_val = max(eps_growth * 100, 5.0) 
+        if fund.get('forward_eps_e') is not None and eps_history and eps_history[-1] != 0:
+            forward_growth_pct = ((fund['forward_eps_e'] - eps_history[-1]) / abs(eps_history[-1])) * 100
+            growth_pct_val = max(growth_pct_val, forward_growth_pct, 5.0)
+
+        base_cap = max(8.0, float_ind_per * 0.8 if float_ind_per > 0 else 8.0)
+        independent_growth_cap = min(growth_pct_val * 1.2, 60.0) 
+        dynamic_per_cap = max(base_cap, independent_growth_cap)
+        
+        if float_ind_per > 0:
+            eps_multiplier = (1 + np.log1p(eps_growth)) if eps_growth > 0 else (1 + eps_growth)
+            adjusted_ind_per = float_ind_per * eps_multiplier
+        else:
+            adjusted_ind_per = dynamic_per_cap
+
+        if adjusted_ind_per > dynamic_per_cap:
+            fund_type = "상대 가치 (Value Trap 방어 캡 적용)"
+            structural_warning = f"⚠️ [Value Trap 방어] 업종 평균이나 기저효과가 비정상적으로 높습니다. 시스템 한계 PER {dynamic_per_cap:.1f}배로 밸류에이션을 강제 억제합니다."
+            tp_m = eps_val * dynamic_per_cap
+        else:
+            fund_type = "기본 상대 가치 (로그 스케일 업종 평균 수렴)"
+            tp_m = eps_val * adjusted_ind_per
+
+    # 5. 3x3 교차검증 및 매트릭스 진단
     eps_e_trend = "유지"
     if len(eps_history) >= 2:
-        if eps_history[-1] > eps_history[-2] * 1.05:
-            eps_e_trend = "상향"
-        elif eps_history[-1] < eps_history[-2] * 0.95:
-            eps_e_trend = "하향"
+        if eps_history[-1] > eps_history[-2] * 1.05: eps_e_trend = "상향"
+        elif eps_history[-1] < eps_history[-2] * 0.95: eps_e_trend = "하향"
 
     if "상향" in tp_trend:
         if "상향" in eps_e_trend: cross_signal, tier, penalty = "True Bull (목표가 컨센상향 + 실적 상향 ➡️ 건전한 동반 성장)", "Tier 1 (Pass)", 0
@@ -948,12 +956,18 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 
     if is_discovery_mode:
         if data_incomplete: pass 
-        elif (is_holding or is_financial):
+        elif regime in ["NAV_ANCHOR"]:
             if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None
-        elif eps_val <= 0:
+        elif regime == "DEFICIT_TECHNICAL":
             if current_price > 0 and conservative_bps < current_price: return None
         else:
             if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None 
+
+    is_flag_m_inv = (tp_s > tp_m and tp_m > 0)
+    is_flag_l_inv = (tp_m > tp_l and tp_l > 0)
+    
+    flag_m = f"⚠️역전됨 (단기 모멘텀 {tp_s:,.0f}원 대비 중기 가치가 낮음)" if is_flag_m_inv else "정상"
+    flag_l = f"⚠️역전됨 (중기 가치 대비 장기 RIM 가치({tp_l:,.0f}원)가 낮음)" if is_flag_l_inv else "정상"
 
     quadrant_str = "정상"
     is_overvalued_flag = False
@@ -961,12 +975,9 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         m_gap = (tp_m - current_price) / current_price
         l_gap = (tp_l - current_price) / current_price
         
-        if m_gap > 0 and l_gap > 0:
-            quadrant_str = "저평가 국면 (상대/절대 모두 저평가)"
-        elif m_gap > 0 and l_gap <= 0:
-            quadrant_str = "성장 프리미엄 (상대가치 저평가, 절대가치 고평가)"
-        elif m_gap <= 0 and l_gap > 0:
-            quadrant_str = "가치 함정 의심 (상대가치 고평가, 절대가치 저평가)"
+        if m_gap > 0 and l_gap > 0: quadrant_str = "저평가 국면 (상대/절대 모두 저평가)"
+        elif m_gap > 0 and l_gap <= 0: quadrant_str = "성장 프리미엄 (상대가치 저평가, 절대가치 고평가)"
+        elif m_gap <= 0 and l_gap > 0: quadrant_str = "가치 함정 의심 (상대가치 고평가, 절대가치 저평가)"
         else:
             quadrant_str = "고평가 국면 (상대/절대 모두 고평가)"
             is_overvalued_flag = True
@@ -975,12 +986,13 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     if tier == "Tier 3 (Fatal)": confidence_reasons.append("3x3 매트릭스 치명적 위험 침체 국면(Tier 3) 진입")
     elif tier == "Tier 2 (Warning)": confidence_reasons.append("3x3 매트릭스 밸류 트랩 및 심리 과매도 경고 국면(Tier 2) 진입")
     
+    if is_flag_l_inv: confidence_reasons.append("장기 가치 선행 역전 현상 감지 (중기 가치 > 장기 RIM 내재가치)")
+    if is_flag_m_inv: confidence_reasons.append("중기 모멘텀 역전 현상 감지 (단기 밴드 상단 > 중기 적정가)")
     if is_overvalued_flag: confidence_reasons.append("4분면 진단 상 절대/상대 가치 모두 고평가 국면 진입")
-    if bool(structural_warning): confidence_reasons.append(f"구조적 데이터 밸류에이션 변형 제약 작동 ({structural_warning.replace('⚠️', '').strip()})")
+    if bool(structural_warning): confidence_reasons.append(f"구조적 밸류에이션 변형 작동 ({structural_warning.replace('⚠️', '').strip()})")
     if data_incomplete: confidence_reasons.append("기업의 핵심 재무 팩트 데이터(EPS/BPS) 누락 발생")
 
     risk_flags = len(confidence_reasons)
-    
     calibrated_map = get_calibrated_confidence()
     if risk_flags in calibrated_map:
         system_confidence = calibrated_map[risk_flags]["rate"]
@@ -995,7 +1007,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     bps_disp_val = f"{bps_val:,.0f}원" if bps_val is not None else "데이터 누락"
 
     consensus_log = ""
-    if avg_curr > 0 and tp_m > 0:
+    if avg_curr > 0 and tp_m > 0 and regime != "CONSENSUS_ANCHOR":
         divergence = (tp_m - avg_curr) / avg_curr
         consensus_log = f"   - ⚖️ 종합 컨센서스 교차검증: 시장 평균 목표가 {avg_curr:,.0f}원(추세: {tp_trend}) vs 퀀트 중기 적정가 {tp_m:,.0f}원 (괴리율: {divergence*100:+.1f}%) ➡️ 판정 (페널티 계수: {penalty}%)\n"
 
@@ -1006,10 +1018,12 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         f"   - 중기 목표가: {tp_m:,.0f}원\n"
         f"   - 장기 목표가: {tp_l:,.0f}원\n"
         f"▶ [퀀트 엔진 내부 검증 로그 (리스크 플래그)]:\n"
-        f"   - 밸류에이션 모델 타입: {fund_type}\n"
+        f"   - 밸류에이션 모델 타입: [{regime}] {fund_type}\n"
         f"   - 데이터 소스 엔진: {fund.get('consensus_source')}\n"
         f"{struct_warn_line}"
         f"   - 4분면 매핑 진단: {quadrant_str}\n"
+        f"   - 중기 시그널 상태: {flag_m}\n"
+        f"   - 장기 시그널 상태: {flag_l}\n"
         f"   - 🧭 3x3 트렌드 매트릭스 판정: {tier} | 시그널: {cross_signal}\n"
         f"   - 🧮 시스템 신뢰도 점수(파이썬 산출, 감점요인 {risk_flags}개): {system_confidence}%{confidence_note}\n"
         f"   - 🧩 시스템 신뢰도 감점 내역: {reasons_str}\n"
@@ -1022,7 +1036,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     bps_str = f"{bps_val:,}원" if bps_val is not None else "데이터 누락"
 
     tech_data_str = f"[{name} ({ticker})]\n"
-    if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | Beta(블렌딩) {beta:.2f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(EWMA) {daily_vol*100:.2f}%\n"
+    if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | Beta {beta:.2f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(EWMA) {daily_vol*100:.2f}%\n"
     
     fund_str = f"- 재무 비율: PER {fund.get('per', '-')} (업종PER {fund.get('industry_per', '-')}) | PBR {fund.get('pbr', '-')} | EPS {eps_str} | BPS {bps_str}\n"
     fund_str += f"- 분기 실적 추세(단위: 억원, %): 매출액 {fund.get('sales_history', [])} | 영업이익 {fund.get('op_history', [])} | EPS {fund.get('eps_history', [])} | ROE {fund.get('roe_history', [])}\n"
@@ -1043,6 +1057,8 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         "current_price": current_price,
         "conservative_bps": conservative_bps,
         "tech_data_str": tech_data_str,
+        "is_flag_m_inv": is_flag_m_inv,
+        "is_flag_l_inv": is_flag_l_inv,
         "quadrant_str": quadrant_str,
         "risk_flags": risk_flags,
         "system_confidence": system_confidence,
