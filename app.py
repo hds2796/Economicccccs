@@ -422,7 +422,6 @@ def get_advanced_fundamental_data(code):
         "per": "-", "pbr": "-", "eps": None, "bps": None, "industry_per": "-", 
         "quarter_trend": "정보 없음", "supply_demand": "수급 정보 없음", 
         "sales_history": [], "op_history": [], "eps_history": [], "roe_history": [],
-        "sales_quarterly": [], "op_quarterly": [], "eps_quarterly": [], "roe_quarterly": [],
         "forward_eps_e": None, "forward_roe_e": None, "consensus_source": "Past Actual (A)"
     }
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -458,19 +457,11 @@ def get_advanced_fundamental_data(code):
             try:
                 thead_trs = cop_table.find("thead").find_all("tr")
                 forward_idx = -1
-                annual_colspan = 4  # 기본값
                 
-                # 1행: '연간실적' colspan 추출
-                if len(thead_trs) > 0:
-                    for th in thead_trs[0].find_all("th"):
-                        if "연간" in th.get_text():
-                            annual_colspan = int(th.get("colspan", 4))
-                            break
-
-                # 2행: (E) 컨센서스 위치 추출
                 if len(thead_trs) > 1:
                     date_ths = thead_trs[1].find_all("th")
                     headers_text = [th.get_text().strip() for th in date_ths]
+                    
                     for idx, h_txt in enumerate(headers_text):
                         if "(E)" in h_txt:
                             forward_idx = idx
@@ -480,42 +471,29 @@ def get_advanced_fundamental_data(code):
                 if tbody:
                     for tr in tbody.find_all("tr"):
                         th_title = tr.find("th").get_text().strip() if tr.find("th") else ""
-                        td_values = [td.get_text().strip().replace(',', '') for td in tr.find_all("td")]
+                        tds = tr.find_all("td")
+                        td_values = [td.get_text().strip().replace(',', '') for td in tds]
                         
-                        # 연간/분기 데이터 분리 (colspan 기준)
-                        annual_tds = td_values[:annual_colspan]
-                        quarterly_tds = td_values[annual_colspan:]
-                        
-                        def extract_valid(arr):
-                            return [float(v) for v in arr if v and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
-
-                        annual_nums = extract_valid(annual_tds)
-                        quarterly_nums = extract_valid(quarterly_tds)
+                        valid_nums = [float(v) for v in td_values if v and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
                         
                         if "매출액" == th_title or "매출액" in th_title:
-                            if annual_nums: data["sales_history"] = annual_nums[-3:]
-                            if quarterly_nums: data["sales_quarterly"] = quarterly_nums[-3:]
+                            if valid_nums: data["sales_history"] = valid_nums[-3:]
                         elif "영업이익" == th_title or th_title.startswith("영업이익"):
-                            if annual_nums: data["op_history"] = annual_nums[-3:]
-                            if quarterly_nums: data["op_quarterly"] = quarterly_nums[-3:]
+                            if valid_nums: data["op_history"] = valid_nums[-3:]
                         elif "EPS" in th_title:
-                            if annual_nums:
-                                if data["eps"] is None: data["eps"] = annual_nums[-1]
-                                data["eps_history"] = annual_nums[-3:]
-                            if quarterly_nums: 
-                                data["eps_quarterly"] = quarterly_nums[-3:]
-                                
+                            if valid_nums:
+                                if data["eps"] is None: data["eps"] = valid_nums[-1]
+                                data["eps_history"] = valid_nums[-3:]
                             if data["forward_eps_e"] is None and forward_idx != -1 and len(td_values) > forward_idx:
                                 target_v = td_values[forward_idx]
                                 if target_v and target_v.replace('.', '', 1).replace('-', '', 1).isdigit():
                                     data["forward_eps_e"] = float(target_v)
                                     data["consensus_source"] = f"Forward Estimate (E)"
                         elif "BPS" in th_title:
-                            if annual_nums:
-                                data["bps"] = annual_nums[-1]
+                            if valid_nums:
+                                data["bps"] = valid_nums[-1]
                         elif "ROE" in th_title:
-                            if annual_nums: data["roe_history"] = annual_nums[-3:]
-                            if quarterly_nums: data["roe_quarterly"] = quarterly_nums[-3:]
+                            if valid_nums: data["roe_history"] = valid_nums[-3:]
                             if forward_idx != -1 and len(td_values) > forward_idx:
                                 target_v = td_values[forward_idx]
                                 if target_v and target_v.replace('.', '', 1).replace('-', '', 1).isdigit():
@@ -1055,10 +1033,8 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     tech_data_str = f"[{name} ({ticker})]\n"
     if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | Beta {beta:.2f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(EWMA) {daily_vol*100:.2f}%\n"
     
-    # PER 명시적 분리 및 분기/연간 데이터 분리 기재
-    fund_str = f"- 재무 비율: 추정PER(가치판단근거) {current_per:.2f}배 (참고 TTM PER {fund.get('per', '-')} | 업종PER {fund.get('industry_per', '-')}) | PBR {fund.get('pbr', '-')} | 적용EPS {eps_str} | BPS {bps_str}\n"
-    fund_str += f"- 연간 실적 추세(단위: 억원, %): 매출액 {fund.get('sales_history', [])} | 영업이익 {fund.get('op_history', [])} | EPS {fund.get('eps_history', [])} | ROE {fund.get('roe_history', [])}\n"
-    fund_str += f"- 분기 실적 추세(단위: 억원, %): 매출액 {fund.get('sales_quarterly', [])} | 영업이익 {fund.get('op_quarterly', [])} | EPS {fund.get('eps_quarterly', [])} | ROE {fund.get('roe_quarterly', [])}\n"
+    fund_str = f"- 재무 비율: PER {fund.get('per', '-')} (업종PER {fund.get('industry_per', '-')}) | PBR {fund.get('pbr', '-')} | EPS {eps_str} | BPS {bps_str}\n"
+    fund_str += f"- 분기 실적 추세(단위: 억원, %): 매출액 {fund.get('sales_history', [])} | 영업이익 {fund.get('op_history', [])} | EPS {fund.get('eps_history', [])} | ROE {fund.get('roe_history', [])}\n"
     fund_str += f"- {fund.get('supply_demand', '수급 정보 없음')}\n"
     
     tech_data_str += fund_str
@@ -1321,7 +1297,7 @@ with tab2:
                 valid_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result() and isinstance(f.result(), dict) and f.result().get("status") == "PASSED"]
 
             tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
-            st.session_state.morning_valid_results = valid_results  # 연산 결과 세션 캐싱
+            st.session_state.morning_valid_results = valid_results
 
         with st.spinner("3단계: 최종 모닝 보고서 컴파일 중..."):
             prompt = (
@@ -1338,13 +1314,14 @@ with tab2:
                 f"## 📰 1. 글로벌 매크로 국면 및 주도 섹터 심층 브리핑\n"
                 f"(실시간 지표와 매크로 뉴스를 연결하여 오늘 장의 성격 규정, 리스크 요인, 기회 요인을 구체적이고 길게 서술)\n\n"
                 f"## 🎯 2. 당일 기관 퀀트-모멘텀 핫픽 (Top 2)\n"
-                f"<ANALYSIS_티커숫자>\n"
+                f"(※ 각 종목별 분석은 반드시 실제 6자리 티커를 사용하여 <ANALYSIS_005930> 와 </ANALYSIS_005930> 태그로 감싸야 합니다.)\n"
+                f"<ANALYSIS_종목티커>\n"
                 f"### 📌 [종목명] ([티커])\n"
                 f"- **주가 현황:** 현재가 [숫자]원\n"
                 f"- **퀀트 시스템 적정가:** **[숫자]원**\n"
                 f"- **거시 국면 연결고리:** (이 종목이 왜 지금 매크로 상태에서 촉매를 받는지 서술)\n"
                 f"- **펀더멘털 및 퀀트 강세 논리:** (파이썬 로그의 PER, BPS, 기술적 이격도 수치 인용)\n"
-                f"</ANALYSIS_티커숫자>\n\n"
+                f"</ANALYSIS_종목티커>\n\n"
                 f"※ 주의: 마지막 줄은 반드시 선정된 2개 종목의 '6자리 숫자 티커만' 콤마로 구분하여 아래 형식으로 출력하십시오. 종목명이나 괄호는 절대 쓰지 마십시오.\n"
                 f"[SELECTED_TICKERS]: 000000, 111111\n"
                 f"[SENTIMENT_SCORE]: (점수)"
@@ -1365,49 +1342,50 @@ with tab2:
         with st.container(border=True):
             st.markdown(display_text)
             
-            # 모닝 브리핑(Top 2) 스크랩 기능 추가
-            if "[SELECTED_TICKERS]" in raw_report:
-                match = re.search(r'\[SELECTED_TICKERS\]\s*:\s*(.*)', raw_report)
-                if match:
-                    selected_ticks = re.findall(r'\b\d{6}\b', match.group(1))
-                    selected_ticks = list(dict.fromkeys(selected_ticks))[:2]
+            cached_results = st.session_state.get('morning_valid_results', [])
+            all_ticks = re.findall(r'\b\d{6}\b', raw_report)
+            valid_tickers = [r['ticker'] for r in cached_results]
+            
+            selected_ticks = []
+            for t in all_ticks:
+                if t in valid_tickers and t not in selected_ticks:
+                    selected_ticks.append(t)
+            selected_ticks = selected_ticks[:2]
+            
+            if selected_ticks:
+                st.markdown("---")
+                st.subheader("📌 핫픽 빠른 스크랩")
+                price_map = fetch_current_prices(selected_ticks)
+                cols_rec = st.columns(len(selected_ticks))
+                
+                for idx, tick in enumerate(selected_ticks):
+                    tick_data = next((r for r in cached_results if r['ticker'] == tick), None)
+                    if not tick_data: continue
+
+                    name = tick_data['name']
+                    tp_s, tp_m, tp_l = tick_data['tp_s'], tick_data['tp_m'], tick_data['tp_l']
+                    sl_s, sl_m, sl_l = tick_data['sl_s'], tick_data['sl_m'], tick_data['sl_l']
                     
-                    price_map = fetch_current_prices(selected_ticks)
-                    cached_results = st.session_state.get('morning_valid_results', [])
-                    
-                    if selected_ticks:
-                        st.markdown("---")
-                        st.subheader("📌 핫픽 2선 빠른 스크랩")
-                        cols_rec = st.columns(len(selected_ticks) if len(selected_ticks) > 0 else 1)
-                        
-                        for idx, tick in enumerate(selected_ticks):
-                            tick_data = next((r for r in cached_results if r['ticker'] == tick), None)
-                            if not tick_data: continue
+                    price_info = price_map.get(tick, {})
+                    current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
 
-                            name = tick_data['name']
-                            tp_s, tp_m, tp_l = tick_data['tp_s'], tick_data['tp_m'], tick_data['tp_l']
-                            sl_s, sl_m, sl_l = tick_data['sl_s'], tick_data['sl_m'], tick_data['sl_l']
-                            
-                            price_info = price_map.get(tick, {})
-                            current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
+                    with cols_rec[idx % len(cols_rec)]:
+                        with st.container(border=True):
+                            st.markdown(f"**{name}** `{tick}`")
+                            if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
+                            c_tp, c_bp = st.columns(2)
+                            c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}", unsafe_allow_html=True)
+                            c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
 
-                            with cols_rec[idx % len(cols_rec)]:
-                                with st.container(border=True):
-                                    st.markdown(f"**{name}** `{tick}`")
-                                    if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
-                                    c_tp, c_bp = st.columns(2)
-                                    c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}", unsafe_allow_html=True)
-                                    c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
-
-                                    if st.button("스크랩", key=f"morning_s_{tick}", use_container_width=True):
-                                        analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw_report, re.DOTALL)
-                                        specific_analysis = analysis_match.group(1).strip() if analysis_match else display_text
-                                        
-                                        with db_write_lock:
-                                            c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id, risk_flags, system_confidence, reasons_str) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                                      (f"[모닝 핫픽] {name}", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, current, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user, tick_data.get('risk_flags', -1), tick_data.get('system_confidence', 0), tick_data.get('reasons_str', '')))
-                                            conn.commit()
-                                        st.success(f"✅ 리포트 스크랩 완료!")
+                            if st.button("📥 스크랩북 저장", key=f"morning_s_{tick}", use_container_width=True):
+                                analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw_report, re.DOTALL)
+                                specific_analysis = analysis_match.group(1).strip() if analysis_match else display_text
+                                
+                                with db_write_lock:
+                                    c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id, risk_flags, system_confidence, reasons_str) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                              (f"[모닝 핫픽] {name}", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, current, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user, tick_data.get('risk_flags', -1), tick_data.get('system_confidence', 0), tick_data.get('reasons_str', '')))
+                                    conn.commit()
+                                st.success(f"✅ 리포트 스크랩 완료!")
 
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
@@ -1579,7 +1557,8 @@ with tab4:
                         f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n\n"
                         f"**🏢 [참고] 주요 증권사 목표가 변동 내역**\n"
                         f"(파이썬 로그에 제공된 증권사별 변동 내역을 빠짐없이 목록화하여 기재)\n"
-                        f"</ANALYSIS_티커숫자>\n\n"
+                        f"(※ 각 종목별 분석은 반드시 실제 6자리 티커를 사용하여 <ANALYSIS_005930> 와 </ANALYSIS_005930> 태그로 감싸야 합니다.)\n"
+                        f"</ANALYSIS_종목티커>\n\n"
                         f"[SELECTED_TICKERS]: 000000, 111111, 222222"
                     )
                     st.session_state.today_recommendation = "".join(call_gemini_stream_with_fallback(step3_prompt))
@@ -1599,51 +1578,55 @@ with tab4:
             display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw.split("[SELECTED_TICKERS]")[0].strip())
             st.write(display_text)
 
-            if "[SELECTED_TICKERS]" in raw:
-                match = re.search(r'\[SELECTED_TICKERS\]\s*:\s*(.*)', raw)
-                if match:
-                    selected_ticks = re.findall(r'\b\d{6}\b', match.group(1))
-                    selected_ticks = list(dict.fromkeys(selected_ticks))[:3]
-                    
-                    price_map = fetch_current_prices(selected_ticks)
-                    cols_rec = st.columns(3)
+            all_ticks = re.findall(r'\b\d{6}\b', raw)
+            valid_tickers = [r['ticker'] for r in cached_results]
+            
+            selected_ticks = []
+            for t in all_ticks:
+                if t in valid_tickers and t not in selected_ticks:
+                    selected_ticks.append(t)
+            selected_ticks = selected_ticks[:3]
+            
+            if selected_ticks:
+                price_map = fetch_current_prices(selected_ticks)
+                cols_rec = st.columns(3)
 
-                    for idx, tick in enumerate(selected_ticks):
-                        tick_data = next((r for r in cached_results if r['ticker'] == tick), None)
-                        if not tick_data: continue
+                for idx, tick in enumerate(selected_ticks):
+                    tick_data = next((r for r in cached_results if r['ticker'] == tick), None)
+                    if not tick_data: continue
 
-                        name = tick_data['name']
-                        tp_s, tp_m, tp_l = tick_data['tp_s'], tick_data['tp_m'], tick_data['tp_l']
-                        sl_s, sl_m, sl_l = tick_data['sl_s'], tick_data['sl_m'], tick_data['sl_l']
-                        q_str = tick_data.get('quadrant_str', '정상')
+                    name = tick_data['name']
+                    tp_s, tp_m, tp_l = tick_data['tp_s'], tick_data['tp_m'], tick_data['tp_l']
+                    sl_s, sl_m, sl_l = tick_data['sl_s'], tick_data['sl_m'], tick_data['sl_l']
+                    q_str = tick_data.get('quadrant_str', '정상')
 
-                        price_info = price_map.get(tick, {})
-                        current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
+                    price_info = price_map.get(tick, {})
+                    current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
 
-                        with cols_rec[idx % 3]:
-                            with st.container(border=True):
-                                st.markdown(f"**{name}** `{tick}`")
-                                if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
-                                c_tp, c_bp = st.columns(2)
-                                c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}<br>장: {tp_l:,.0f}", unsafe_allow_html=True)
-                                c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
+                    with cols_rec[idx % 3]:
+                        with st.container(border=True):
+                            st.markdown(f"**{name}** `{tick}`")
+                            if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
+                            c_tp, c_bp = st.columns(2)
+                            c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}<br>장: {tp_l:,.0f}", unsafe_allow_html=True)
+                            c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
 
-                                st.info(f"**🧮 파이썬 산출 시스템 신뢰도: {tick_data.get('system_confidence', 0)}%**\n\n*(감점 사유: {tick_data.get('reasons_str', '없음')})*")
+                            st.info(f"**🧮 파이썬 산출 시스템 신뢰도: {tick_data.get('system_confidence', 0)}%**\n\n*(감점 사유: {tick_data.get('reasons_str', '없음')})*")
 
-                                if "고평가 국면" in q_str:
-                                    st.warning(f"⚠️ **시스템 진단 경고**\n현재가({current:,.0f}원)가 상대가치 및 절대가치를 모두 초과한 4분면 고평가 국면입니다.")
-                                elif "가치 함정" in q_str:
-                                    st.warning(f"⚠️ **시스템 진단 경고**\n절대가치는 높으나 상대가치는 고평가된 가치 함정(Value Trap) 의심 국면입니다.")
+                            if "고평가 국면" in q_str:
+                                st.warning(f"⚠️ **시스템 진단 경고**\n현재가({current:,.0f}원)가 상대가치 및 절대가치를 모두 초과한 4분면 고평가 국면입니다.")
+                            elif "가치 함정" in q_str:
+                                st.warning(f"⚠️ **시스템 진단 경고**\n절대가치는 높으나 상대가치는 고평가된 가치 함정(Value Trap) 의심 국면입니다.")
 
-                                if st.button("스크랩", key=f"rec_s_{tick}", use_container_width=True):
-                                    analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw, re.DOTALL)
-                                    specific_analysis = analysis_match.group(1).strip() if analysis_match else display_text
+                            if st.button("📥 스크랩북 저장", key=f"rec_s_{tick}", use_container_width=True):
+                                analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw, re.DOTALL)
+                                specific_analysis = analysis_match.group(1).strip() if analysis_match else display_text
 
-                                    with db_write_lock:
-                                        c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id, risk_flags, system_confidence, reasons_str) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                                  (f"{name} 퀀트 심층분석", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, current, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user, tick_data.get('risk_flags', -1), tick_data.get('system_confidence', 0), tick_data.get('reasons_str', '')))
-                                        conn.commit()
-                                    st.success(f"✅ 리포트 스크랩 완료!")
+                                with db_write_lock:
+                                    c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id, risk_flags, system_confidence, reasons_str) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                              (f"{name} 퀀트 심층분석", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, current, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user, tick_data.get('risk_flags', -1), tick_data.get('system_confidence', 0), tick_data.get('reasons_str', '')))
+                                    conn.commit()
+                                st.success(f"✅ 리포트 스크랩 완료!")
 
 with tab5:
     st.subheader("관심종목 진단 (보유종목 정밀 평가)")
@@ -1830,7 +1813,7 @@ with tab5:
                     with col_sl:
                         st.markdown(f"**🔴 파이썬 연산 리스크 규격 (k={k_factor:.1f})**\n* **단기 손절선:** {sl_s:,.0f}원\n* **중기 손절선:** {sl_m:,.0f}원\n* **장기 손절선:** {sl_l:,.0f}원")
                     
-                    if st.button("스크랩북에 저장하여 가격 추적하기", key=f"scrap_t5_{p_id}", use_container_width=True):
+                    if st.button("📥 스크랩북에 저장하여 가격 추적하기", key=f"scrap_t5_{p_id}", use_container_width=True):
                         with db_write_lock:
                             c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id, risk_flags, system_confidence, reasons_str) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                       (f"{name} 관심종목 진단", report_text, name, ticker, current, tp_s, tp_m, tp_l, bp, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), model_used, current_user, p_risk_flags, p_sys_conf, p_reasons))
