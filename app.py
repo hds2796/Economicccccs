@@ -426,6 +426,7 @@ def get_advanced_fundamental_data(code):
         "per": "-", "pbr": "-", "eps": None, "bps": None, "industry_per": "-", 
         "quarter_trend": "정보 없음", "supply_demand": "수급 정보 없음", 
         "sales_history": [], "op_history": [], "eps_history": [], "roe_history": [],
+        "sales_quarterly": [], "op_quarterly": [], "eps_quarterly": [], "roe_quarterly": [],
         "forward_eps_e": None, "forward_roe_e": None, "consensus_source": "Past Actual (A)"
     }
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -461,11 +462,19 @@ def get_advanced_fundamental_data(code):
             try:
                 thead_trs = cop_table.find("thead").find_all("tr")
                 forward_idx = -1
+                annual_colspan = 4  # 기본값
                 
+                # 1행: '연간실적' colspan 추출
+                if len(thead_trs) > 0:
+                    for th in thead_trs[0].find_all("th"):
+                        if "연간" in th.get_text():
+                            annual_colspan = int(th.get("colspan", 4))
+                            break
+
+                # 2행: (E) 컨센서스 위치 추출
                 if len(thead_trs) > 1:
                     date_ths = thead_trs[1].find_all("th")
                     headers_text = [th.get_text().strip() for th in date_ths]
-                    
                     for idx, h_txt in enumerate(headers_text):
                         if "(E)" in h_txt:
                             forward_idx = idx
@@ -475,29 +484,42 @@ def get_advanced_fundamental_data(code):
                 if tbody:
                     for tr in tbody.find_all("tr"):
                         th_title = tr.find("th").get_text().strip() if tr.find("th") else ""
-                        tds = tr.find_all("td")
-                        td_values = [td.get_text().strip().replace(',', '') for td in tds]
+                        td_values = [td.get_text().strip().replace(',', '') for td in tr.find_all("td")]
                         
-                        valid_nums = [float(v) for v in td_values if v and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
+                        # 연간/분기 데이터 분리 (colspan 기준)
+                        annual_tds = td_values[:annual_colspan]
+                        quarterly_tds = td_values[annual_colspan:]
+                        
+                        def extract_valid(arr):
+                            return [float(v) for v in arr if v and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
+
+                        annual_nums = extract_valid(annual_tds)
+                        quarterly_nums = extract_valid(quarterly_tds)
                         
                         if "매출액" == th_title or "매출액" in th_title:
-                            if valid_nums: data["sales_history"] = valid_nums[-3:]
+                            if annual_nums: data["sales_history"] = annual_nums[-3:]
+                            if quarterly_nums: data["sales_quarterly"] = quarterly_nums[-3:]
                         elif "영업이익" == th_title or th_title.startswith("영업이익"):
-                            if valid_nums: data["op_history"] = valid_nums[-3:]
+                            if annual_nums: data["op_history"] = annual_nums[-3:]
+                            if quarterly_nums: data["op_quarterly"] = quarterly_nums[-3:]
                         elif "EPS" in th_title:
-                            if valid_nums:
-                                if data["eps"] is None: data["eps"] = valid_nums[-1]
-                                data["eps_history"] = valid_nums[-3:]
+                            if annual_nums:
+                                if data["eps"] is None: data["eps"] = annual_nums[-1]
+                                data["eps_history"] = annual_nums[-3:]
+                            if quarterly_nums: 
+                                data["eps_quarterly"] = quarterly_nums[-3:]
+                                
                             if data["forward_eps_e"] is None and forward_idx != -1 and len(td_values) > forward_idx:
                                 target_v = td_values[forward_idx]
                                 if target_v and target_v.replace('.', '', 1).replace('-', '', 1).isdigit():
                                     data["forward_eps_e"] = float(target_v)
                                     data["consensus_source"] = f"Forward Estimate (E)"
                         elif "BPS" in th_title:
-                            if valid_nums:
-                                data["bps"] = valid_nums[-1]
+                            if annual_nums:
+                                data["bps"] = annual_nums[-1]
                         elif "ROE" in th_title:
-                            if valid_nums: data["roe_history"] = valid_nums[-3:]
+                            if annual_nums: data["roe_history"] = annual_nums[-3:]
+                            if quarterly_nums: data["roe_quarterly"] = quarterly_nums[-3:]
                             if forward_idx != -1 and len(td_values) > forward_idx:
                                 target_v = td_values[forward_idx]
                                 if target_v and target_v.replace('.', '', 1).replace('-', '', 1).isdigit():
@@ -1038,8 +1060,10 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     tech_data_str = f"[{name} ({ticker})]\n"
     if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | Beta {beta:.2f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(EWMA) {daily_vol*100:.2f}%\n"
     
-    fund_str = f"- 재무 비율: PER {fund.get('per', '-')} (업종PER {fund.get('industry_per', '-')}) | PBR {fund.get('pbr', '-')} | EPS {eps_str} | BPS {bps_str}\n"
-    fund_str += f"- 분기 실적 추세(단위: 억원, %): 매출액 {fund.get('sales_history', [])} | 영업이익 {fund.get('op_history', [])} | EPS {fund.get('eps_history', [])} | ROE {fund.get('roe_history', [])}\n"
+    # PER 명시적 분리 및 분기/연간 데이터 분리 기재
+    fund_str = f"- 재무 비율: 추정PER(가치판단근거) {current_per:.2f}배 (참고 TTM PER {fund.get('per', '-')} | 업종PER {fund.get('industry_per', '-')}) | PBR {fund.get('pbr', '-')} | 적용EPS {eps_str} | BPS {bps_str}\n"
+    fund_str += f"- 연간 실적 추세(단위: 억원, %): 매출액 {fund.get('sales_history', [])} | 영업이익 {fund.get('op_history', [])} | EPS {fund.get('eps_history', [])} | ROE {fund.get('roe_history', [])}\n"
+    fund_str += f"- 분기 실적 추세(단위: 억원, %): 매출액 {fund.get('sales_quarterly', [])} | 영업이익 {fund.get('op_quarterly', [])} | EPS {fund.get('eps_quarterly', [])} | ROE {fund.get('roe_quarterly', [])}\n"
     fund_str += f"- {fund.get('supply_demand', '수급 정보 없음')}\n"
     
     tech_data_str += fund_str
