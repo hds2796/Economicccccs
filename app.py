@@ -96,7 +96,6 @@ def init_db():
         cursor.execute('''CREATE TABLE IF NOT EXISTS dart_corp_codes (corp_code TEXT, corp_name TEXT, stock_code TEXT PRIMARY KEY)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, k_factor REAL)''')
         
-        # [수정] holding_companies 스키마에 is_financial 컬럼 추가 확정
         cursor.execute('''CREATE TABLE IF NOT EXISTS holding_companies (stock_code TEXT PRIMARY KEY, corp_name TEXT, is_financial INTEGER DEFAULT 0)''')
         
         cursor.execute("SELECT count(*) FROM holding_companies")
@@ -114,7 +113,6 @@ def init_db():
         
         connection.commit()
 
-        # [수정] 기존 운영 중이던 DB와의 하위 호환성 (is_financial 컬럼 강제 추가)
         columns_to_add = [
             ("portfolio", "is_owned", "INTEGER DEFAULT 0"), ("portfolio", "avg_price", "REAL DEFAULT 0.0"),
             ("portfolio", "quantity", "INTEGER DEFAULT 0"), ("portfolio", "report_text", "TEXT"),
@@ -141,7 +139,6 @@ def init_db():
             except Exception:
                 pass
                 
-        # 구조 패치 이후, 기존 DB에 금융지주가 누락되어 있을 경우를 대비한 병합 처리
         try:
             financial_defaults = [
                 ('105560', 'KB금융', 1), ('055550', '신한지주', 1), ('086790', '하나금융지주', 1), ('316140', '우리금융지주', 1),
@@ -156,7 +153,6 @@ def init_db():
 conn = init_db()
 c = conn.cursor()
 
-# [수정] 단일 함수에서 일반 지주사와 금융지주사를 각각 분리하여 반환
 @st.cache_data(ttl=86400)
 def fetch_holding_ticker_list_from_db():
     local_conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
@@ -857,7 +853,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
                 broker_log_str += f"   => 📊 [종합 컨센서스 판정] 이전 평균 {avg_prev:,.0f}원 ➡️ 현재 평균 {avg_curr:,.0f}원 ({tp_trend})\n"
 
     # 3. 밸류에이션 체제(Regime) 명시적 분류
-    # [수정] DB 통합을 통해 금융지주(is_financial=1)와 일반지주(is_financial=0)를 테이블 기반으로 판별
     normal_holdings, financial_holdings = fetch_holding_ticker_list_from_db()
     
     is_financial = any(kw in name for kw in ['금융지주']) or (ticker in financial_holdings)
@@ -1326,6 +1321,7 @@ with tab2:
                 valid_results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result() and isinstance(f.result(), dict) and f.result().get("status") == "PASSED"]
 
             tech_data_str_all = "".join([r['tech_data_str'] for r in valid_results])
+            st.session_state.morning_valid_results = valid_results  # 연산 결과 세션 캐싱
 
         with st.spinner("3단계: 최종 모닝 보고서 컴파일 중..."):
             prompt = (
@@ -1342,13 +1338,13 @@ with tab2:
                 f"## 📰 1. 글로벌 매크로 국면 및 주도 섹터 심층 브리핑\n"
                 f"(실시간 지표와 매크로 뉴스를 연결하여 오늘 장의 성격 규정, 리스크 요인, 기회 요인을 구체적이고 길게 서술)\n\n"
                 f"## 🎯 2. 당일 기관 퀀트-모멘텀 핫픽 (Top 2)\n"
-                f"<ANALYSIS_종목명>\n"
+                f"<ANALYSIS_티커숫자>\n"
                 f"### 📌 [종목명] ([티커])\n"
                 f"- **주가 현황:** 현재가 [숫자]원\n"
                 f"- **퀀트 시스템 적정가:** **[숫자]원**\n"
                 f"- **거시 국면 연결고리:** (이 종목이 왜 지금 매크로 상태에서 촉매를 받는지 서술)\n"
                 f"- **펀더멘털 및 퀀트 강세 논리:** (파이썬 로그의 PER, BPS, 기술적 이격도 수치 인용)\n"
-                f"</ANALYSIS_종목명>\n\n"
+                f"</ANALYSIS_티커숫자>\n\n"
                 f"※ 주의: 마지막 줄은 반드시 선정된 2개 종목의 '6자리 숫자 티커만' 콤마로 구분하여 아래 형식으로 출력하십시오. 종목명이나 괄호는 절대 쓰지 마십시오.\n"
                 f"[SELECTED_TICKERS]: 000000, 111111\n"
                 f"[SENTIMENT_SCORE]: (점수)"
@@ -1365,8 +1361,53 @@ with tab2:
     if st.session_state.get('morning_report'):
         raw_report = st.session_state.morning_report
         display_text = re.sub(r'</?ANALYSIS_[^>]+>', '', raw_report.split("[SELECTED_TICKERS]")[0].strip())
+        
         with st.container(border=True):
             st.markdown(display_text)
+            
+            # 모닝 브리핑(Top 2) 스크랩 기능 추가
+            if "[SELECTED_TICKERS]" in raw_report:
+                match = re.search(r'\[SELECTED_TICKERS\]\s*:\s*(.*)', raw_report)
+                if match:
+                    selected_ticks = re.findall(r'\b\d{6}\b', match.group(1))
+                    selected_ticks = list(dict.fromkeys(selected_ticks))[:2]
+                    
+                    price_map = fetch_current_prices(selected_ticks)
+                    cached_results = st.session_state.get('morning_valid_results', [])
+                    
+                    if selected_ticks:
+                        st.markdown("---")
+                        st.subheader("📌 핫픽 2선 빠른 스크랩")
+                        cols_rec = st.columns(len(selected_ticks) if len(selected_ticks) > 0 else 1)
+                        
+                        for idx, tick in enumerate(selected_ticks):
+                            tick_data = next((r for r in cached_results if r['ticker'] == tick), None)
+                            if not tick_data: continue
+
+                            name = tick_data['name']
+                            tp_s, tp_m, tp_l = tick_data['tp_s'], tick_data['tp_m'], tick_data['tp_l']
+                            sl_s, sl_m, sl_l = tick_data['sl_s'], tick_data['sl_m'], tick_data['sl_l']
+                            
+                            price_info = price_map.get(tick, {})
+                            current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
+
+                            with cols_rec[idx % len(cols_rec)]:
+                                with st.container(border=True):
+                                    st.markdown(f"**{name}** `{tick}`")
+                                    if current > 0: st.metric("현재가", f"{current:,.0f}", delta=f"{diff:+,.0f} ({diff_pct:+.2f}%)")
+                                    c_tp, c_bp = st.columns(2)
+                                    c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}", unsafe_allow_html=True)
+                                    c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
+
+                                    if st.button("스크랩", key=f"morning_s_{tick}", use_container_width=True):
+                                        analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw_report, re.DOTALL)
+                                        specific_analysis = analysis_match.group(1).strip() if analysis_match else display_text
+                                        
+                                        with db_write_lock:
+                                            c.execute("INSERT INTO scrapbook (title, analysis, stock_name, ticker, saved_price, target_price, target_price_mid, target_price_long, buy_recommend_price, sl_s, sl_m, sl_l, scrap_date, model_used, user_id, risk_flags, system_confidence, reasons_str) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                                      (f"[모닝 핫픽] {name}", specific_analysis, name, tick, current, tp_s, tp_m, tp_l, current, sl_s, sl_m, sl_l, datetime.now().strftime("%Y-%m-%d %H:%M"), MODEL_NAME, current_user, tick_data.get('risk_flags', -1), tick_data.get('system_confidence', 0), tick_data.get('reasons_str', '')))
+                                            conn.commit()
+                                        st.success(f"✅ 리포트 스크랩 완료!")
 
 with tab3:
     st.subheader("섹터별 모멘텀 분석")
