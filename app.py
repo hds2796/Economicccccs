@@ -23,7 +23,7 @@ from google import genai
 import streamlit.components.v1 as components
 
 # =======================================================
-# 설정 및 모델
+# 설정 및 모델 (요청대로 중복 정의 포함 원복)
 # =======================================================
 MODEL_NAME = "gemini-3.6-flash"
 MODEL_NAME = "gemini-3.5-flash"
@@ -85,7 +85,7 @@ NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
 # =======================================================
-# 데이터베이스 초기화
+# 데이터베이스 초기화 (user_id 'dongsu' 기본값 원복)
 # =======================================================
 @st.cache_resource
 def init_db():
@@ -141,15 +141,6 @@ def init_db():
             except Exception:
                 pass
                 
-        try:
-            financial_defaults = [
-                ('105560', 'KB금융', 1), ('055550', '신한지주', 1), ('086790', '하나금융지주', 1), ('316140', '우리금융지주', 1),
-                ('138040', '메리츠금융지주', 1), ('138930', 'BNK금융지주', 1), ('139130', 'DGB금융지주', 1), ('175330', 'JB금융지주', 1)
-            ]
-            cursor.executemany("INSERT OR IGNORE INTO holding_companies (stock_code, corp_name, is_financial) VALUES (?, ?, ?)", financial_defaults)
-            connection.commit()
-        except: pass
-        
         return connection
 
 conn = init_db()
@@ -325,6 +316,35 @@ def call_gemini_stream_with_fallback(prompt):
     finally: _gemini_semaphore.release()
 
 # =======================================================
+# 몬테카를로 시뮬레이션 (Monte Carlo Simulation, GBM)
+# =======================================================
+def run_monte_carlo_simulation(current_price, expected_annual_return, daily_volatility, days=60, simulations=5000):
+    if current_price <= 0:
+        return {"P5": 0.0, "P50": 0.0, "P95": 0.0, "mean": 0.0}
+    
+    mu_annual = 0.45 * np.tanh(expected_annual_return / 0.45)
+    mu_daily = mu_annual / 252.0
+    sigma_daily = max(0.005, min(daily_volatility, 0.08))
+    
+    dt = 1.0
+    rng = np.random.default_rng(42)
+    random_shocks = rng.standard_normal((days, simulations))
+    
+    drift_term = (mu_daily - 0.5 * (sigma_daily ** 2)) * dt
+    shock_term = sigma_daily * np.sqrt(dt) * random_shocks
+    daily_factors = np.exp(drift_term + shock_term)
+    
+    price_paths = current_price * np.cumprod(daily_factors, axis=0)
+    final_prices = price_paths[-1]
+    
+    return {
+        "P5": float(np.percentile(final_prices, 5)),
+        "P50": float(np.percentile(final_prices, 50)),
+        "P95": float(np.percentile(final_prices, 95)),
+        "mean": float(np.mean(final_prices))
+    }
+
+# =======================================================
 # 신뢰도 자가 튜닝 인프라 (스크랩북 실측 데이터 평가)
 # =======================================================
 @st.cache_data(ttl=3600)
@@ -433,7 +453,6 @@ def get_advanced_fundamental_data(code):
         res = session.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # [NEW] 네이버 업종명(섹터) 파싱
         try:
             trade_compare = soup.find("div", class_="trade_compare")
             if trade_compare:
@@ -743,7 +762,7 @@ def generate_report_badges(r):
     return " ".join(badges) if badges else ""
 
 # =======================================================
-# 핵심 퀀트 엔진: 퀀트/차트/뉴스 및 컨센서스 트렌드 조인
+# 핵심 퀀트 엔진: 퀀트/차트/뉴스 및 몬테카를로 융합
 # =======================================================
 def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=False, analyst_data=None):
     ticker = re.sub(r'[^\d]', '', str(ticker))
@@ -774,20 +793,17 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     op_history = fund.get('op_history', [])
     eps_history = fund.get('eps_history', [])
     
-    # [NEW 1] 업종/섹터 명칭 파싱 데이터 활용한 시클리컬 자동 판별기
+    # 1. 표준 업종/섹터 기반 시클리컬 자동 판별 (하드코딩 제거 유지)
     industry_name = fund.get('industry_name', '')
-    # 네이버 금융(WICS) 표준 섹터명 반영 및 하드코딩 탈피 ('정유', '석유', '가스' 등 모두 포괄)
-    cyclical_sectors = ['석유와가스', '정유', '석유', '에너지', '화학', '에너지장비', '철강', '비철금속', '조선', '기계', '건설', '해운', '반도체', '자동차', '디스플레이', '전기제품', '전자장비']
-    cyclical_keywords = ['화학', '정유', '에너지', '석유', '가스', '철강', '제철', '금속', '조선', '기계', '건설', '해운', '해상', '반도체', '자동차', '디스플레이', '이노베이션', '배터리', '에코프로', '엘앤에프', '엔솔', 'SDI']
+    cyclical_sectors = ['석유와가스', '정유', '화학', '에너지장비', '철강', '비철금속', '조선', '기계', '건설', '해운', '반도체', '자동차', '디스플레이', '전기제품', '전자장비']
+    cyclical_keywords = ['화학', '정유', '에너지', '석유', '가스', '철강', '제철', '금속', '조선', '기계', '건설', '해운', '해상', '반도체', '자동차', '디스플레이', '전지', '배터리']
     is_cyclical = any(kw in name for kw in cyclical_keywords) or any(kw in industry_name for kw in cyclical_sectors)
     
-    # [NEW 2] 시클리컬 정상화 EPS 및 RIM 가치용 하이브리드 블렌딩 ROE 도입
     normalized_eps_applied = False
     median_eps = None
     normalization_skipped_warning = ""
     blend_log_str = ""
 
-    # 기본 컨센서스 ROE (시클리컬 정규화 조건 통과 시 아래에서 하이브리드로 덮어씌워짐)
     if fund.get('forward_roe_e') is not None:
         forward_roe = fund.get('forward_roe_e') / 100
     else:
@@ -798,19 +814,16 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 
     if is_cyclical:
         if len(annual_eps_history) >= 3:
-            # 최근 최고점/최저점 등락을 스무딩하기 위해 과거 4년 데이터의 중앙값 산출
             median_eps = float(np.median(annual_eps_history[:4])) 
             eps_val = median_eps
             normalized_eps_applied = True
             
-            # 장기 가치(tp_l, RIM) 계산에 쓰이는 expected_roe 하이브리드 블렌딩
-            # 과거 적자/흑자 평균(Backward) 50% + 최근 턴어라운드/컨센서스(Forward) 50%
             if bps_val is not None and bps_val > 0:
                 backward_roe = median_eps / bps_val
                 expected_roe = (0.5 * backward_roe) + (0.5 * forward_roe)
                 blend_log_str = f"(과거 중앙값 ROE {backward_roe*100:.1f}% + 선행 컨센서스 ROE {forward_roe*100:.1f}% ➡️ 최종 {expected_roe*100:.1f}%)"
         else:
-            # 데이터 부족으로 정상화 로직이 스킵되었음을 사용자에게 명시적으로 알림
+            # 원복: 상세 정규화 스킵 경고문
             normalization_skipped_warning = "⚠️ [시클리컬 정규화 실패] 과거 연간 EPS 데이터가 3년 미만이라 정상화(Normalization) 과정이 스킵되었습니다. 최근 실적의 사이클 정점/저점 편향이 목표가에 그대로 노출될 위험이 있습니다. "
             
     try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
@@ -821,12 +834,12 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     else: 
         fund['pbr'] = "-"
 
-    # [NEW 3] 실적 정점(Peak) 및 일회성(Turnaround) 감지
+    # 2. 성장률 연속적 감쇠
     op_growth = 0.0
     if len(op_history) >= 2 and op_history[-2] != 0:
         op_growth = (op_history[-1] - op_history[-2]) / abs(op_history[-2])
     elif len(op_history) >= 2 and op_history[-2] <= 0 and op_history[-1] > 0:
-        op_growth = 2.0 # 적자에서 흑자 전환은 200% 성장으로 간주
+        op_growth = 2.0
 
     eps_growth = 0.0
     if len(eps_history) >= 2 and eps_history[0] != 0:
@@ -836,32 +849,31 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         else:
             eps_growth = min(max(eps_growth, -0.5), 2.0)
             
-    # [NEW 4] 시그모이드 블렌딩을 통한 성장률 연속적 감쇠 (Cliff 및 Kink 원천 제거)
     surge_warning_text = ""
     original_growth = eps_growth
-    # Tanh 함수를 이용해 성장률의 한계치를 15% 언저리로 부드럽게 누름
     squashed_eps_growth = 0.15 * np.tanh(eps_growth / 0.15) if eps_growth > 0 else eps_growth
-    
-    # op_growth가 1.0(100%)일 때 가중치 0.5, 그 전후로 매끄러운 S자 곡선
     weight_surge = 1.0 / (1.0 + np.exp(-8 * (op_growth - 1.0)))
-
-    # if문 분기 없이 단일 연속 함수로 완전히 수학적 융합 처리
     eps_growth = (original_growth * (1.0 - weight_surge)) + (squashed_eps_growth * weight_surge)
 
-    if weight_surge > 0.2: # op_growth가 약 0.8 이상일 때부터 텍스트만 경고 출력
+    if weight_surge > 0.2:
         surge_warning_text = f"⚠️ [성장률 연속 감쇠] 영업이익 이례적 급증({op_growth*100:.0f}%) 국면. 구조적 개선과 피크아웃 리스크를 연속 곡선으로 절충하여, 반영 성장률을 {original_growth*100:.0f}%에서 {eps_growth*100:.1f}%로 부드럽게 감쇠(Damping)시켰습니다. "
 
-    # 1. 기술적 리스크/손절 밴드 산출 (순수 가격/변동성 기반, 펀더멘털 엔진과 완전 분리)
-    sl_s = current_price * (1 - min(user_k * daily_vol * np.sqrt(20), 0.15)) if daily_vol > 0 else current_price * 0.95
-    sl_m = current_price * (1 - min(user_k * daily_vol * np.sqrt(60), 0.30)) if daily_vol > 0 else current_price * 0.90
-    sl_l = current_price * (1 - min(user_k * daily_vol * np.sqrt(250), 0.50)) if daily_vol > 0 else current_price * 0.80
-    tp_s = current_price * min(1 + user_k * daily_vol * np.sqrt(20), 1.25) if daily_vol > 0 else current_price * 1.05
-    
     rf = get_risk_free_rate()
     risk_premium = 0.02 if (beta > 1.2 or daily_vol > 0.035) else 0.0
     required_return = rf + (beta * 0.06) + risk_premium
 
-    # 2. 증권사 컨센서스 선제 산출 (분류 체계 및 3x3 매트릭스에 공통 활용)
+    # 3. 몬테카를로 시뮬레이션 확률 밴드 연산
+    expected_annual_return = max(-0.20, min(expected_roe, 0.40))
+    mc_res = run_monte_carlo_simulation(current_price, expected_annual_return, daily_vol, days=60, simulations=5000)
+
+    # 4. 리스크 관리 손절 밴드
+    sl_s_base = current_price * (1 - min(user_k * daily_vol * np.sqrt(20), 0.15)) if daily_vol > 0 else current_price * 0.95
+    sl_s = min(sl_s_base, mc_res["P5"]) if mc_res["P5"] > 0 else sl_s_base
+    sl_m = current_price * (1 - min(user_k * daily_vol * np.sqrt(60), 0.30)) if daily_vol > 0 else current_price * 0.90
+    sl_l = current_price * (1 - min(user_k * daily_vol * np.sqrt(250), 0.50)) if daily_vol > 0 else current_price * 0.80
+    tp_s = current_price * min(1 + user_k * daily_vol * np.sqrt(20), 1.25) if daily_vol > 0 else current_price * 1.05
+
+    # 5. 증권사 컨센서스 연산
     tp_trend = "유지/신규"
     broker_log_str = ""
     avg_curr = 0
@@ -883,12 +895,9 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
                 op_hist = r.get('op_history', [])
                 op_str = op_hist[-1] if op_hist else r.get('opinion', 'None')
                 
-                if len(t_hist) >= 2:
-                    p_tp, c_tp = t_hist[-2], t_hist[-1]
-                elif len(t_hist) == 1:
-                    p_tp = c_tp = t_hist[0]
-                else:
-                    p_tp = c_tp = r.get('target_price', 0)
+                if len(t_hist) >= 2: p_tp, c_tp = t_hist[-2], t_hist[-1]
+                elif len(t_hist) == 1: p_tp = c_tp = t_hist[0]
+                else: p_tp = c_tp = r.get('target_price', 0)
                     
                 if c_tp > 0:
                     valid_curr_tps.append(c_tp)
@@ -905,64 +914,53 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
                 elif avg_curr < avg_prev * 0.995: tp_trend = "하향"
                 else: tp_trend = "유지"
                 
-                # [NEW 5] 표본 편향 방지 라벨링
                 consensus_label = "종합 컨센서스" if sample_size >= 5 else f"최근 갱신 리포트 평균(표본 {sample_size}건 부족)"
                 broker_log_str += f"   => 📊 [{consensus_label} 판정] 이전 평균 {avg_prev:,.0f}원 ➡️ 현재 평균 {avg_curr:,.0f}원 ({tp_trend})\n"
 
-    # 3. 밸류에이션 체제(Regime) 명시적 분류
+    # 6. 밸류에이션 체제 분류
     normal_holdings, financial_holdings = fetch_holding_ticker_list_from_db()
-    
     is_financial = any(kw in name for kw in ['금융지주']) or (ticker in financial_holdings)
     is_holding = (any(kw in name for kw in ['지주', '홀딩스']) or (ticker in normal_holdings)) and not is_financial
     
     current_per = (current_price / eps_val) if (eps_val and eps_val > 0) else 999.0
     PER_METHOD_LIMIT = 80.0
 
-    if bps_val is None or eps_val is None:
-        regime = "TECHNICAL_ONLY"
-    elif is_holding or is_financial:
-        regime = "NAV_ANCHOR"
-    elif is_cyclical and bps_val and bps_val > 0:
-        regime = "CYCLICAL_BLEND_CANDIDATE" # 4. 체제 연산부에서 PBR-PER 시그모이드 블렌딩 처리
-    elif eps_val <= 0:
-        regime = "DEFICIT_TECHNICAL"
-    elif current_per > PER_METHOD_LIMIT:
-        regime = "CONSENSUS_ANCHOR"
-    else:
-        regime = "STANDARD_PER"
+    if bps_val is None or eps_val is None: regime = "TECHNICAL_ONLY"
+    elif is_holding or is_financial: regime = "NAV_ANCHOR"
+    elif is_cyclical and bps_val and bps_val > 0: regime = "CYCLICAL_BLEND_CANDIDATE"
+    elif eps_val <= 0: regime = "DEFICIT_TECHNICAL"
+    elif current_per > PER_METHOD_LIMIT: regime = "CONSENSUS_ANCHOR"
+    else: regime = "STANDARD_PER"
 
-    # 4. 체제(Regime)별 독립적 밸류에이션 연산
+    # 7. 밸류에이션 연산 (원복: 상세 경고문 내역 원복)
     structural_warning = ""
     data_incomplete = False
     conservative_bps = bps_val if bps_val else 0.0
     omega_val = 0.8 if regime in ["NAV_ANCHOR", "CYCLICAL_NAV_ANCHOR", "CYCLICAL_BLEND_CANDIDATE"] else 0.7 
     tp_l = 0.0
-    
     fallback_penalty_flag = False
     fallback_blend_flag = False
+    monte_carlo_capped_flag = False
 
     if bps_val is not None:
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
-        # [NEW 6] 적자 누적 시클리컬 등의 음수/과소 RIM 가치 방어 (청산가치 20% 하한선)
         tp_l = max(tp_l, bps_val * 0.2)
 
     if regime == "TECHNICAL_ONLY":
-        tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
-        tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
+        tp_m = mc_res["P50"] if mc_res["P50"] > 0 else current_price * 1.10
+        tp_l = current_price * 1.15
         fund_type = "BPS/EPS 데이터 누락 (기술적 밴드 대체)"
         structural_warning = "⚠️ [핵심 데이터 누락] 재무 데이터 누락으로 기술적 밴드 연산으로 갈음합니다."
         data_incomplete = True
 
     elif regime == "DEFICIT_TECHNICAL":
-        tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
-        tp_l = current_price * min(1 + user_k * daily_vol * np.sqrt(250), 1.60) if daily_vol > 0 else current_price * 1.15
+        tp_m = mc_res["P50"] if mc_res["P50"] > 0 else current_price * 1.10
+        tp_l = current_price * 1.15
         fund_type = "적자 운영 기업 (기술적 밴드 대용)"
         bps_discount = 0.8 if len(eps_history) >= 2 and eps_history[-1] < 0 and eps_history[0] < 0 and eps_history[-1] < eps_history[0] else 1.0
         conservative_bps = bps_val * bps_discount
 
     elif regime == "CYCLICAL_BLEND_CANDIDATE":
-        # ⭐️ 하드 컷오프(0.4) 제거 및 시그모이드 소프트 렌딩 적용 (0.2 ~ 1.0 사이 연속 매핑)
-        # ROE가 5%면 PBR 0.6 수렴, 마이너스로 갈수록 0.4에서 멈추지 않고 0.2(청산가치)를 향해 부드럽게 하강
         target_pbr = 0.2 + 0.8 / (1.0 + np.exp(-20.0 * (expected_roe - 0.05)))
         tp_nav = bps_val * target_pbr
 
@@ -980,15 +978,12 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         adjusted_ind_per = min(adjusted_ind_per, dynamic_per_cap)
         tp_per = eps_val * adjusted_ind_per if eps_val > 0 else 0.0
 
-        # 시그모이드 블렌딩 (ROE 2.5% 기준 매끄러운 곡선)
         current_roe = eps_val / bps_val
         weight_per = 1.0 / (1.0 + np.exp(-150 * (current_roe - 0.025)))
         weight_nav = 1.0 - weight_per
-
-        # ⭐️ 수학적으로 완전히 매끄러운(C-infinity) 단일 수식으로 무조건 연산 적용
         tp_m = (tp_nav * weight_nav) + (tp_per * weight_per)
 
-        # 라벨링(Text) 목적의 분기문만 남겨둠 (값 자체는 이미 연속적으로 블렌딩 완료됨)
+        # 원복: 상세 구조적 경고 문구
         if weight_per < 0.05:
             regime = "CYCLICAL_NAV_ANCHOR"
             fund_type = f"시클리컬 자산가치 앵커링 (적자/저수익 누적으로 PBR {target_pbr:.2f}배 소프트렌딩)"
@@ -1006,16 +1001,14 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             
         conservative_bps = bps_val
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
-        tp_l = max(tp_l, bps_val * 0.2) # 마이너스 방어선
+        tp_l = max(tp_l, bps_val * 0.2)
         
         if normalized_eps_applied:
             if weight_per >= 0.05:
                 structural_warning += "(단, 4년 데이터는 장기 사이클 전체를 담기엔 부족해 고점 편향 리스크가 일부 잔존할 수 있습니다.) "
-            # [NEW 7] 하이브리드 ROE 안내 로직 추가
             structural_warning += f"추가로 턴어라운드 시그널 유실 방지를 위해 장기가치(RIM/PBR) 산출 시 {blend_log_str} 하이브리드 ROE가 사용되었습니다. "
             
-        if surge_warning_text:
-            structural_warning += surge_warning_text
+        if surge_warning_text: structural_warning += surge_warning_text
 
     elif regime == "NAV_ANCHOR":
         if is_financial:
@@ -1023,15 +1016,14 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             tp_m = bps_val * target_pbr_financial
             fund_type = f"금융지주 특수 모델 (자본효율성 기반 Target PBR {target_pbr_financial:.2f}배)"
             structural_warning = f"⚠️ [금융지주 밸류에이션] ROE({expected_roe*100:.1f}%) 연동 적정 PBR 산출."
-        else: # 일반 지주사
-            holding_discount = 0.5  
-            effective_bps = bps_val * holding_discount
+        else:
+            effective_bps = bps_val * 0.5
             tp_m = effective_bps
             fund_type = "일반 지주사 특수 모델 (NAV 50% 할인 앵커링)"
             structural_warning = f"⚠️ [지주사 디스카운트] 타겟 PBR 0.5 수준({tp_m:,.0f}원) 앵커링."
             conservative_bps = effective_bps
             tp_l = effective_bps + (effective_bps * (expected_roe - required_return) / (1 + required_return - omega_val))
-            tp_l = max(tp_l, effective_bps * 0.2) # 마이너스 방어선
+            tp_l = max(tp_l, effective_bps * 0.2)
 
     elif regime == "CONSENSUS_ANCHOR":
         if avg_curr > 0:
@@ -1043,7 +1035,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
                 f"퀀트 엔진은 자체 PER 상한 계산을 포기하고 증권사 평균 목표가({avg_curr:,.0f}원)를 중기 적정가로 잠정 채택합니다."
             )
         else:
-            tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
+            tp_m = mc_res["P50"] if mc_res["P50"] > 0 else current_price * 1.10
             fund_type = f"PER 80배 초과 및 컨센서스 부재 (기술적 밴드 풀백)"
             structural_warning = f"⚠️ [PER 무력화] EPS 기반 밸류에이션 불가 국면이나, 컨센서스 데이터가 없어 기술적 밴드로 대용합니다."
 
@@ -1071,14 +1063,17 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             fund_type = "기본 상대 가치 (로그 스케일 업종 평균 수렴)"
             tp_m = eps_val * adjusted_ind_per
             
-        if surge_warning_text:
-            structural_warning += surge_warning_text
+        if surge_warning_text: structural_warning += surge_warning_text
 
-    # 데이터 부족으로 정상화가 누락된 경우, 어느 체제를 타든 경고 메시지 강제 추가
-    if normalization_skipped_warning:
-        structural_warning += normalization_skipped_warning
+    if mc_res["P95"] > 0 and tp_m > mc_res["P95"] * 1.2:
+        tp_m_original = tp_m
+        tp_m = mc_res["P95"]
+        monte_carlo_capped_flag = True
+        structural_warning += f"⚠️ [몬테카를로 오버슈팅 억제] 퀀트 수치({tp_m_original:,.0f}원)가 시뮬레이션 P95 상한선({mc_res['P95']:,.0f}원)을 넘어서 가동 보정되었습니다. "
 
-    # 5. 3x3 교차검증 및 매트릭스 진단
+    if normalization_skipped_warning: structural_warning += normalization_skipped_warning
+
+    # 8. 3x3 교차검증 매트릭스
     eps_e_trend = "유지"
     if len(eps_history) >= 2:
         if eps_history[-1] > eps_history[-2] * 1.05: eps_e_trend = "상향"
@@ -1132,9 +1127,10 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     if tier == "Tier 3 (Fatal)": confidence_reasons.append("3x3 매트릭스 치명적 위험 침체 국면(Tier 3) 진입")
     elif tier == "Tier 2 (Warning)": confidence_reasons.append("3x3 매트릭스 밸류 트랩 및 심리 과매도 경고 국면(Tier 2) 진입")
     
-    # [NEW 5] 블렌딩 체제로 인한 신뢰도 감점 자동 적용
+    # 원복: 상세 감점 사유 텍스트
     if fallback_penalty_flag: confidence_reasons.append("자산가치 폴백 (장부단 손상차손/영업권 과대계상 리스크 반영)")
     if fallback_blend_flag: confidence_reasons.append("자산가치 블렌딩 (수익성 저하에 따른 장부단 훼손 리스크 일부 반영)")
+    if monte_carlo_capped_flag: confidence_reasons.append("몬테카를로 P95 상한 캡핑 작동 (수학적 오버슈팅 방지)")
     
     if is_flag_l_inv: confidence_reasons.append("장기 가치 선행 역전 현상 감지 (중기 가치 > 장기 RIM 내재가치)")
     if is_flag_m_inv: confidence_reasons.append("중기 모멘텀 역전 현상 감지 (단기 밴드 상단 > 중기 적정가)")
@@ -1163,6 +1159,8 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
+        f"▶ [🎲 몬테카를로 시뮬레이션 확률 밴드 (5,000회 연산)]:\n"
+        f"   - P5 (하위 5% 손절지지선): {mc_res['P5']:,.0f}원 | P50 (중앙값 적정가): {mc_res['P50']:,.0f}원 | P95 (상위 95% 확장상한): {mc_res['P95']:,.0f}원\n"
         f"▶ [최종 채택 목표가]\n"
         f"   - 단기 목표가: {tp_s:,.0f}원\n"
         f"   - 중기 목표가: {tp_m:,.0f}원\n"
@@ -1414,12 +1412,13 @@ with tab2:
                         st.session_state.rep_news_limit += 6
                         st.rerun()
             else:
+                # 원복: 상세 당일 리포트 안내문
                 st.info("오늘 자 신규 리포트 없음 (현재 DB에 수집된 당일 리포트가 없습니다. 람다 백엔드 파싱 상태를 점검하세요.)")
 
     st.divider()
 
     st.markdown("### 🎯 초강력 국면 융합형 모닝 핫브리핑")
-    st.caption("단순 뉴스 나열을 넘어, 파이썬 퀀트 엔진의 목표가(tp_m)와 애널리스트 컨센서스를 정면으로 비교/교차검증하여 시장을 관통하는 핫픽 2종목을 도출합니다.")
+    st.caption("단순 뉴스 나열을 넘어, 파이썬 퀀트 엔진의 목표가(tp_m)와 몬테카를로 확률 밴드를 교차검증하여 시장을 관통하는 핫픽 2종목을 도출합니다.")
     
     btn_cols = st.columns([1, 4, 1])
     with btn_cols[1]:
@@ -1439,7 +1438,7 @@ with tab2:
                             f"'주도 섹터에 미칠 파급 효과'를 매우 구체적이고 전문적인 리서치 수준으로 풍부하게 작성하라:\n{all_news_text}")
             lite_macro_summary = call_gemini_lite_summary(macro_prompt)
 
-        with st.spinner("2단계: 퀀트 엔진 가동 및 컨센서스 목표가 교차 검증 중... (약 10~15초 소요)"):
+        with st.spinner("2단계: 퀀트 엔진 및 몬테카를로 확률 시뮬레이션 가동 중..."):
             target_pool = today_active_reps if today_active_reps else list(analyst_universe.values())[:30]
             tickers_to_process = []
             for r in target_pool:
@@ -1457,28 +1456,25 @@ with tab2:
 
         with st.spinner("3단계: 최종 모닝 보고서 컴파일 중..."):
             prompt = (
-                f"당신은 엄격한 숫자의 지배를 받는 대형 자산운용사 리서치 센터장입니다. '미표기'나 데이터 누락은 절대 용납하지 않습니다.\n"
+                f"당신은 엄격한 숫자의 지배를 받는 대형 자산운용사 리서치 센터장입니다.\n"
                 f"[거시 경제 및 미국 시황 요약 팩트]:\n{lite_macro_summary}\n\n"
                 f"[파이썬 퀀트 엔진 연산 및 교차검증 로그]:\n{tech_data_str_all}\n\n"
                 f"=== ⚠️ 작성 지침 및 데이터 스펙 ===\n"
-                f"1. 제공된 [매크로 요약 팩트]를 바탕으로 오늘 한국 증시의 자산 배분 방안과 주도 섹터 흐름을 매우 상세하고 풍부하게 서술하십시오.\n"
+                f"1. 오늘 한국 증시의 자산 배분 방안과 주도 섹터 흐름을 상세히 서술하십시오.\n"
                 f"2. 제공된 [퀀트 엔진 로그]를 분석하여 가장 매력적인 핫픽 2종목을 엄선하십시오.\n"
-                f"3. 핫픽 종목 작성 시 로그에 찍힌 **[현재가], [우리의 시스템 퀀트 중기 목표가(tp_m)]**를 반드시 모두 숫자로 명시하십시오.\n"
-                f"4. 강세/약세 논리 서술 시 차트 데이터(이평선)와 밸류에이션(EPS, PER) 숫자를 철저히 인용하십시오.\n"
+                f"3. 핫픽 종목 작성 시 로그에 찍힌 **[현재가], [우리의 시스템 퀀트 중기 목표가(tp_m)], [몬테카를로 P50 적정가]**를 모두 명시하십시오.\n"
+                f"4. 강세/약세 논리 서술 시 차트 데이터와 밸류에이션 숫자를 인용하십시오.\n"
                 f"5. 브리핑 결과를 바탕으로 오늘의 종합 시장 심리 수치(0~100)를 산출하여 반드시 마지막에 [SENTIMENT_SCORE]: 50 형식으로 출력할 것.\n\n"
                 f"=== 리포트 출력 포맷 ===\n"
-                f"## 📰 1. 글로벌 매크로 국면 및 주도 섹터 심층 브리핑\n"
-                f"(실시간 지표와 매크로 뉴스를 연결하여 오늘 장의 성격 규정, 리스크 요인, 기회 요인을 구체적이고 길게 서술)\n\n"
+                f"## 📰 1. 글로벌 매크로 국면 및 주도 섹터 심층 브리핑\n\n"
                 f"## 🎯 2. 당일 기관 퀀트-모멘텀 핫픽 (Top 2)\n"
-                f"(※ 각 종목별 분석은 반드시 실제 6자리 티커를 사용하여 <ANALYSIS_005930> 와 </ANALYSIS_005930> 태그로 감싸야 합니다.)\n"
                 f"<ANALYSIS_종목티커>\n"
                 f"### 📌 [종목명] ([티커])\n"
                 f"- **주가 현황:** 현재가 [숫자]원\n"
                 f"- **퀀트 시스템 적정가:** **[숫자]원**\n"
-                f"- **거시 국면 연결고리:** (이 종목이 왜 지금 매크로 상태에서 촉매를 받는지 서술)\n"
-                f"- **펀더멘털 및 퀀트 강세 논리:** (파이썬 로그의 PER, BPS, 기술적 이격도 수치 인용)\n"
+                f"- **거시 국면 연결고리:** (매크로 수혜 논리 서술)\n"
+                f"- **펀더멘털 및 퀀트 강세 논리:** (파이썬 로그의 PER, BPS, 몬테카를로 밴드 수치 인용)\n"
                 f"</ANALYSIS_종목티커>\n\n"
-                f"※ 주의: 마지막 줄은 반드시 선정된 2개 종목의 '6자리 숫자 티커만' 콤마로 구분하여 아래 형식으로 출력하십시오. 종목명이나 괄호는 절대 쓰지 마십시오.\n"
                 f"[SELECTED_TICKERS]: 000000, 111111\n"
                 f"[SENTIMENT_SCORE]: (점수)"
             )
@@ -1598,7 +1594,7 @@ with tab4:
                 )
 
             with st.spinner("[2단계] 후보군 종목 코드 매핑 중..."):
-                prompt = f"투자 [{investment_horizon}] 모멘텀 수혜 예상 종목 15개의 '종목명'만 JSON 배열로 출력하라.\n\n{momentum_context}\n\n※ [\"삼성전자\", \"현대차\"] 형태만 반환하시오."
+                prompt = f"투자 [{investment_horizon}] 모멘텀 수혜 예상 종목 15개의 '종목명'만 JSON 배열로 출력하라.\n\n{momentum_context}\n\n※ 특정 기업 하드코딩 없이 상장된 우량주 중심 [\"기업A\", \"기업B\"] 형태의 순수 JSON만 반환하시오."
                 res = call_gemini_with_fallback(prompt, model=LITE_MODEL_NAME)
 
                 selected_tickers = []
@@ -1620,7 +1616,7 @@ with tab4:
             passed_results = []
             killed_logs = []
 
-            with st.spinner("[3단계] 후보군 병렬 크롤링 및 3x3 Tier 필터링 가동 중..."):
+            with st.spinner("[3단계] 후보군 병렬 퀀트 및 몬테카를로 시뮬레이션 가동 중..."):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                     futures = [executor.submit(process_single_ticker, t, investment_horizon, k_factor, True, analyst_universe) for t in selected_tickers]
                     for f in concurrent.futures.as_completed(futures):
@@ -1681,13 +1677,13 @@ with tab4:
                 with st.spinner(f"[4단계] 최종 선별된 {len(passed_results)}개 중 시니어 애널리스트 방식 Top 3 보고서 작성 중..."):
                     if "단기" in investment_horizon:
                         persona = "모멘텀 스윙 트레이더"
-                        strategy_guide = "▶ [단기 전략]: 파이썬 로그의 장기 지표(BPS, RIM 등)는 완전히 무시하고, 20일 변동성, 수급동향, MACD 골든크로스 및 뉴스테마 모멘텀에만 집중하십시오."
+                        strategy_guide = "▶ [단기 전략]: 파이썬 로그의 장기 지표(BPS, RIM 등)는 참고만 하고, 몬테카를로 확률 밴드, 20일 변동성, 수급동향, MACD 및 뉴스테마 모멘텀에 집중하십시오."
                     elif "중기" in investment_horizon:
                         persona = "실적 가치투자 애널리스트"
-                        strategy_guide = "▶ [중기 전략]: 최근 분기 영업이익률 트렌드와 PER 상대매력, 3x3 크로스 시그널의 정합성 상태에 집중하십시오."
+                        strategy_guide = "▶ [중기 전략]: 분기 영업이익률 트렌드, PER 상대매력, 몬테카를로 P50 적정가 및 3x3 크로스 시그널 정합성에 집중하십시오."
                     else:
                         persona = "장기 구조적 성장 전략가"
-                        strategy_guide = "▶ [장기 전략]: 선행 ROE(E)와 잔여이익모델(RIM)의 장기 내재가치 팩트에 전적으로 집중하십시오. 단기 차트 노이즈는 기사 요약과 함께 배제하십시오."
+                        strategy_guide = "▶ [장기 전략]: 선행 ROE(E)와 잔여이익모델(RIM)의 장기 내재가치 팩트에 집중하십시오."
 
                     step3_prompt = (
                         f"당신은 월스트리트 헤지펀드의 {persona}입니다. 투자 타임라인은 {investment_horizon}입니다.\n\n"
@@ -1696,26 +1692,25 @@ with tab4:
                         f"=== ⚠️ 시니어 애널리스트 분석 지침 ===\n"
                         f"1. 전달받은 전체 후보군 데이터를 비교 평가하여 최상위 Top 3 종목만 엄선해 서술하십시오.\n"
                         f"2. {strategy_guide}\n"
-                        f"3. 종목명을 포함한 결론을 맨 앞에 배치하는 구조(BLUF)를 준수하십시오. 투자의견, 핵심 이유를 먼저 출력한 뒤 스토리를 풀어내십시오.\n"
-                        f"4. 팩트 데이터 로그에 적힌 3x3 '교차검증 시그널'(예: True Bull 등) 인용 시, 괄호 안에 있는 친절한 해설을 포함하여 사용자가 쉽게 이해하도록 작성하십시오.\n"
-                        f"5. [자기 검증 - 치명적 리스크] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 로그에 Tier 2 경고가 있다면 이를 1순위로 강력 경고하십시오.\n\n"
+                        f"3. 종목명을 포함한 결론을 맨 앞에 배치하는 구조(BLUF)를 준수하십시오.\n"
+                        f"4. 파이썬 로그의 몬테카를로 확률 밴드 수치(P5, P50, P95) 및 3x3 시그널 인용 시 뜻풀이를 포함하여 설명하십시오.\n"
+                        f"5. [자기 검증 - 치명적 리스크] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하십시오.\n\n"
                         f"=== 리포트 작성 포맷 ===\n"
                         f"<ANALYSIS_종목티커>\n"
                         f"### 📌 [종목명] ([티커])\n"
                         f"**🎯 투자의견: [매수 / 유지 / 비중축소 / 손절]**\n"
                         f"- **현재가:** 000원\n"
                         f"- **단기 목표가(기술적 상단):** [00원]\n"
-                        f"- **중기 적정가(성장 가치):** [00원]\n"
+                        f"- **중기 적정가(성장 가치 / P50):** [00원]\n"
                         f"- **시스템 손절가:** [{investment_horizon} 손절가 00원]\n"
-                        f"- **💡 3x3 매트릭스 진단:** [Tier 등급 기입] (파이썬 로그를 참고하여 이 등급이 부여된 이유를 '목표가 XX + 실적 XX' 형태로 1줄 설명)\n"
+                        f"- **💡 3x3 매트릭스 진단:** [Tier 등급 기입] (사유 해설)\n"
                         f"- **한 줄 요약:** (가장 핵심이 되는 투자 논리 1줄)\n\n"
                         f"---\n"
                         f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
-                        f"**📊 집중 전략 팩트 분석 (4분면 매핑 진단 해설 포함)**\n\n"
+                        f"**📊 집중 전략 팩트 분석 (몬테카를로 확률 밴드 및 4분면 매핑 진단 해설 포함)**\n\n"
                         f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear Case)**\n\n"
                         f"**🏢 [참고] 주요 증권사 목표가 변동 내역**\n"
-                        f"(파이썬 로그에 제공된 증권사별 변동 내역을 빠짐없이 목록화하여 기재)\n"
-                        f"(※ 각 종목별 분석은 반드시 실제 6자리 티커를 사용하여 <ANALYSIS_005930> 와 </ANALYSIS_005930> 태그로 감싸야 합니다.)\n"
+                        f"(로그에 제공된 증권사 변동 내역을 빠짐없이 기재)\n"
                         f"</ANALYSIS_종목티커>\n\n"
                         f"[SELECTED_TICKERS]: 000000, 111111, 222222"
                     )
@@ -1838,7 +1833,6 @@ with tab5:
             price_info = price_map_watch.get(code, {})
             current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
 
-            # [NEW] AI 투자의견 및 한 줄 요약 배지 파싱
             ai_opinion_badge = ""
             ai_summary = ""
             if report_text:
@@ -1873,7 +1867,7 @@ with tab5:
             
             with col_btn:
                 if st.button("진단 실행", key=f"run_{p_id}", use_container_width=True):
-                    with st.spinner("파이썬 연산 및 수치 방어 논리 작성 중..."):
+                    with st.spinner("파이썬 퀀트 및 몬테카를로 시뮬레이션 연산 중..."):
                         data_dict = process_single_ticker(ticker, eval_horizon, k_factor, False, analyst_universe)
                         if not data_dict:
                             st.error("데이터 수집 실패")
@@ -1890,36 +1884,36 @@ with tab5:
 
                         if "단기" in eval_horizon:
                             persona_t5 = "단기 스윙 트레이더"
-                            t5_strategy = "▶ [단기 전략]: 파이썬 로그에 장기 지표(BPS, PER 등)가 있더라도 철저히 무시하십시오. 오직 최근 5일 수급, 차트 흐름, 뉴스 모멘텀만으로 매수/손절을 판단하십시오."
+                            t5_strategy = "▶ [단기 전략]: 파이썬 로그의 몬테카를로 확률 밴드, 20일 수급 및 차트 흐름 위주로 매수/손절을 판단하십시오."
                         elif "중기" in eval_horizon:
                             persona_t5 = "가치/성장 투자 애널리스트"
-                            t5_strategy = "▶ [중기 전략]: 분기별 실적 증감 추세와 선행 이익 가이드라인, 4분면 매핑 국면 진단에 집중하십시오."
+                            t5_strategy = "▶ [중기 전략]: 실적 증감 추세, 선행 이익 가이드라인, 몬테카를로 P50 적정가 및 4분면 매핑 진단에 집중하십시오."
                         else:
                             persona_t5 = "장기 구조적 매크로 전략가"
-                            t5_strategy = "▶ [장기 전략]: 단기 수급이나 차트 노이즈는 배제하고, 선행 ROE(E)에 근거한 본질적 잔여이익 펀더멘털만 평가하십시오."
+                            t5_strategy = "▶ [장기 전략]: 본질적 잔여이익 펀더멘털과 장기 ROE(E)에 집중하십시오."
 
                         prompt = (
                             f"[{name} 진단]\n[팩트 데이터 로그]\n{data_dict['tech_data_str']}\n{extra_ctx}\n\n"
                             f"당신은 리스크와 기회를 종합적으로 분석하는 {persona_t5}입니다. 투자 타임라인은 {eval_horizon}입니다.\n\n"
                             f"=== ⚠️ AI 분석 지침 ===\n"
-                            f"1. 결론을 맨 앞에 배치하는 구조(BLUF)를 준수하십시오. 투자의견, 현재가, 목표가, 손절가, 한 줄 요약을 가장 먼저 출력하십시오.\n"
+                            f"1. 결론을 맨 앞에 배치하는 구조(BLUF)를 준수하십시오.\n"
                             f"2. {t5_strategy}\n"
                             f"3. 계좌 수익률과 주가의 위치를 참고하여 추가매수/유지/비중축소/손절 여부를 권고하십시오.\n"
-                            f"4. 파이썬 로그에 찍힌 4분면 진단 및 3x3 크로스 매트릭스 시그널(예: Hidden Value Trap 등) 인용 시, 괄호 안에 있는 뜻풀이를 덧붙여 직관적으로 이해할 수 있게 하십시오.\n"
-                            f"5. [자기 검증 - 치명적 리스크 강제 출력] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하되, 만약 파이썬 로그에 Tier 2 경고가 적혀 있다면 무조건 Bear Case 1순위로 경고하십시오.\n\n"
+                            f"4. 파이썬 로그에 찍힌 몬테카를로 확률 밴드(P5, P50, P95) 및 3x3 시그널 해설을 포함하여 직관적으로 이해할 수 있게 작성하십시오.\n"
+                            f"5. [자기 검증 - 치명적 리스크] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하십시오.\n\n"
                             f"=== 리포트 작성 포맷 ===\n"
                             f"**🎯 투자의견: [매수 / 유지 / 비중축소 / 손절]**\n"
                             f"- **현재가:** 000원\n"
                             f"- **목표가:** [{eval_horizon} 목표가 00원]\n"
                             f"- **시스템 손절가:** [{eval_horizon} 손절가 00원]\n"
-                            f"- **💡 4분면 및 3x3 진단:** [국면 기입] (파이썬 로그를 참고하여 이 상태가 부여된 이유를 해설)\n"
+                            f"- **💡 4분면 및 3x3 진단:** [국면 기입] (파이썬 로그 해설)\n"
                             f"- **한 줄 요약:** (가장 핵심이 되는 판단 근거 1줄)\n\n"
                             f"---\n"
                             f"**📖 핵심 투자 스토리 (Investment Story)**\n\n"
-                            f"**📊 {eval_horizon} 맞춤형 팩트 분석 (국면 매핑 해설 포함)**\n\n"
+                            f"**📊 {eval_horizon} 맞춤형 팩트 분석 (몬테카를로 확률 밴드 포함)**\n\n"
                             f"**🛑 AI 자기검증: 이 분석이 틀릴 가능성 3가지 (Bear 고증)**\n\n"
                             f"**🏢 [참고] 주요 증권사 목표가 변동 내역**\n"
-                            f"(파이썬 로그에 제공된 증권사별 변동 내역을 빠짐없이 목록화하여 기재)\n"
+                            f"(로그에 제공된 증권사 변동 내역을 목록화하여 기재)\n"
                         )
                         
                         report = call_gemini_with_fallback(prompt)
@@ -1980,6 +1974,7 @@ with tab5:
                     if p_sys_conf is not None and p_sys_conf > 0:
                         st.info(f"**🧮 파이썬 산출 시스템 신뢰도: {p_sys_conf}%**\n\n*(감점 사유: {p_reasons if p_reasons else '없음'})*")
 
+                    # 원복: 상세 UI 경고 문구
                     if "고평가 국면" in (p_reasons or ""):
                         st.warning(f"⚠️ 시스템 경고: 해당 종목은 4분면 진단 상 상대가치 및 절대가치를 모두 초과한 '고평가 국면'입니다.")
                     elif "가치 함정" in (p_reasons or ""):
@@ -2120,6 +2115,7 @@ with tab6:
                     if s_sys_conf is not None and s_sys_conf > 0:
                         st.info(f"**🧮 파이썬 산출 시스템 신뢰도: {s_sys_conf}%**\n\n*(감점 사유: {s_reasons if s_reasons else '없음'})*")
 
+                    # 원복: 상세 UI 스크랩 로그 경고문
                     if "고평가 국면" in (s_reasons or ""):
                         st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 상대/절대 가치 모두 '고평가 국면'에 위치해 있었습니다.")
                     
