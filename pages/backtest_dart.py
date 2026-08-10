@@ -5,9 +5,9 @@ import pandas as pd
 import numpy as np
 import time
 
-st.title("🧪 DART + pykrx 퀀트 백테스트 연구소")
+st.title("🧪 퀀트 파라미터 자동 최적화 연구소 (Grid Search)")
+st.caption("PBR 임계값을 0.5부터 1.5까지 자동으로 테스트하여 최적의 승률 구간을 발굴합니다.")
 
-# 1. 스트림릿 시크릿에서 DART 키 불러오기
 try:
     DART_API_KEY = st.secrets["DART_API_KEY"]
 except KeyError:
@@ -16,8 +16,8 @@ except KeyError:
 
 dart = OpenDartReader(DART_API_KEY)
 
+@st.cache_data(ttl=3600)
 def get_historical_financials(corp_code, start_year, end_year):
-    """DART에서 과거 자본총계 및 당기순이익 추출"""
     fs_data = []
     for year in range(start_year, end_year + 1):
         try:
@@ -49,10 +49,9 @@ def get_historical_financials(corp_code, start_year, end_year):
         df_fs.set_index('report_date', inplace=True)
     return df_fs
 
-def run_backtest_with_marketcap(ticker, corp_name, start_year, end_year):
-    with st.spinner(f"[{corp_name}] DART 재무 데이터 및 KRX 시가총액 수집 중..."):
+def run_parameter_optimization(ticker, corp_name, start_year, end_year):
+    with st.spinner(f"[{corp_name}] 재무 및 시가총액 데이터 병합 중..."):
         df_fs = get_historical_financials(corp_name, start_year, end_year)
-        
         if df_fs.empty:
             st.error("재무 데이터를 불러오지 못했습니다.")
             return
@@ -60,50 +59,66 @@ def run_backtest_with_marketcap(ticker, corp_name, start_year, end_year):
         start_date = f"{start_year}0101"
         end_date = f"{end_year+1}1231"
         
-        # pykrx 데이터 수집
         df_price = stock.get_market_ohlcv(start_date, end_date, ticker)
         df_cap = stock.get_market_cap(start_date, end_date, ticker)
         
-        # 주가와 시가총액 결합
         df_market = pd.concat([df_price['종가'], df_cap['시가총액']], axis=1)
         df_market.columns = ['Close', 'MarketCap']
         
-        # 데이터 병합 (앞방향 채우기)
         df = df_market.join(df_fs, how='outer')
         df['equity'] = df['equity'].ffill()
         df['net_income'] = df['net_income'].ffill()
         df.dropna(subset=['Close', 'equity'], inplace=True)
         
-        # PBR, PER 산출
         df['PBR'] = df['MarketCap'] / df['equity']
         df['PER'] = df['MarketCap'] / df['net_income']
         df['PER'] = np.where(df['PER'] < 0, np.nan, df['PER'])
 
-        # 백테스트 룰 세팅 (PBR 0.8 이하 매수)
-        df['Signal'] = np.where((df['PBR'] < 0.8) & (df['PER'] > 0), 1, 0)
-        
+        # 시장 단순 존버 수익률
         df['Daily_Return'] = df['Close'].pct_change().shift(-1)
-        df['Strategy_Return'] = df['Signal'] * df['Daily_Return']
-        
         df['Cumulative_Market'] = (1 + df['Daily_Return']).cumprod()
-        df['Cumulative_Strategy'] = (1 + df['Strategy_Return']).cumprod()
-
-        # 결과 연산
         final_market = (df['Cumulative_Market'].iloc[-2] - 1) * 100
-        final_strategy = (df['Cumulative_Strategy'].iloc[-2] - 1) * 100
-        
-        # 웹 화면 출력
-        st.subheader(f"📊 백테스트 결과: {corp_name} ({ticker})")
-        st.caption(f"테스트 기간: {start_year}년 ~ {end_year}년")
-        
-        col1, col2 = st.columns(2)
-        col1.metric("단순 보유(Buy & Hold) 수익률", f"{final_market:+.2f}%")
-        col2.metric("퀀트 전략(PBR<0.8) 수익률", f"{final_strategy:+.2f}%")
-        
-        st.divider()
-        st.markdown("**최근 10일 산출 데이터 샘플**")
-        st.dataframe(df[['Close', 'MarketCap', 'equity', 'net_income', 'PBR', 'PER', 'Signal']].tail(10))
 
-# 실행 버튼 (웹 UI 제어용)
-if st.button("현대차(005380) 백테스트 실행", type="primary"):
-    run_backtest_with_marketcap("005380", "현대차", 2020, 2023)
+    with st.spinner("컴퓨터가 최적의 PBR 타겟 숫자를 찾는 중입니다..."):
+        optimization_results = []
+        
+        # PBR 0.5부터 1.5까지 0.1 단위로 10번의 백테스트를 자동 반복
+        for target_pbr in np.arange(0.5, 1.6, 0.1):
+            df_test = df.copy()
+            df_test['Signal'] = np.where((df_test['PBR'] < target_pbr) & (df_test['PER'] > 0), 1, 0)
+            df_test['Strategy_Return'] = df_test['Signal'] * df_test['Daily_Return']
+            df_test['Cumulative_Strategy'] = (1 + df_test['Strategy_Return']).cumprod()
+            
+            final_strategy = (df_test['Cumulative_Strategy'].iloc[-2] - 1) * 100
+            market_beat = final_strategy - final_market
+            
+            optimization_results.append({
+                "PBR 진입 조건": f"PBR {target_pbr:.1f} 이하",
+                "누적 수익률": round(final_strategy, 2),
+                "시장 초과 수익": round(market_beat, 2)
+            })
+            
+        result_df = pd.DataFrame(optimization_results)
+        result_df = result_df.sort_values(by="누적 수익률", ascending=False).reset_index(drop=True)
+        
+        st.subheader(f"📊 최적화 결과 리포트: {corp_name} ({ticker})")
+        st.info(f"단순 보유(Buy & Hold) 시장 수익률: **{final_market:+.2f}%**")
+        
+        st.dataframe(
+            result_df.style.format({"누적 수익률": "{:+.2f}%", "시장 초과 수익": "{:+.2f}%"})\
+                           .background_gradient(subset=['누적 수익률'], cmap='RdYlGn'),
+            use_container_width=True
+        )
+        
+        best_pbr = result_df.iloc[0]['PBR 진입 조건']
+        st.success(f"💡 **AI 퀀트의 결론:** 과거 {start_year}~{end_year}년 데이터 분석 결과, {corp_name}은(는) **'{best_pbr}'** 일 때 매수하는 것이 가장 압도적인 수익을 냈습니다.")
+
+with st.form("backtest_form"):
+    st.write("백테스트할 종목과 기간을 선택하세요.")
+    c1, c2, c3 = st.columns(3)
+    t_ticker = c1.text_input("종목코드 (예: 005380)", value="005380")
+    t_name = c2.text_input("종목명 (예: 현대차)", value="현대차")
+    t_year = c3.slider("시작 연도 (최근 5년 권장)", 2018, 2023, 2020)
+    
+    if st.form_submit_button("최적의 매수 타점 찾기 (Run)", type="primary"):
+        run_parameter_optimization(t_ticker, t_name, t_year, 2023)
