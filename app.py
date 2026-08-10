@@ -25,7 +25,9 @@ import streamlit.components.v1 as components
 # =======================================================
 # 설정 및 모델
 # =======================================================
+MODEL_NAME = "gemini-3.6-flash"
 MODEL_NAME = "gemini-3.5-flash"
+LITE_MODEL_NAME = "gemini-3.5-flash-lite"
 LITE_MODEL_NAME = "gemini-3.1-flash-lite"
 FALLBACK_MODEL_NAME = "gemini-3-flash-preview"
 
