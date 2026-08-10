@@ -781,17 +781,20 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     cyclical_keywords = ['화학', '정유', '에너지', '석유', '가스', '철강', '제철', '금속', '조선', '기계', '건설', '해운', '해상', '반도체', '자동차', '디스플레이', '이노베이션', '배터리', '에코프로', '엘앤에프', '엔솔', 'SDI']
     is_cyclical = any(kw in name for kw in cyclical_keywords) or any(kw in industry_name for kw in cyclical_sectors)
     
-    # [NEW 2] 시클리컬 정상화 EPS 및 RIM 가치용 정상화 ROE 도입
+    # [NEW 2] 시클리컬 정상화 EPS 및 RIM 가치용 하이브리드 블렌딩 ROE 도입
     normalized_eps_applied = False
     median_eps = None
     normalization_skipped_warning = ""
+    blend_log_str = ""
 
-    # 기본 컨센서스 ROE (시클리컬 정규화 조건 통과 시 아래에서 덮어씌워짐)
+    # 기본 컨센서스 ROE (시클리컬 정규화 조건 통과 시 아래에서 하이브리드로 덮어씌워짐)
     if fund.get('forward_roe_e') is not None:
-        expected_roe = fund.get('forward_roe_e') / 100
+        forward_roe = fund.get('forward_roe_e') / 100
     else:
         roe_history = fund.get('roe_history', [])
-        expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
+        forward_roe = (roe_history[-1] / 100) if roe_history else 0.05
+        
+    expected_roe = forward_roe
 
     if is_cyclical:
         if len(annual_eps_history) >= 3:
@@ -800,9 +803,12 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             eps_val = median_eps
             normalized_eps_applied = True
             
-            # 장기 가치(tp_l, RIM) 계산에 쓰이는 expected_roe도 정규화 (서프라이즈 왜곡 방지)
+            # 장기 가치(tp_l, RIM) 계산에 쓰이는 expected_roe 하이브리드 블렌딩
+            # 과거 적자/흑자 평균(Backward) 50% + 최근 턴어라운드/컨센서스(Forward) 50%
             if bps_val is not None and bps_val > 0:
-                expected_roe = median_eps / bps_val
+                backward_roe = median_eps / bps_val
+                expected_roe = (0.5 * backward_roe) + (0.5 * forward_roe)
+                blend_log_str = f"(과거 중앙값 ROE {backward_roe*100:.1f}% + 선행 컨센서스 ROE {forward_roe*100:.1f}% ➡️ 최종 {expected_roe*100:.1f}%)"
         else:
             # 데이터 부족으로 정상화 로직이 스킵되었음을 사용자에게 명시적으로 알림
             normalization_skipped_warning = "⚠️ [시클리컬 정규화 실패] 과거 연간 EPS 데이터가 3년 미만이라 정상화(Normalization) 과정이 스킵되었습니다. 최근 실적의 사이클 정점/저점 편향이 목표가에 그대로 노출될 위험이 있습니다. "
@@ -955,7 +961,9 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         conservative_bps = bps_val * bps_discount
 
     elif regime == "CYCLICAL_BLEND_CANDIDATE":
-        target_pbr = max(0.4, min(expected_roe / required_return, 1.0))
+        # ⭐️ 하드 컷오프(0.4) 제거 및 시그모이드 소프트 렌딩 적용 (0.2 ~ 1.0 사이 연속 매핑)
+        # ROE가 5%면 PBR 0.6 수렴, 마이너스로 갈수록 0.4에서 멈추지 않고 0.2(청산가치)를 향해 부드럽게 하강
+        target_pbr = 0.2 + 0.8 / (1.0 + np.exp(-20.0 * (expected_roe - 0.05)))
         tp_nav = bps_val * target_pbr
 
         growth_pct_val = max(eps_growth * 100, 5.0) 
@@ -983,7 +991,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         # 라벨링(Text) 목적의 분기문만 남겨둠 (값 자체는 이미 연속적으로 블렌딩 완료됨)
         if weight_per < 0.05:
             regime = "CYCLICAL_NAV_ANCHOR"
-            fund_type = f"시클리컬 자산가치 앵커링 (적자/저수익 누적으로 PBR {target_pbr:.2f}배 수렴)"
+            fund_type = f"시클리컬 자산가치 앵커링 (적자/저수익 누적으로 PBR {target_pbr:.2f}배 소프트렌딩)"
             structural_warning = f"⚠️ [자산가치 폴백] 중앙값 수익률(ROE {current_roe*100:.1f}%)이 너무 낮아 수익가치(PER)가 무의미합니다. PBR 목표가({tp_nav:,.0f}원) 비중이 {weight_nav*100:.1f}%로 절대적이며, 자산 손상 리스크가 신뢰도 감점으로 반영됩니다. "
             fallback_penalty_flag = True
         elif weight_nav < 0.05:
@@ -1000,8 +1008,11 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
         tp_l = max(tp_l, bps_val * 0.2) # 마이너스 방어선
         
-        if normalized_eps_applied and weight_per >= 0.05:
-            structural_warning += "(단, 4년 데이터는 장기 사이클 전체를 담기엔 부족해 고점 편향 리스크가 일부 잔존할 수 있습니다.) "
+        if normalized_eps_applied:
+            if weight_per >= 0.05:
+                structural_warning += "(단, 4년 데이터는 장기 사이클 전체를 담기엔 부족해 고점 편향 리스크가 일부 잔존할 수 있습니다.) "
+            # [NEW 7] 하이브리드 ROE 안내 로직 추가
+            structural_warning += f"추가로 턴어라운드 시그널 유실 방지를 위해 장기가치(RIM/PBR) 산출 시 {blend_log_str} 하이브리드 ROE가 사용되었습니다. "
             
         if surge_warning_text:
             structural_warning += surge_warning_text
@@ -1827,7 +1838,29 @@ with tab5:
             price_info = price_map_watch.get(code, {})
             current, diff, diff_pct = price_info.get("current", 0.0), price_info.get("diff", 0.0), price_info.get("diff_pct", 0.0)
 
-            st.markdown(f"### {name} `{code}`")
+            # [NEW] AI 투자의견 및 한 줄 요약 배지 파싱
+            ai_opinion_badge = ""
+            ai_summary = ""
+            if report_text:
+                clean_rep = report_text.replace('*', '')
+                op_match = re.search(r'🎯 투자의견:\s*\[?([^\]\n]+)\]?', clean_rep)
+                if op_match:
+                    op_val = op_match.group(1).strip()
+                    if "매수" in op_val:
+                        ai_opinion_badge = f"<span style='color:#ff4b4b; font-weight:bold; background-color:rgba(255,75,75,0.1); padding:4px 10px; border-radius:6px; font-size:0.55em; vertical-align:middle; margin-left:10px;'>🎯 AI 투자의견: {op_val}</span>"
+                    elif any(kw in op_val for kw in ["손절", "축소", "매도"]):
+                        ai_opinion_badge = f"<span style='color:#1c83e1; font-weight:bold; background-color:rgba(28,131,225,0.1); padding:4px 10px; border-radius:6px; font-size:0.55em; vertical-align:middle; margin-left:10px;'>🎯 AI 투자의견: {op_val}</span>"
+                    else:
+                        ai_opinion_badge = f"<span style='color:#666; font-weight:bold; background-color:#eee; padding:4px 10px; border-radius:6px; font-size:0.55em; vertical-align:middle; margin-left:10px;'>🎯 AI 투자의견: {op_val}</span>"
+                
+                sum_match = re.search(r'한 줄 요약:\s*(.+)', clean_rep)
+                if sum_match:
+                    ai_summary = sum_match.group(1).strip()
+
+            st.markdown(f"### {name} `{code}` {ai_opinion_badge}", unsafe_allow_html=True)
+            if ai_summary:
+                st.caption(f"💡 **AI 퀀트 요약:** {ai_summary}")
+
             col_sel, col_info, col_price, col_btn, col_del = st.columns([0.5, 3.5, 3, 1.5, 1.5])
             
             with col_sel: st.checkbox("선택", key=f"chk_t5_{p_id}", label_visibility="collapsed")
@@ -2089,6 +2122,11 @@ with tab6:
 
                     if "고평가 국면" in (s_reasons or ""):
                         st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 상대/절대 가치 모두 '고평가 국면'에 위치해 있었습니다.")
+                    
+                    if tp_m > tp_l and tp_l > 0:
+                        st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 '중기 가치 > 장기 RIM 가치' 역전 플래그 상태였습니다.")
+                    if tp_s > tp_m and tp_m > 0:
+                        st.warning(f"⚠️ 시스템 로그 (저장 시점 기준): 해당 분석 스크랩 당시 '단기 가치 > 중기 가치' 역전 플래그 상태였습니다.")
                     
                     if current_p > 0 and tp_s > 0:
                         pct_s = (current_p / tp_s) * 100
