@@ -604,9 +604,21 @@ def get_technical_data(code):
         current_price = prices[-1]
         
         if len(returns) >= 20:
-            daily_volatility = returns.ewm(span=20, adjust=False).std().iloc[-1]
+            daily_vol_20 = returns.ewm(span=20, adjust=False).std().iloc[-1]
         else:
-            daily_volatility = 0.0
+            daily_vol_20 = 0.0
+
+        if len(returns) >= 60:
+            daily_vol_60 = returns.ewm(span=60, adjust=False).std().iloc[-1]
+        else:
+            daily_vol_60 = daily_vol_20
+
+        if len(returns) >= 250:
+            daily_vol_250 = returns.ewm(span=250, adjust=False).std().iloc[-1]
+        elif len(returns) > 0:
+            daily_vol_250 = returns.ewm(span=len(returns), adjust=False).std().iloc[-1]
+        else:
+            daily_vol_250 = daily_vol_60
         
         df_series = pd.Series(prices)
         macd = df_series.ewm(span=12, adjust=False).mean() - df_series.ewm(span=26, adjust=False).mean()
@@ -621,7 +633,7 @@ def get_technical_data(code):
                     beta = cov_matrix[0, 1] / cov_matrix[1, 1]
                     beta = max(0.5, min(beta, 2.5)) 
 
-        return {"current": current_price, "high_52": max(prices), "low_52": min(prices), "ma20": sum(prices[-20:])/20, "ma60": sum(prices[-60:])/60, "macd": macd.iloc[-1], "signal": signal.iloc[-1], "daily_volatility": daily_volatility, "beta": beta}
+        return {"current": current_price, "high_52": max(prices), "low_52": min(prices), "ma20": sum(prices[-20:])/20, "ma60": sum(prices[-60:])/60, "macd": macd.iloc[-1], "signal": signal.iloc[-1], "daily_vol_20": daily_vol_20, "daily_vol_60": daily_vol_60, "daily_vol_250": daily_vol_250, "beta": beta}
     except: return None
 
 @st.cache_data(ttl=600)
@@ -789,7 +801,9 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     lite_summary = call_gemini_lite_summary(f"[{name}] 관련 기업 공시 및 뉴스 정보 요약:\n{dart_info}\n{news_text}")
     
     current_price = tech['current'] if tech else 0.0
-    daily_vol = tech['daily_volatility'] if tech else 0.0
+    daily_vol_20 = tech['daily_vol_20'] if tech else 0.0
+    daily_vol_60 = tech['daily_vol_60'] if tech else 0.0
+    daily_vol_250 = tech['daily_vol_250'] if tech else 0.0
     beta = tech['beta'] if tech and 'beta' in tech else 1.0
     
     eps_val = fund.get('forward_eps_e') if fund.get('forward_eps_e') is not None else fund.get('eps')
@@ -865,21 +879,21 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         surge_warning_text = f"⚠️ [성장률 연속 감쇠] 영업이익 이례적 급증({op_growth*100:.0f}%) 국면. 구조적 개선과 피크아웃 리스크를 연속 곡선으로 절충하여, 반영 성장률을 {original_growth*100:.0f}%에서 {eps_growth*100:.1f}%로 부드럽게 감쇠(Damping)시켰습니다. "
 
     rf = get_risk_free_rate()
-    risk_premium = 0.02 if (beta > 1.2 or daily_vol > 0.035) else 0.0
+    risk_premium = 0.02 if (beta > 1.2 or daily_vol_20 > 0.035) else 0.0
     required_return = rf + (beta * 0.06) + risk_premium
 
-   # 3. 몬테카를로 시뮬레이션 확률 밴드 연산
+   # 3. 몬테카를로 시뮬레이션 확률 밴드 연산 (각 기간에 맞는 시계열 변동성 분리 매핑)
     expected_annual_return = max(-0.20, min(expected_roe, 0.40))
-    mc_res = run_monte_carlo_simulation(current_price, expected_annual_return, daily_vol, days=60, simulations=5000)
-    # [NEW] 단기 손절선(sl_s) 전용 20일 시뮬레이션 (기술적 밴드와 동일한 기간으로 맞춤)
-    mc_res_s = run_monte_carlo_simulation(current_price, expected_annual_return, daily_vol, days=20, simulations=5000)
+    mc_res = run_monte_carlo_simulation(current_price, expected_annual_return, daily_vol_60, days=60, simulations=5000)
+    # [NEW] 단기 손절선(sl_s) 전용 20일 시뮬레이션
+    mc_res_s = run_monte_carlo_simulation(current_price, expected_annual_return, daily_vol_20, days=20, simulations=5000)
 
-    # 4. 리스크 관리 손절 밴드
-    sl_s_base = current_price * (1 - min(user_k * daily_vol * np.sqrt(20), 0.15)) if daily_vol > 0 else current_price * 0.95
+    # 4. 리스크 관리 손절 밴드 (기간별 변동성 분리 적용)
+    sl_s_base = current_price * (1 - min(user_k * daily_vol_20 * np.sqrt(20), 0.15)) if daily_vol_20 > 0 else current_price * 0.95
     sl_s = min(sl_s_base, mc_res_s["P5"]) if mc_res_s["P5"] > 0 else sl_s_base
-    sl_m = current_price * (1 - min(user_k * daily_vol * np.sqrt(60), 0.30)) if daily_vol > 0 else current_price * 0.90
-    sl_l = current_price * (1 - min(user_k * daily_vol * np.sqrt(250), 0.50)) if daily_vol > 0 else current_price * 0.80
-    tp_s = current_price * min(1 + user_k * daily_vol * np.sqrt(20), 1.25) if daily_vol > 0 else current_price * 1.05
+    sl_m = current_price * (1 - min(user_k * daily_vol_60 * np.sqrt(60), 0.30)) if daily_vol_60 > 0 else current_price * 0.90
+    sl_l = current_price * (1 - min(user_k * daily_vol_250 * np.sqrt(250), 0.50)) if daily_vol_250 > 0 else current_price * 0.80
+    tp_s = current_price * min(1 + user_k * daily_vol_20 * np.sqrt(20), 1.25) if daily_vol_20 > 0 else current_price * 1.05
 
     # 5. 증권사 컨센서스 연산
     tp_trend = "유지/신규"
@@ -1192,7 +1206,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     bps_str = f"{bps_val:,}원" if bps_val is not None else "데이터 누락"
 
     tech_data_str = f"[{name} ({ticker})]\n"
-    if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | Beta {beta:.2f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(EWMA) {daily_vol*100:.2f}%\n"
+    if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | Beta {beta:.2f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 변동성(20/60/250일): {daily_vol_20*100:.1f}%/{daily_vol_60*100:.1f}%/{daily_vol_250*100:.1f}%\n"
     
     fund_str = f"- 업종명: {industry_name}\n"
     fund_str += f"- 재무 비율: PER {fund.get('per', '-')} (업종PER {fund.get('industry_per', '-')}) | PBR {fund.get('pbr', '-')} | EPS {eps_str} | BPS {bps_str}\n"
