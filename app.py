@@ -30,6 +30,11 @@ MODEL_NAME = "gemini-3.5-flash"
 LITE_MODEL_NAME = "gemini-3.5-flash-lite"
 LITE_MODEL_NAME = "gemini-3.1-flash-lite"
 FALLBACK_MODEL_NAME = "gemini-3-flash-preview"
+CONSENSUS_CAVEAT_RULE = (
+    "[컨센서스 신뢰도 명시 의무] 팩트 로그의 컨센서스 판정 문구에 '표본 부족'이라는 단어가 있다면, "
+    "이는 애널리스트 표본이 5건 미만이라는 뜻입니다. 이 경우 절대로 '확고한 컨센서스', '시장의 합의' 같은 "
+    "표현을 쓰지 말고, 반드시 '제한된 표본(N건) 기반 참고치'라는 식으로 한계를 명시하십시오."
+)
 
 db_backup_lock = threading.Lock()
 db_schema_lock = threading.Lock() 
@@ -862,13 +867,15 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     risk_premium = 0.02 if (beta > 1.2 or daily_vol > 0.035) else 0.0
     required_return = rf + (beta * 0.06) + risk_premium
 
-    # 3. 몬테카를로 시뮬레이션 확률 밴드 연산
+   # 3. 몬테카를로 시뮬레이션 확률 밴드 연산
     expected_annual_return = max(-0.20, min(expected_roe, 0.40))
     mc_res = run_monte_carlo_simulation(current_price, expected_annual_return, daily_vol, days=60, simulations=5000)
+    # [NEW] 단기 손절선(sl_s) 전용 20일 시뮬레이션 (기술적 밴드와 동일한 기간으로 맞춤)
+    mc_res_s = run_monte_carlo_simulation(current_price, expected_annual_return, daily_vol, days=20, simulations=5000)
 
     # 4. 리스크 관리 손절 밴드
     sl_s_base = current_price * (1 - min(user_k * daily_vol * np.sqrt(20), 0.15)) if daily_vol > 0 else current_price * 0.95
-    sl_s = min(sl_s_base, mc_res["P5"]) if mc_res["P5"] > 0 else sl_s_base
+    sl_s = min(sl_s_base, mc_res_s["P5"]) if mc_res_s["P5"] > 0 else sl_s_base
     sl_m = current_price * (1 - min(user_k * daily_vol * np.sqrt(60), 0.30)) if daily_vol > 0 else current_price * 0.90
     sl_l = current_price * (1 - min(user_k * daily_vol * np.sqrt(250), 0.50)) if daily_vol > 0 else current_price * 0.80
     tp_s = current_price * min(1 + user_k * daily_vol * np.sqrt(20), 1.25) if daily_vol > 0 else current_price * 1.05
@@ -965,7 +972,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         tp_nav = bps_val * target_pbr
 
         growth_pct_val = max(eps_growth * 100, 5.0) 
-        base_cap = max(8.0, float_ind_per * 0.8 if float_ind_per > 0 else 8.0)
+        base_cap = max(8.0, min(float_ind_per * 0.8, PER_CAP_CEILING) if float_ind_per > 0 else 8.0)
         independent_growth_cap = min(growth_pct_val * 1.2, 60.0) 
         dynamic_per_cap = max(base_cap, independent_growth_cap)
         
@@ -1465,6 +1472,7 @@ with tab2:
                 f"3. 핫픽 종목 작성 시 로그에 찍힌 **[현재가], [우리의 시스템 퀀트 중기 목표가(tp_m)], [몬테카를로 P50 적정가]**를 모두 명시하십시오.\n"
                 f"4. 강세/약세 논리 서술 시 차트 데이터와 밸류에이션 숫자를 인용하십시오.\n"
                 f"5. 브리핑 결과를 바탕으로 오늘의 종합 시장 심리 수치(0~100)를 산출하여 반드시 마지막에 [SENTIMENT_SCORE]: 50 형식으로 출력할 것.\n\n"
+                f"6. {CONSENSUS_CAVEAT_RULE}\n\n"
                 f"=== 리포트 출력 포맷 ===\n"
                 f"## 📰 1. 글로벌 매크로 국면 및 주도 섹터 심층 브리핑\n\n"
                 f"## 🎯 2. 당일 기관 퀀트-모멘텀 핫픽 (Top 2)\n"
@@ -1695,6 +1703,7 @@ with tab4:
                         f"3. 종목명을 포함한 결론을 맨 앞에 배치하는 구조(BLUF)를 준수하십시오.\n"
                         f"4. 파이썬 로그의 몬테카를로 확률 밴드 수치(P5, P50, P95) 및 3x3 시그널 인용 시 뜻풀이를 포함하여 설명하십시오.\n"
                         f"5. [자기 검증 - 치명적 리스크] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하십시오.\n\n"
+                        f"6. {CONSENSUS_CAVEAT_RULE}\n\n"
                         f"=== 리포트 작성 포맷 ===\n"
                         f"<ANALYSIS_종목티커>\n"
                         f"### 📌 [종목명] ([티커])\n"
@@ -1901,6 +1910,7 @@ with tab5:
                             f"3. 계좌 수익률과 주가의 위치를 참고하여 추가매수/유지/비중축소/손절 여부를 권고하십시오.\n"
                             f"4. 파이썬 로그에 찍힌 몬테카를로 확률 밴드(P5, P50, P95) 및 3x3 시그널 해설을 포함하여 직관적으로 이해할 수 있게 작성하십시오.\n"
                             f"5. [자기 검증 - 치명적 리스크] 스스로 도출한 결론이 틀릴 가능성 3가지를 서술하십시오.\n\n"
+                            f"6. {CONSENSUS_CAVEAT_RULE}\n\n"
                             f"=== 리포트 작성 포맷 ===\n"
                             f"**🎯 투자의견: [매수 / 유지 / 비중축소 / 손절]**\n"
                             f"- **현재가:** 000원\n"
