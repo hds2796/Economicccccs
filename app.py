@@ -421,9 +421,9 @@ def get_dart_filings(stock_code):
 @st.cache_data(ttl=600)
 def get_advanced_fundamental_data(code):
     data = {
-        "per": "-", "pbr": "-", "eps": None, "bps": None, "industry_per": "-", 
+        "per": "-", "pbr": "-", "eps": None, "bps": None, "industry_per": "-", "industry_name": "분류 안됨",
         "quarter_trend": "정보 없음", "supply_demand": "수급 정보 없음", 
-        "sales_history": [], "op_history": [], "eps_history": [], "roe_history": [],
+        "sales_history": [], "op_history": [], "eps_history": [], "roe_history": [], "annual_eps_history": [],
         "forward_eps_e": None, "forward_roe_e": None, "consensus_source": "Past Actual (A)"
     }
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -432,6 +432,17 @@ def get_advanced_fundamental_data(code):
         url = f"https://finance.naver.com/item/main.naver?code={code}"
         res = session.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, "html.parser")
+        
+        # [NEW] 네이버 업종명(섹터) 파싱
+        try:
+            trade_compare = soup.find("div", class_="trade_compare")
+            if trade_compare:
+                th_tags = trade_compare.find_all("th", scope="col")
+                if th_tags and len(th_tags) > 0:
+                    a_tag = th_tags[0].find("a")
+                    if a_tag:
+                        data["industry_name"] = a_tag.get_text().strip()
+        except: pass
         
         per_elem = soup.find(id="_per")
         if per_elem: data["per"] = per_elem.get_text().strip()
@@ -478,14 +489,18 @@ def get_advanced_fundamental_data(code):
                         
                         valid_nums = [float(v) for v in td_values if v and v.replace('.', '', 1).replace('-', '', 1).isdigit()]
                         
+                        annual_vals = valid_nums[:4] if len(valid_nums) >= 4 else valid_nums
+                        quarterly_vals = valid_nums[4:] if len(valid_nums) > 4 else valid_nums
+                        
                         if "매출액" == th_title or "매출액" in th_title:
-                            if valid_nums: data["sales_history"] = valid_nums[-3:]
+                            if quarterly_vals: data["sales_history"] = quarterly_vals[-3:]
                         elif "영업이익" == th_title or th_title.startswith("영업이익"):
-                            if valid_nums: data["op_history"] = valid_nums[-3:]
+                            if quarterly_vals: data["op_history"] = quarterly_vals[-3:]
                         elif "EPS" in th_title:
                             if valid_nums:
                                 if data["eps"] is None: data["eps"] = valid_nums[-1]
-                                data["eps_history"] = valid_nums[-3:]
+                                data["eps_history"] = quarterly_vals[-3:] if len(quarterly_vals) >= 3 else valid_nums[-3:]
+                                data["annual_eps_history"] = annual_vals
                             if data["forward_eps_e"] is None and forward_idx != -1 and len(td_values) > forward_idx:
                                 target_v = td_values[forward_idx]
                                 if target_v and target_v.replace('.', '', 1).replace('-', '', 1).isdigit():
@@ -755,14 +770,31 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     eps_val = fund.get('forward_eps_e') if fund.get('forward_eps_e') is not None else fund.get('eps')
     bps_val = fund.get('bps')
     
+    annual_eps_history = fund.get('annual_eps_history', [])
+    op_history = fund.get('op_history', [])
+    eps_history = fund.get('eps_history', [])
+    
+    # [NEW 1] 업종/섹터 명칭 파싱 데이터 활용한 시클리컬 자동 판별기
+    industry_name = fund.get('industry_name', '')
+    cyclical_keywords = ['화학', '정유', '에너지', '석유', '철강', '제철', '금속', '조선', '기계', '건설', '해운', '해상', '반도체', '자동차', '디스플레이', '이노베이션', '배터리', '에코프로', '엘앤에프', '엔솔', 'SDI']
+    is_cyclical = any(kw in name for kw in cyclical_keywords) or any(kw in industry_name for kw in cyclical_keywords)
+    
+    # [NEW 2] 시클리컬 정상화 EPS (Normalized EPS) 도입
+    normalized_eps_applied = False
+    median_eps = None
+    if is_cyclical and len(annual_eps_history) >= 3:
+        # 최근 최고점/최저점 등락을 스무딩하기 위해 과거 4년 데이터의 중앙값 산출
+        median_eps = float(np.median(annual_eps_history[:4])) 
+        # 중앙값이 음수여도 일단 할당 (이후 시그모이드 블렌딩에서 평가)
+        eps_val = median_eps
+        normalized_eps_applied = True
+
     if fund.get('forward_roe_e') is not None:
         expected_roe = fund.get('forward_roe_e') / 100
     else:
         roe_history = fund.get('roe_history', [])
         expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
         
-    eps_history = fund.get('eps_history', [])
-    
     try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
     except: float_ind_per = 0.0
 
@@ -771,6 +803,13 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     else: 
         fund['pbr'] = "-"
 
+    # [NEW 3] 실적 정점(Peak) 및 일회성(Turnaround) 감지
+    op_growth = 0.0
+    if len(op_history) >= 2 and op_history[-2] != 0:
+        op_growth = (op_history[-1] - op_history[-2]) / abs(op_history[-2])
+    elif len(op_history) >= 2 and op_history[-2] <= 0 and op_history[-1] > 0:
+        op_growth = 2.0 # 적자에서 흑자 전환은 200% 성장으로 간주
+
     eps_growth = 0.0
     if len(eps_history) >= 2 and eps_history[0] != 0:
         eps_growth = (eps_history[-1] - eps_history[0]) / abs(eps_history[0])
@@ -778,8 +817,24 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             eps_growth = min(eps_growth, 2.0) 
         else:
             eps_growth = min(max(eps_growth, -0.5), 2.0)
+            
+    # [NEW 4] 시그모이드 블렌딩을 통한 성장률 연속적 감쇠 (Cliff 및 Kink 원천 제거)
+    # op_growth가 커질수록 eps_growth를 squashed_growth (max 15%)로 부드럽게 C¹ 연속 수렴시킴
+    surge_warning_text = ""
+    original_growth = eps_growth
+    # Tanh 함수를 이용해 성장률의 한계치를 15% 언저리로 부드럽게 누름
+    squashed_eps_growth = 0.15 * np.tanh(eps_growth / 0.15) if eps_growth > 0 else eps_growth
+    
+    # op_growth가 1.0(100%)일 때 가중치 0.5, 그 전후로 매끄러운 S자 곡선
+    weight_surge = 1.0 / (1.0 + np.exp(-8 * (op_growth - 1.0)))
 
-    # 1. 기술적 리스크/손절 밴드 산출
+    # if문 분기 없이 단일 연속 함수로 완전히 수학적 융합 처리
+    eps_growth = (original_growth * (1.0 - weight_surge)) + (squashed_eps_growth * weight_surge)
+
+    if weight_surge > 0.2: # op_growth가 약 0.8 이상일 때부터 텍스트만 경고 출력
+        surge_warning_text = f"⚠️ [성장률 연속 감쇠] 영업이익 이례적 급증({op_growth*100:.0f}%) 국면. 구조적 개선과 피크아웃 리스크를 연속 곡선으로 절충하여, 반영 성장률을 {original_growth*100:.0f}%에서 {eps_growth*100:.1f}%로 부드럽게 감쇠(Damping)시켰습니다. "
+
+    # 1. 기술적 리스크/손절 밴드 산출 (순수 가격/변동성 기반, 펀더멘털 엔진과 완전 분리)
     sl_s = current_price * (1 - min(user_k * daily_vol * np.sqrt(20), 0.15)) if daily_vol > 0 else current_price * 0.95
     sl_m = current_price * (1 - min(user_k * daily_vol * np.sqrt(60), 0.30)) if daily_vol > 0 else current_price * 0.90
     sl_l = current_price * (1 - min(user_k * daily_vol * np.sqrt(250), 0.50)) if daily_vol > 0 else current_price * 0.80
@@ -845,6 +900,8 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         regime = "TECHNICAL_ONLY"
     elif is_holding or is_financial:
         regime = "NAV_ANCHOR"
+    elif is_cyclical and bps_val and bps_val > 0:
+        regime = "CYCLICAL_BLEND_CANDIDATE" # 4. 체제 연산부에서 PBR-PER 시그모이드 블렌딩 처리
     elif eps_val <= 0:
         regime = "DEFICIT_TECHNICAL"
     elif current_per > PER_METHOD_LIMIT:
@@ -856,8 +913,11 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     structural_warning = ""
     data_incomplete = False
     conservative_bps = bps_val if bps_val else 0.0
-    omega_val = 0.8 if regime == "NAV_ANCHOR" else 0.7 
+    omega_val = 0.8 if regime in ["NAV_ANCHOR", "CYCLICAL_NAV_ANCHOR", "CYCLICAL_BLEND_CANDIDATE"] else 0.7 
     tp_l = 0.0
+    
+    fallback_penalty_flag = False
+    fallback_blend_flag = False
 
     if bps_val is not None:
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
@@ -875,6 +935,57 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         fund_type = "적자 운영 기업 (기술적 밴드 대용)"
         bps_discount = 0.8 if len(eps_history) >= 2 and eps_history[-1] < 0 and eps_history[0] < 0 and eps_history[-1] < eps_history[0] else 1.0
         conservative_bps = bps_val * bps_discount
+
+    elif regime == "CYCLICAL_BLEND_CANDIDATE":
+        target_pbr = max(0.4, min(expected_roe / required_return, 1.0))
+        tp_nav = bps_val * target_pbr
+
+        growth_pct_val = max(eps_growth * 100, 5.0) 
+        base_cap = max(8.0, float_ind_per * 0.8 if float_ind_per > 0 else 8.0)
+        independent_growth_cap = min(growth_pct_val * 1.2, 60.0) 
+        dynamic_per_cap = max(base_cap, independent_growth_cap)
+        
+        if float_ind_per > 0:
+            eps_multiplier = (1 + np.log1p(eps_growth)) if eps_growth > 0 else (1 + eps_growth)
+            adjusted_ind_per = float_ind_per * eps_multiplier
+        else:
+            adjusted_ind_per = dynamic_per_cap
+
+        adjusted_ind_per = min(adjusted_ind_per, dynamic_per_cap)
+        tp_per = eps_val * adjusted_ind_per if eps_val > 0 else 0.0
+
+        # 시그모이드 블렌딩 (ROE 2.5% 기준 매끄러운 곡선)
+        current_roe = eps_val / bps_val
+        weight_per = 1.0 / (1.0 + np.exp(-150 * (current_roe - 0.025)))
+        weight_nav = 1.0 - weight_per
+
+        # ⭐️ 수학적으로 완전히 매끄러운(C-infinity) 단일 수식으로 무조건 연산 적용
+        tp_m = (tp_nav * weight_nav) + (tp_per * weight_per)
+
+        # 라벨링(Text) 목적의 분기문만 남겨둠 (값 자체는 이미 연속적으로 블렌딩 완료됨)
+        if weight_per < 0.05:
+            regime = "CYCLICAL_NAV_ANCHOR"
+            fund_type = f"시클리컬 자산가치 앵커링 (적자/저수익 누적으로 PBR {target_pbr:.2f}배 수렴)"
+            structural_warning = f"⚠️ [자산가치 폴백] 중앙값 수익률(ROE {current_roe*100:.1f}%)이 너무 낮아 수익가치(PER)가 무의미합니다. PBR 목표가({tp_nav:,.0f}원) 비중이 {weight_nav*100:.1f}%로 절대적이며, 자산 손상 리스크가 신뢰도 감점으로 반영됩니다. "
+            fallback_penalty_flag = True
+        elif weight_nav < 0.05:
+            regime = "STANDARD_PER"
+            fund_type = "정상화 EPS 상대 가치 (시클리컬 평균 가치 적용)"
+            structural_warning = f"⚠️ [시클리컬 밸류에이션] 경기민감업종 특성을 반영, 최근 4년 중앙값 EPS({eps_val:,.0f}원) 기반 PER 타겟({tp_per:,.0f}원) 비중이 {weight_per*100:.1f}%로 온전히 평가되었습니다. "
+        else:
+            regime = "CYCLICAL_BLEND"
+            fund_type = f"시클리컬 하이브리드 모델 (PBR {weight_nav*100:.0f}% + PER {weight_per*100:.0f}% 블렌딩)"
+            structural_warning = f"⚠️ [시클리컬 완충 연속구간] 수익률(ROE {current_roe*100:.1f}%)이 경계선 구간입니다. 절벽(Cliff) 왜곡을 막기 위해 PBR 목표가와 PER 목표가를 C¹ 연속 가중평균({tp_m:,.0f}원)했습니다. "
+            fallback_blend_flag = True
+            
+        conservative_bps = bps_val
+        tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
+        
+        if normalized_eps_applied and weight_per >= 0.05:
+            structural_warning += "(단, 4년 데이터는 장기 사이클 전체를 담기엔 부족해 고점 편향 리스크가 일부 잔존할 수 있습니다.) "
+            
+        if surge_warning_text:
+            structural_warning += surge_warning_text
 
     elif regime == "NAV_ANCHOR":
         if is_financial:
@@ -928,6 +1039,9 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         else:
             fund_type = "기본 상대 가치 (로그 스케일 업종 평균 수렴)"
             tp_m = eps_val * adjusted_ind_per
+            
+        if surge_warning_text:
+            structural_warning += surge_warning_text
 
     # 5. 3x3 교차검증 및 매트릭스 진단
     eps_e_trend = "유지"
@@ -953,7 +1067,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 
     if is_discovery_mode:
         if data_incomplete: pass 
-        elif regime in ["NAV_ANCHOR"]:
+        elif regime in ["NAV_ANCHOR", "CYCLICAL_NAV_ANCHOR"]:
             if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None
         elif regime == "DEFICIT_TECHNICAL":
             if current_price > 0 and conservative_bps < current_price: return None
@@ -982,6 +1096,10 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     confidence_reasons = []
     if tier == "Tier 3 (Fatal)": confidence_reasons.append("3x3 매트릭스 치명적 위험 침체 국면(Tier 3) 진입")
     elif tier == "Tier 2 (Warning)": confidence_reasons.append("3x3 매트릭스 밸류 트랩 및 심리 과매도 경고 국면(Tier 2) 진입")
+    
+    # [NEW 5] 블렌딩 체제로 인한 신뢰도 감점 자동 적용
+    if fallback_penalty_flag: confidence_reasons.append("자산가치 폴백 (장부단 손상차손/영업권 과대계상 리스크 반영)")
+    if fallback_blend_flag: confidence_reasons.append("자산가치 블렌딩 (수익성 저하에 따른 장부단 훼손 리스크 일부 반영)")
     
     if is_flag_l_inv: confidence_reasons.append("장기 가치 선행 역전 현상 감지 (중기 가치 > 장기 RIM 내재가치)")
     if is_flag_m_inv: confidence_reasons.append("중기 모멘텀 역전 현상 감지 (단기 밴드 상단 > 중기 적정가)")
@@ -1035,7 +1153,8 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     tech_data_str = f"[{name} ({ticker})]\n"
     if tech: tech_data_str += f"- 차트/리스크: 현재가 {tech['current']:,.0f} | Beta {beta:.2f} | 20일선 {tech['ma20']:,.0f} | 60일선 {tech['ma60']:,.0f} | MACD {tech['macd']:,.2f} | 20일 변동성(EWMA) {daily_vol*100:.2f}%\n"
     
-    fund_str = f"- 재무 비율: PER {fund.get('per', '-')} (업종PER {fund.get('industry_per', '-')}) | PBR {fund.get('pbr', '-')} | EPS {eps_str} | BPS {bps_str}\n"
+    fund_str = f"- 업종명: {industry_name}\n"
+    fund_str += f"- 재무 비율: PER {fund.get('per', '-')} (업종PER {fund.get('industry_per', '-')}) | PBR {fund.get('pbr', '-')} | EPS {eps_str} | BPS {bps_str}\n"
     fund_str += f"- 분기 실적 추세(단위: 억원, %): 매출액 {fund.get('sales_history', [])} | 영업이익 {fund.get('op_history', [])} | EPS {fund.get('eps_history', [])} | ROE {fund.get('roe_history', [])}\n"
     fund_str += f"- {fund.get('supply_demand', '수급 정보 없음')}\n"
     
@@ -1552,7 +1671,7 @@ with tab4:
                         f"- **현재가:** 000원\n"
                         f"- **단기 목표가(기술적 상단):** [00원]\n"
                         f"- **중기 적정가(성장 가치):** [00원]\n"
-                        f"- **시스템 손절가:** [투자 기간] 손절가 00원\n"
+                        f"- **시스템 손절가:** [{investment_horizon} 손절가 00원]\n"
                         f"- **💡 3x3 매트릭스 진단:** [Tier 등급 기입] (파이썬 로그를 참고하여 이 등급이 부여된 이유를 '목표가 XX + 실적 XX' 형태로 1줄 설명)\n"
                         f"- **한 줄 요약:** (가장 핵심이 되는 투자 논리 1줄)\n\n"
                         f"---\n"
