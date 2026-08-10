@@ -776,25 +776,37 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     
     # [NEW 1] 업종/섹터 명칭 파싱 데이터 활용한 시클리컬 자동 판별기
     industry_name = fund.get('industry_name', '')
-    cyclical_keywords = ['화학', '정유', '에너지', '석유', '철강', '제철', '금속', '조선', '기계', '건설', '해운', '해상', '반도체', '자동차', '디스플레이', '이노베이션', '배터리', '에코프로', '엘앤에프', '엔솔', 'SDI']
-    is_cyclical = any(kw in name for kw in cyclical_keywords) or any(kw in industry_name for kw in cyclical_keywords)
+    # 네이버 금융(WICS) 표준 섹터명 반영 및 하드코딩 탈피 ('정유', '석유', '가스' 등 모두 포괄)
+    cyclical_sectors = ['석유와가스', '정유', '석유', '에너지', '화학', '에너지장비', '철강', '비철금속', '조선', '기계', '건설', '해운', '반도체', '자동차', '디스플레이', '전기제품', '전자장비']
+    cyclical_keywords = ['화학', '정유', '에너지', '석유', '가스', '철강', '제철', '금속', '조선', '기계', '건설', '해운', '해상', '반도체', '자동차', '디스플레이', '이노베이션', '배터리', '에코프로', '엘앤에프', '엔솔', 'SDI']
+    is_cyclical = any(kw in name for kw in cyclical_keywords) or any(kw in industry_name for kw in cyclical_sectors)
     
-    # [NEW 2] 시클리컬 정상화 EPS (Normalized EPS) 도입
+    # [NEW 2] 시클리컬 정상화 EPS 및 RIM 가치용 정상화 ROE 도입
     normalized_eps_applied = False
     median_eps = None
-    if is_cyclical and len(annual_eps_history) >= 3:
-        # 최근 최고점/최저점 등락을 스무딩하기 위해 과거 4년 데이터의 중앙값 산출
-        median_eps = float(np.median(annual_eps_history[:4])) 
-        # 중앙값이 음수여도 일단 할당 (이후 시그모이드 블렌딩에서 평가)
-        eps_val = median_eps
-        normalized_eps_applied = True
+    normalization_skipped_warning = ""
 
+    # 기본 컨센서스 ROE (시클리컬 정규화 조건 통과 시 아래에서 덮어씌워짐)
     if fund.get('forward_roe_e') is not None:
         expected_roe = fund.get('forward_roe_e') / 100
     else:
         roe_history = fund.get('roe_history', [])
         expected_roe = (roe_history[-1] / 100) if roe_history else 0.05
-        
+
+    if is_cyclical:
+        if len(annual_eps_history) >= 3:
+            # 최근 최고점/최저점 등락을 스무딩하기 위해 과거 4년 데이터의 중앙값 산출
+            median_eps = float(np.median(annual_eps_history[:4])) 
+            eps_val = median_eps
+            normalized_eps_applied = True
+            
+            # 장기 가치(tp_l, RIM) 계산에 쓰이는 expected_roe도 정규화 (서프라이즈 왜곡 방지)
+            if bps_val is not None and bps_val > 0:
+                expected_roe = median_eps / bps_val
+        else:
+            # 데이터 부족으로 정상화 로직이 스킵되었음을 사용자에게 명시적으로 알림
+            normalization_skipped_warning = "⚠️ [시클리컬 정규화 실패] 과거 연간 EPS 데이터가 3년 미만이라 정상화(Normalization) 과정이 스킵되었습니다. 최근 실적의 사이클 정점/저점 편향이 목표가에 그대로 노출될 위험이 있습니다. "
+            
     try: float_ind_per = float(fund['industry_per'].replace(',', '')) if fund['industry_per'] != '-' else 0.0
     except: float_ind_per = 0.0
 
@@ -819,7 +831,6 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             eps_growth = min(max(eps_growth, -0.5), 2.0)
             
     # [NEW 4] 시그모이드 블렌딩을 통한 성장률 연속적 감쇠 (Cliff 및 Kink 원천 제거)
-    # op_growth가 커질수록 eps_growth를 squashed_growth (max 15%)로 부드럽게 C¹ 연속 수렴시킴
     surge_warning_text = ""
     original_growth = eps_growth
     # Tanh 함수를 이용해 성장률의 한계치를 15% 언저리로 부드럽게 누름
@@ -849,6 +860,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     broker_log_str = ""
     avg_curr = 0
     matched_report = None
+    consensus_label = "컨센서스 부재"
     
     if analyst_data:
         reps_for_ticker = sorted([rep for rep in analyst_data.values() if rep.get("ticker") == ticker], key=lambda x: x.get('date', ''), reverse=True)
@@ -857,7 +869,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         if reps_for_ticker:
             valid_curr_tps = []
             valid_prev_tps = []
-            broker_log_str = "▶ [증권사 전체 컨센서스 및 목표가 변동 요약]\n"
+            broker_log_str = "▶ [증권사 목표가 변동 요약 (최근 캐시 기반)]\n"
             for r in reps_for_ticker:
                 b_name = r.get('broker', '알수없음')
                 b_date = r.get('date', '')
@@ -880,12 +892,16 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
                 broker_log_str += f"   - {b_name} ({b_date}): {p_tp:,.0f}원 ➡️ {c_tp:,.0f}원 ({trend_dir}) | 의견: {op_str}\n"
 
             if valid_curr_tps:
-                avg_curr = sum(valid_curr_tps) / len(valid_curr_tps)
+                sample_size = len(valid_curr_tps)
+                avg_curr = sum(valid_curr_tps) / sample_size
                 avg_prev = sum(valid_prev_tps) / len(valid_prev_tps)
                 if avg_curr > avg_prev * 1.005: tp_trend = "상향"
                 elif avg_curr < avg_prev * 0.995: tp_trend = "하향"
                 else: tp_trend = "유지"
-                broker_log_str += f"   => 📊 [종합 컨센서스 판정] 이전 평균 {avg_prev:,.0f}원 ➡️ 현재 평균 {avg_curr:,.0f}원 ({tp_trend})\n"
+                
+                # [NEW 5] 표본 편향 방지 라벨링
+                consensus_label = "종합 컨센서스" if sample_size >= 5 else f"최근 갱신 리포트 평균(표본 {sample_size}건 부족)"
+                broker_log_str += f"   => 📊 [{consensus_label} 판정] 이전 평균 {avg_prev:,.0f}원 ➡️ 현재 평균 {avg_curr:,.0f}원 ({tp_trend})\n"
 
     # 3. 밸류에이션 체제(Regime) 명시적 분류
     normal_holdings, financial_holdings = fetch_holding_ticker_list_from_db()
@@ -921,6 +937,8 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 
     if bps_val is not None:
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
+        # [NEW 6] 적자 누적 시클리컬 등의 음수/과소 RIM 가치 방어 (청산가치 20% 하한선)
+        tp_l = max(tp_l, bps_val * 0.2)
 
     if regime == "TECHNICAL_ONLY":
         tp_m = current_price * min(1 + user_k * daily_vol * np.sqrt(60), 1.40) if daily_vol > 0 else current_price * 1.10
@@ -980,6 +998,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             
         conservative_bps = bps_val
         tp_l = bps_val + (bps_val * (expected_roe - required_return) / (1 + required_return - omega_val))
+        tp_l = max(tp_l, bps_val * 0.2) # 마이너스 방어선
         
         if normalized_eps_applied and weight_per >= 0.05:
             structural_warning += "(단, 4년 데이터는 장기 사이클 전체를 담기엔 부족해 고점 편향 리스크가 일부 잔존할 수 있습니다.) "
@@ -1001,6 +1020,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             structural_warning = f"⚠️ [지주사 디스카운트] 타겟 PBR 0.5 수준({tp_m:,.0f}원) 앵커링."
             conservative_bps = effective_bps
             tp_l = effective_bps + (effective_bps * (expected_roe - required_return) / (1 + required_return - omega_val))
+            tp_l = max(tp_l, effective_bps * 0.2) # 마이너스 방어선
 
     elif regime == "CONSENSUS_ANCHOR":
         if avg_curr > 0:
@@ -1043,6 +1063,10 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
         if surge_warning_text:
             structural_warning += surge_warning_text
 
+    # 데이터 부족으로 정상화가 누락된 경우, 어느 체제를 타든 경고 메시지 강제 추가
+    if normalization_skipped_warning:
+        structural_warning += normalization_skipped_warning
+
     # 5. 3x3 교차검증 및 매트릭스 진단
     eps_e_trend = "유지"
     if len(eps_history) >= 2:
@@ -1067,7 +1091,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
 
     if is_discovery_mode:
         if data_incomplete: pass 
-        elif regime in ["NAV_ANCHOR", "CYCLICAL_NAV_ANCHOR"]:
+        elif regime in ["NAV_ANCHOR", "CYCLICAL_NAV_ANCHOR", "CYCLICAL_BLEND_CANDIDATE"]:
             if current_price > 0 and (tp_m <= current_price or tp_l <= current_price): return None
         elif regime == "DEFICIT_TECHNICAL":
             if current_price > 0 and conservative_bps < current_price: return None
@@ -1124,7 +1148,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
     consensus_log = ""
     if avg_curr > 0 and tp_m > 0 and regime != "CONSENSUS_ANCHOR":
         divergence = (tp_m - avg_curr) / avg_curr
-        consensus_log = f"   - ⚖️ 종합 컨센서스 교차검증: 시장 평균 목표가 {avg_curr:,.0f}원(추세: {tp_trend}) vs 퀀트 중기 적정가 {tp_m:,.0f}원 (괴리율: {divergence*100:+.1f}%) ➡️ 판정 (페널티 계수: {penalty}%)\n"
+        consensus_log = f"   - ⚖️ {consensus_label} 교차검증: 시장 평균 목표가 {avg_curr:,.0f}원(추세: {tp_trend}) vs 퀀트 중기 적정가 {tp_m:,.0f}원 (괴리율: {divergence*100:+.1f}%) ➡️ 판정 (페널티 계수: {penalty}%)\n"
 
     calc_result_log = (
         f"▶ 리스크 팩트 (k={user_k:.1f}): 단기손절 {sl_s:,.0f}원 | 중기손절 {sl_m:,.0f}원 | 장기손절 {sl_l:,.0f}원\n"
