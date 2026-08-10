@@ -30,6 +30,7 @@ MODEL_NAME = "gemini-3.5-flash"
 LITE_MODEL_NAME = "gemini-3.5-flash-lite"
 LITE_MODEL_NAME = "gemini-3.1-flash-lite"
 FALLBACK_MODEL_NAME = "gemini-3-flash-preview"
+PER_CAP_CEILING = 60.0  # 누락된 상수 추가
 CONSENSUS_CAVEAT_RULE = (
     "[컨센서스 신뢰도 명시 의무] 팩트 로그의 컨센서스 판정 문구에 '표본 부족'이라는 단어가 있다면, "
     "이는 애널리스트 표본이 5건 미만이라는 뜻입니다. 이 경우 절대로 '확고한 컨센서스', '시장의 합의' 같은 "
