@@ -25,20 +25,18 @@ def get_dynamic_sectors():
     df_krx = fdr.StockListing('KRX')
     df_desc = fdr.StockListing('KRX-DESC')
     
-    # 1. 인덱스가 종목코드 성격일 경우에만 컬럼으로 추출 (무조건 reset_index 시 'index' 중복 생성 방지)
     if df_krx.index.name in ['Code', 'Symbol', '종목코드']:
         df_krx = df_krx.reset_index()
     if df_desc.index.name in ['Code', 'Symbol', '종목코드']:
         df_desc = df_desc.reset_index()
         
-    # 2. 중복 이름 생성을 방지하는 안전한 컬럼명 표준화 함수
     def standardize_df(df, target_mappings):
         for target_col, alt_names in target_mappings.items():
             if target_col not in df.columns:
                 for alt in alt_names:
                     if alt in df.columns:
                         df = df.rename(columns={alt: target_col})
-                        break # 첫 번째 일치 항목만 변경 후 종료하여 중복 방지
+                        break 
         return df
         
     df_krx = standardize_df(df_krx, {
@@ -52,16 +50,13 @@ def get_dynamic_sectors():
         'Sector': ['업종', '업종명', 'Industry', 'sector']
     })
     
-    # 3. 만약의 경우를 대비한 중복 컬럼 물리적 제거
     df_krx = df_krx.loc[:, ~df_krx.columns.duplicated()]
     df_desc = df_desc.loc[:, ~df_desc.columns.duplicated()]
     
-    # 4. 필수 컬럼 존재 여부 최종 검증
     if 'Code' not in df_krx.columns or 'Code' not in df_desc.columns or 'Sector' not in df_desc.columns:
-        st.error("오류: KRX 서버의 데이터 제공 구조가 완전히 파괴되었습니다. FinanceDataReader 라이브러리 업데이트가 필요합니다.")
+        st.error("오류: KRX 서버의 데이터 제공 구조가 파괴되었습니다.")
         st.stop()
         
-    # 5. 타입 강제 통일 후 병합
     df_krx['Code'] = df_krx['Code'].astype(str)
     df_desc['Code'] = df_desc['Code'].astype(str)
     
@@ -69,34 +64,20 @@ def get_dynamic_sectors():
     df = df.dropna(subset=['Sector'])
     df = df[df['Sector'] != '']
     
-    # --- 섹터 그룹화 (Macro Sector) 로직 추가 ---
-    MACRO_SECTORS = {
-        "💻 IT/반도체": ["반도체", "소프트웨어", "컴퓨터", "통신", "전자", "프로그래밍", "정보"],
-        "🚗 자동차/운송": ["자동차", "운송", "항공", "해운", "물류"],
-        "💊 제약/바이오": ["의약품", "의료", "생물", "보건"],
-        "🏦 금융/지주": ["은행", "증권", "보험", "금융", "신탁", "지주", "투자"],
-        "⚡ 2차전지/화학": ["화학", "석유", "전지", "플라스틱", "에너지", "고무"],
-        "🏗️ 철강/건설/기계": ["철강", "금속", "건설", "토목", "기계", "장비"],
-        "🛒 소비재/유통/엔터": ["도매", "소매", "음식료", "식품", "섬유", "의복", "화장품", "엔터", "방송", "게임", "영화", "서비스"]
-    }
-
-    def map_sector(s):
-        s_str = str(s)
-        for macro, keywords in MACRO_SECTORS.items():
-            if any(kw in s_str for kw in keywords):
-                return macro
-        return "기타"
-
-    df['Macro_Sector'] = df['Sector'].apply(map_sector)
-    df = df[df['Macro_Sector'] != "기타"] # 분류하기 모호한 파편화된 업종 제외
+    # 💡 인위적인 매크로 섹터 로직 삭제. 
+    # 대신 종목 수가 많은 업종부터 정렬하여 객관적인 데이터 가독성 확보.
+    sector_counts = df['Sector'].value_counts()
+    df['Sector_Count'] = df['Sector'].map(sector_counts)
     
-    # 6. 정렬 및 반환 (매크로 섹터 기준)
-    df = df.sort_values(by=['Macro_Sector', 'Marcap'], ascending=[True, False])
-    return df, sorted(df['Macro_Sector'].unique().tolist())
+    df = df.sort_values(by=['Sector_Count', 'Sector', 'Marcap'], ascending=[False, True, False])
+    
+    unique_sectors = df[['Sector', 'Sector_Count']].drop_duplicates()
+    sector_list = [f"{row['Sector']} ({row['Sector_Count']}종목)" for _, row in unique_sectors.iterrows()]
+    
+    return df, sector_list
 
 @st.cache_data(ttl=3600)
 def get_historical_financials(corp_code, start_year, end_year):
-    """DART에서 과거 자본총계 및 당기순이익 추출 (계정과목 정규식 및 미래참조 차단 적용)"""
     fs_data = []
     for year in range(start_year, end_year + 1):
         try:
@@ -121,14 +102,13 @@ def get_historical_financials(corp_code, start_year, end_year):
         except Exception:
             pass
             
-    df_fs = pd.DataFrame(fs_data)
-    if not df_fs.empty:
-        df_fs['report_date'] = pd.to_datetime(df_fs['report_date'])
-        df_fs.set_index('report_date', inplace=True)
+        df_fs = pd.DataFrame(fs_data)
+        if not df_fs.empty:
+            df_fs['report_date'] = pd.to_datetime(df_fs['report_date'])
+            df_fs.set_index('report_date', inplace=True)
     return df_fs
 
 def process_single_stock_data(ticker, start_year, end_year):
-    """FinanceDataReader와 DART 데이터를 병합하여 백테스트용 시계열 생성"""
     df_fs = get_historical_financials(ticker, start_year, end_year)
     if df_fs.empty: return None
     
@@ -169,12 +149,15 @@ def process_single_stock_data(ticker, start_year, end_year):
 st.sidebar.header("⚙️ 백테스트 조건 설정")
 
 df_sectors, sector_list = get_dynamic_sectors()
-selected_sector = st.sidebar.selectbox("분석 대상 대분류 섹터", sector_list)
+selected_sector_str = st.sidebar.selectbox("분석 대상 섹터 (KRX 원본 분류)", sector_list)
+
+# 💡 선택된 문자열에서 원본 섹터명만 분리 (예: '기타 금융업 (42종목)' -> '기타 금융업')
+selected_sector = selected_sector_str.rsplit(" (", 1)[0]
 
 sampling_method = st.sidebar.radio("종목 추출 방식", ["대형주 집중 (시총 상위순)", "분산 추출 (시총 상/중/하위 균등)"], help="섹터 전반의 왜곡 없는 파라미터를 얻으려면 '분산 추출'을 권장합니다.")
 top_n = st.sidebar.slider("분석할 종목 수", 3, 50, 15, help="종목 수가 많을수록 결과가 정확해지지만 DART 통신으로 인해 분석 시간이 증가합니다.")
 
-sector_stocks_all = df_sectors[df_sectors['Macro_Sector'] == selected_sector]
+sector_stocks_all = df_sectors[df_sectors['Sector'] == selected_sector]
 
 if sampling_method == "대형주 집중 (시총 상위순)":
     sector_stocks = sector_stocks_all.head(top_n)
