@@ -25,6 +25,15 @@ def get_dynamic_sectors():
     df_krx = fdr.StockListing('KRX')
     df_desc = fdr.StockListing('KRX-DESC')
     
+    # 외부 데이터 소스(KRX)의 컬럼명 변경 대응 (한글화 또는 명칭 변경 시 영문으로 정규화)
+    df_krx = df_krx.rename(columns={'종목코드': 'Code', '종목명': 'Name', '시가총액': 'Marcap'})
+    df_desc = df_desc.rename(columns={'종목코드': 'Symbol', '업종': 'Sector', '업종명': 'Sector', 'Industry': 'Sector'})
+    
+    # 필수 컬럼 방어 로직
+    if 'Sector' not in df_desc.columns:
+        st.error("오류: KRX 데이터 구조가 변경되어 섹터 정보를 식별할 수 없습니다.")
+        st.stop()
+        
     # 종목코드 기준으로 시가총액과 섹터 데이터 병합
     df = pd.merge(df_krx[['Code', 'Name', 'Marcap']], df_desc[['Symbol', 'Sector']], left_on='Code', right_on='Symbol', how='inner')
     df = df.dropna(subset=['Sector'])
