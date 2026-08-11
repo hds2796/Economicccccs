@@ -1,3 +1,23 @@
+import sys
+from types import ModuleType
+
+if 'pkg_resources' not in sys.modules:
+    mock_pkg = ModuleType('pkg_resources')
+    class MockDistribution:
+        version = "1.0.47"
+    def get_distribution(name):
+        return MockDistribution()
+    mock_pkg.get_distribution = get_distribution
+    sys.modules['pkg_resources'] = mock_pkg
+# -------------------------------------------------------------
+
+import streamlit as st
+import OpenDartReader
+from pykrx import stock
+import pandas as pd
+import numpy as np
+import time
+import sqlite3
 import streamlit as st
 import OpenDartReader
 from pykrx import stock
