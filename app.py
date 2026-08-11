@@ -1552,6 +1552,13 @@ with tab2:
                             c_tp.markdown(f"**목표가 밴드**<br>단: {tp_s:,.0f}<br>중: {tp_m:,.0f}", unsafe_allow_html=True)
                             c_bp.markdown(f"**손절가 라인**<br>단: <span style='color:red;'>{sl_s:,.0f}</span><br>중: <span style='color:red;'>{sl_m:,.0f}</span>", unsafe_allow_html=True)
 
+                            q_str = tick_data.get('quadrant_str', '정상')
+                            if "고평가" in q_str:
+                                analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw_report, re.DOTALL)
+                                stock_analysis_text = analysis_match.group(1) if analysis_match else display_text
+                                if re.search(r'매수|비중\s*확대|추가\s*매수', stock_analysis_text):
+                                    st.error("🚨 시스템 경고: 서술문이 '매수/비중확대' 톤인데, 실제 4분면 진단은 '고평가 국면'입니다.")
+
                             if st.button("📥 스크랩북 저장", key=f"morning_s_{tick}", use_container_width=True):
                                 analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw_report, re.DOTALL)
                                 specific_analysis = analysis_match.group(1).strip() if analysis_match else display_text
@@ -1795,6 +1802,13 @@ with tab4:
                             elif "가치 함정" in q_str:
                                 st.warning(f"⚠️ **시스템 진단 경고**\n절대가치는 높으나 상대가치는 고평가된 가치 함정(Value Trap) 의심 국면입니다.")
 
+                            is_short_term_view = "단기" in investment_horizon
+                            if not is_short_term_view and "고평가" in q_str:
+                                analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw, re.DOTALL)
+                                stock_analysis_text = analysis_match.group(1) if analysis_match else display_text
+                                if re.search(r'매수|비중\s*확대|추가\s*매수', stock_analysis_text):
+                                    st.error("🚨 시스템 경고: 서술문이 '매수/비중확대' 톤인데, 실제 4분면 진단은 '고평가 국면'입니다.")
+
                             if st.button("📥 스크랩북 저장", key=f"rec_s_{tick}", use_container_width=True):
                                 analysis_match = re.search(f"<ANALYSIS_{tick}>(.*?)</ANALYSIS_{tick}>", raw, re.DOTALL)
                                 specific_analysis = analysis_match.group(1).strip() if analysis_match else display_text
@@ -1999,11 +2013,14 @@ with tab5:
                     if p_sys_conf is not None and p_sys_conf > 0:
                         st.info(f"**🧮 파이썬 산출 시스템 신뢰도: {p_sys_conf}%**\n\n*(감점 사유: {p_reasons if p_reasons else '없음'})*")
 
-                    # 원복: 상세 UI 경고 문구
                     if "고평가 국면" in (p_reasons or ""):
                         st.warning(f"⚠️ 시스템 경고: 해당 종목은 4분면 진단 상 상대가치 및 절대가치를 모두 초과한 '고평가 국면'입니다.")
                     elif "가치 함정" in (p_reasons or ""):
                         st.warning(f"⚠️ 시스템 경고: 절대가치(BPS+ROE)는 저평가이나 상대가치(PER)가 고평가된 '가치 함정' 의심 국면입니다.")
+
+                    is_short_term_view = "단기" in eval_horizon
+                    if not is_short_term_view and "고평가" in (p_reasons or "") and re.search(r'매수|비중\s*확대|추가\s*매수', report_text):
+                        st.error("🚨 시스템 경고: 아래 서술문이 '매수/비중확대' 톤인데, 중장기 진단 관점에서 실제 4분면 진단은 '고평가 국면'입니다. 서술보다 숫자를 우선하세요.")
                         
                     st.write(report_text)
                     st.divider()
