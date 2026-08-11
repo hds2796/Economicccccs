@@ -1,50 +1,16 @@
-# -------------------------------------------------------------
-# 🔥 Python 3.14 호환성을 위한 pykrx pkg_resources 모듈 에러 우회 패치 (V2)
-import sys
-import os
-import importlib.util
-from types import ModuleType
-
-if 'pkg_resources' not in sys.modules:
-    mock_pkg = ModuleType('pkg_resources')
-    
-    class MockDistribution:
-        version = "1.0.47"
-        
-    def get_distribution(name):
-        return MockDistribution()
-        
-    def resource_filename(package_or_requirement, resource_name):
-        # pykrx가 내부 달력 파일(csv)을 찾을 때 실제 설치된 경로를 계산해서 던져줌
-        spec = importlib.util.find_spec(package_or_requirement)
-        if spec and spec.origin:
-            return os.path.join(os.path.dirname(spec.origin), resource_name)
-        return resource_name
-        
-    mock_pkg.get_distribution = get_distribution
-    mock_pkg.resource_filename = resource_filename
-    sys.modules['pkg_resources'] = mock_pkg
-# -------------------------------------------------------------
-
 import streamlit as st
 import OpenDartReader
-from pykrx import stock
+import FinanceDataReader as fdr
 import pandas as pd
 import numpy as np
 import time
 import sqlite3
 
-# ... (이하 기존 백테스트 코드 유지)
-import streamlit as st
-import OpenDartReader
-from pykrx import stock
-import pandas as pd
-import numpy as np
-import time
+st.set_page_config(page_title="퀀트 백테스트 연구소", page_icon="🧪", layout="wide")
+st.title("🧪 섹터별 퀀트 파라미터 자동 최적화")
+st.caption("안정적인 FinanceDataReader와 DART 데이터를 결합하여 최적의 PBR 타점을 찾고 DB에 연동합니다.")
 
-st.title("🧪 퀀트 파라미터 자동 최적화 연구소 (Grid Search)")
-st.caption("PBR 임계값을 0.5부터 1.5까지 자동으로 테스트하여 최적의 승률 구간을 발굴합니다.")
-
+# DART API KEY 설정
 try:
     DART_API_KEY = st.secrets["DART_API_KEY"]
 except KeyError:
@@ -53,8 +19,17 @@ except KeyError:
 
 dart = OpenDartReader(DART_API_KEY)
 
+# 테스트 대상 섹터 정의
+SECTOR_PRESETS = {
+    "🚗 자동차/부품": [{"ticker": "005380", "name": "현대차"}, {"ticker": "000270", "name": "기아"}],
+    "💻 반도체": [{"ticker": "005930", "name": "삼성전자"}, {"ticker": "000660", "name": "SK하이닉스"}],
+    "🏦 금융지주": [{"ticker": "105560", "name": "KB금융"}, {"ticker": "055550", "name": "신한지주"}],
+    "🔋 2차전지": [{"ticker": "373220", "name": "LG에너지솔루션"}, {"ticker": "005490", "name": "POSCO홀딩스"}]
+}
+
 @st.cache_data(ttl=3600)
 def get_historical_financials(corp_code, start_year, end_year):
+    """DART에서 과거 자본총계 및 당기순이익 추출"""
     fs_data = []
     for year in range(start_year, end_year + 1):
         try:
@@ -71,12 +46,9 @@ def get_historical_financials(corp_code, start_year, end_year):
                 equity = float(equity_row.iloc[0]['thstrm_amount'].replace(',', ''))
                 net_income = float(net_income_row.iloc[0]['thstrm_amount'].replace(',', ''))
                 
-                fs_data.append({
-                    'report_date': f"{year+1}-03-31", 
-                    'equity': equity,
-                    'net_income': net_income
-                })
-            time.sleep(0.5) 
+                # 공시 반영 시점(이듬해 3월 말) 기준으로 데이터 매핑
+                fs_data.append({'report_date': f"{year+1}-03-31", 'equity': equity, 'net_income': net_income})
+            time.sleep(0.4) 
         except Exception:
             pass
             
@@ -86,76 +58,129 @@ def get_historical_financials(corp_code, start_year, end_year):
         df_fs.set_index('report_date', inplace=True)
     return df_fs
 
-def run_parameter_optimization(ticker, corp_name, start_year, end_year):
-    with st.spinner(f"[{corp_name}] 재무 및 시가총액 데이터 병합 중..."):
-        df_fs = get_historical_financials(corp_name, start_year, end_year)
-        if df_fs.empty:
-            st.error("재무 데이터를 불러오지 못했습니다.")
-            return
+def process_single_stock_data(ticker, start_year, end_year):
+    """FinanceDataReader와 DART 데이터를 병합하여 백테스트용 시계열 생성"""
+    df_fs = get_historical_financials(ticker, start_year, end_year)
+    if df_fs.empty: return None
+    
+    # FDR 주가 데이터 호출 (수정주가 자동 반영됨)
+    start_date = f"{start_year}-01-01"
+    end_date = f"{end_year+1}-12-31"
+    try:
+        df_price = fdr.DataReader(ticker, start_date, end_date)
+    except Exception:
+        return None
+        
+    if df_price.empty: return None
+
+    # KRX 상장주식수 조회하여 시가총액 계산 (과거 액면분할 등에 대한 완벽한 추적은 어려우나 PBR 계산을 위한 프록시로 사용)
+    try:
+        krx_list = fdr.StockListing('KRX')
+        shares = krx_list.loc[krx_list['Code'] == ticker, 'Stocks'].values[0]
+    except Exception:
+        shares = 100000000 # 방어 코드
+
+    df_price['MarketCap'] = df_price['Close'] * shares
+    df_market = df_price[['Close', 'MarketCap']].copy()
+    df_market.index = pd.to_datetime(df_market.index).tz_localize(None)
+    
+    # 가격 데이터와 재무 데이터 병합
+    df = df_market.join(df_fs, how='outer')
+    df['equity'] = df['equity'].ffill()
+    df['net_income'] = df['net_income'].ffill()
+    df = df.dropna(subset=['Close', 'equity'])
+    
+    if df.empty: return None
+    
+    # PBR, PER 및 일일 수익률 계산
+    df['PBR'] = df['MarketCap'] / df['equity']
+    df['PER'] = df['MarketCap'] / df['net_income']
+    df['PER'] = np.where(df['PER'] < 0, np.nan, df['PER']) # 적자는 결측처리
+    df['Daily_Return'] = df['Close'].pct_change().shift(-1)
+    
+    return df
+
+# UI 구성 및 실행
+st.sidebar.header("⚙️ 백테스트 조건 설정")
+selected_sector = st.sidebar.selectbox("분석 대상 섹터 선택", list(SECTOR_PRESETS.keys()))
+target_stocks = SECTOR_PRESETS[selected_sector]
+start_year = st.sidebar.slider("백테스트 시작 연도", 2018, 2023, 2020)
+end_year = 2023
+
+if st.sidebar.button("🚀 백테스트 실행 및 DB 업데이트", type="primary", use_container_width=True):
+    st.subheader(f"📊 [{selected_sector}] 최적화 분석 진행 중")
+    progress_bar = st.progress(0)
+    
+    sector_results = []
+    pbr_range = np.arange(0.4, 1.6, 0.1) # 탐색할 PBR 범위
+    
+    for idx, s_info in enumerate(target_stocks):
+        ticker, name = s_info["ticker"], s_info["name"]
+        st.write(f"🔄 ({idx+1}/{len(target_stocks)}) [{name}] 데이터 로드 및 연산 중...")
+        
+        df_stock = process_single_stock_data(ticker, start_year, end_year)
+        if df_stock is None or df_stock.empty: 
+            st.warning(f"⚠️ {name} 데이터를 구성할 수 없어 건너뜁니다.")
+            continue
             
-        start_date = f"{start_year}0101"
-        end_date = f"{end_year+1}1231"
+        # 단순 보유 수익률 (Benchmark)
+        df_stock['Cumulative_Market'] = (1 + df_stock['Daily_Return']).cumprod()
+        market_return = (df_stock['Cumulative_Market'].iloc[-2] - 1) * 100
         
-        df_price = stock.get_market_ohlcv(start_date, end_date, ticker)
-        df_cap = stock.get_market_cap(start_date, end_date, ticker)
-        
-        df_market = pd.concat([df_price['종가'], df_cap['시가총액']], axis=1)
-        df_market.columns = ['Close', 'MarketCap']
-        
-        df = df_market.join(df_fs, how='outer')
-        df['equity'] = df['equity'].ffill()
-        df['net_income'] = df['net_income'].ffill()
-        df.dropna(subset=['Close', 'equity'], inplace=True)
-        
-        df['PBR'] = df['MarketCap'] / df['equity']
-        df['PER'] = df['MarketCap'] / df['net_income']
-        df['PER'] = np.where(df['PER'] < 0, np.nan, df['PER'])
-
-        # 시장 단순 존버 수익률
-        df['Daily_Return'] = df['Close'].pct_change().shift(-1)
-        df['Cumulative_Market'] = (1 + df['Daily_Return']).cumprod()
-        final_market = (df['Cumulative_Market'].iloc[-2] - 1) * 100
-
-    with st.spinner("컴퓨터가 최적의 PBR 타겟 숫자를 찾는 중입니다..."):
-        optimization_results = []
-        
-        # PBR 0.5부터 1.5까지 0.1 단위로 10번의 백테스트를 자동 반복
-        for target_pbr in np.arange(0.5, 1.6, 0.1):
-            df_test = df.copy()
+        # PBR 임계값별 수익률 전수 조사
+        for target_pbr in pbr_range:
+            target_pbr = round(target_pbr, 2)
+            df_test = df_stock.copy()
+            # 조건식: PBR이 타겟 이하이고, 흑자(PER>0)일 때 매수 유지
             df_test['Signal'] = np.where((df_test['PBR'] < target_pbr) & (df_test['PER'] > 0), 1, 0)
             df_test['Strategy_Return'] = df_test['Signal'] * df_test['Daily_Return']
             df_test['Cumulative_Strategy'] = (1 + df_test['Strategy_Return']).cumprod()
             
-            final_strategy = (df_test['Cumulative_Strategy'].iloc[-2] - 1) * 100
-            market_beat = final_strategy - final_market
-            
-            optimization_results.append({
-                "PBR 진입 조건": f"PBR {target_pbr:.1f} 이하",
-                "누적 수익률": round(final_strategy, 2),
-                "시장 초과 수익": round(market_beat, 2)
+            strategy_return = (df_test['Cumulative_Strategy'].iloc[-2] - 1) * 100
+            sector_results.append({
+                "name": name, 
+                "target_pbr": target_pbr, 
+                "market_return": market_return, 
+                "strategy_return": strategy_return
             })
             
-        result_df = pd.DataFrame(optimization_results)
-        result_df = result_df.sort_values(by="누적 수익률", ascending=False).reset_index(drop=True)
-        
-        st.subheader(f"📊 최적화 결과 리포트: {corp_name} ({ticker})")
-        st.info(f"단순 보유(Buy & Hold) 시장 수익률: **{final_market:+.2f}%**")
-        
-        st.dataframe(
-            result_df.style.format({"누적 수익률": "{:+.2f}%", "시장 초과 수익": "{:+.2f}%"})\
-                           .background_gradient(subset=['누적 수익률'], cmap='RdYlGn'),
-            use_container_width=True
-        )
-        
-        best_pbr = result_df.iloc[0]['PBR 진입 조건']
-        st.success(f"💡 **AI 퀀트의 결론:** 과거 {start_year}~{end_year}년 데이터 분석 결과, {corp_name}은(는) **'{best_pbr}'** 일 때 매수하는 것이 가장 압도적인 수익을 냈습니다.")
+        progress_bar.progress((idx + 1) / len(target_stocks))
 
-with st.form("backtest_form"):
-    st.write("백테스트할 종목과 기간을 선택하세요.")
-    c1, c2, c3 = st.columns(3)
-    t_ticker = c1.text_input("종목코드 (예: 005380)", value="005380")
-    t_name = c2.text_input("종목명 (예: 현대차)", value="현대차")
-    t_year = c3.slider("시작 연도 (최근 5년 권장)", 2018, 2023, 2020)
+    if not sector_results:
+        st.error("유효한 백테스트 결과를 도출하지 못했습니다.")
+        st.stop()
+        
+    df_res = pd.DataFrame(sector_results)
     
-    if st.form_submit_button("최적의 매수 타점 찾기 (Run)", type="primary"):
-        run_parameter_optimization(t_ticker, t_name, t_year, 2023)
+    # 섹터별 PBR 타겟 평균 성과 집계
+    sector_summary = df_res.groupby("target_pbr").agg(
+        평균_전략수익률=("strategy_return", "mean"), 
+        평균_시장수익률=("market_return", "mean")
+    ).reset_index()
+    
+    # 수익률이 가장 높은 PBR 도출
+    sector_summary = sector_summary.sort_values(by="평균_전략수익률", ascending=False).reset_index(drop=True)
+    best_row = sector_summary.iloc[0]
+    best_pbr = float(best_row["target_pbr"])
+    best_return = float(best_row["평균_전략수익률"])
+    
+    # SQLite DB에 최적 파라미터 자동 저장
+    conn = sqlite3.connect('market_analysis.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS quant_parameters (sector_name TEXT PRIMARY KEY, best_pbr REAL, best_return REAL, updated_at TEXT)''')
+    c.execute('''INSERT OR REPLACE INTO quant_parameters (sector_name, best_pbr, best_return, updated_at) VALUES (?, ?, ?, datetime('now', 'localtime'))''', (selected_sector, best_pbr, best_return))
+    conn.commit()
+    conn.close()
+    
+    # 결과 출력
+    col1, col2 = st.columns(2)
+    col1.metric("🔥 산출된 섹터 최적 PBR 진입점", f"PBR {best_pbr:.1f} 이하")
+    col2.metric("섹터 평균 전략 수익률", f"{best_return:+.2f}%")
+    
+    st.success(f"✅ 분석 완료! 최적값(PBR {best_pbr:.1f})이 메인 DB에 성공적으로 저장되었습니다.")
+    
+    st.markdown("#### 📊 PBR 조건별 수익률 분포")
+    st.dataframe(
+        sector_summary.style.format({"target_pbr": "{:.1f}", "평균_전략수익률": "{:+.2f}%", "평균_시장수익률": "{:+.2f}%"}),
+        use_container_width=True
+    )
