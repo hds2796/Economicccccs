@@ -1067,7 +1067,7 @@ def process_single_ticker(ticker, investment_horizon, user_k, is_discovery_mode=
             forward_growth_pct = ((fund['forward_eps_e'] - eps_history[-1]) / abs(eps_history[-1])) * 100
             growth_pct_val = max(growth_pct_val, forward_growth_pct, 5.0)
 
-        base_cap = max(8.0, float_ind_per * 0.8 if float_ind_per > 0 else 8.0)
+        base_cap = max(8.0, min(float_ind_per * 0.8, PER_CAP_CEILING) if float_ind_per > 0 else 8.0)
         independent_growth_cap = min(growth_pct_val * 1.2, 60.0) 
         dynamic_per_cap = max(base_cap, independent_growth_cap)
         
