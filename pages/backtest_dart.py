@@ -69,9 +69,30 @@ def get_dynamic_sectors():
     df = df.dropna(subset=['Sector'])
     df = df[df['Sector'] != '']
     
-    # 6. 정렬 및 반환
-    df = df.sort_values(by=['Sector', 'Marcap'], ascending=[True, False])
-    return df, sorted(df['Sector'].unique().tolist())
+    # --- 섹터 그룹화 (Macro Sector) 로직 추가 ---
+    MACRO_SECTORS = {
+        "💻 IT/반도체": ["반도체", "소프트웨어", "컴퓨터", "통신", "전자", "프로그래밍", "정보"],
+        "🚗 자동차/운송": ["자동차", "운송", "항공", "해운", "물류"],
+        "💊 제약/바이오": ["의약품", "의료", "생물", "보건"],
+        "🏦 금융/지주": ["은행", "증권", "보험", "금융", "신탁", "지주", "투자"],
+        "⚡ 2차전지/화학": ["화학", "석유", "전지", "플라스틱", "에너지", "고무"],
+        "🏗️ 철강/건설/기계": ["철강", "금속", "건설", "토목", "기계", "장비"],
+        "🛒 소비재/유통/엔터": ["도매", "소매", "음식료", "식품", "섬유", "의복", "화장품", "엔터", "방송", "게임", "영화", "서비스"]
+    }
+
+    def map_sector(s):
+        s_str = str(s)
+        for macro, keywords in MACRO_SECTORS.items():
+            if any(kw in s_str for kw in keywords):
+                return macro
+        return "기타"
+
+    df['Macro_Sector'] = df['Sector'].apply(map_sector)
+    df = df[df['Macro_Sector'] != "기타"] # 분류하기 모호한 파편화된 업종 제외
+    
+    # 6. 정렬 및 반환 (매크로 섹터 기준)
+    df = df.sort_values(by=['Macro_Sector', 'Marcap'], ascending=[True, False])
+    return df, sorted(df['Macro_Sector'].unique().tolist())
 
 @st.cache_data(ttl=3600)
 def get_historical_financials(corp_code, start_year, end_year):
@@ -148,12 +169,12 @@ def process_single_stock_data(ticker, start_year, end_year):
 st.sidebar.header("⚙️ 백테스트 조건 설정")
 
 df_sectors, sector_list = get_dynamic_sectors()
-selected_sector = st.sidebar.selectbox("분석 대상 섹터 (한국표준산업분류)", sector_list)
+selected_sector = st.sidebar.selectbox("분석 대상 대분류 섹터", sector_list)
 
 sampling_method = st.sidebar.radio("종목 추출 방식", ["대형주 집중 (시총 상위순)", "분산 추출 (시총 상/중/하위 균등)"], help="섹터 전반의 왜곡 없는 파라미터를 얻으려면 '분산 추출'을 권장합니다.")
 top_n = st.sidebar.slider("분석할 종목 수", 3, 50, 15, help="종목 수가 많을수록 결과가 정확해지지만 DART 통신으로 인해 분석 시간이 증가합니다.")
 
-sector_stocks_all = df_sectors[df_sectors['Sector'] == selected_sector]
+sector_stocks_all = df_sectors[df_sectors['Macro_Sector'] == selected_sector]
 
 if sampling_method == "대형주 집중 (시총 상위순)":
     sector_stocks = sector_stocks_all.head(top_n)
