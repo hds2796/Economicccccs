@@ -19,35 +19,46 @@ except KeyError:
 
 dart = OpenDartReader(DART_API_KEY)
 
-# 테스트 대상 섹터 정의
-SECTOR_PRESETS = {
-    "🚗 자동차/부품": [{"ticker": "005380", "name": "현대차"}, {"ticker": "000270", "name": "기아"}],
-    "💻 반도체": [{"ticker": "005930", "name": "삼성전자"}, {"ticker": "000660", "name": "SK하이닉스"}],
-    "🏦 금융지주": [{"ticker": "105560", "name": "KB금융"}, {"ticker": "055550", "name": "신한지주"}],
-    "🔋 2차전지": [{"ticker": "373220", "name": "LG에너지솔루션"}, {"ticker": "005490", "name": "POSCO홀딩스"}]
-}
+@st.cache_data(ttl=86400)
+def get_dynamic_sectors():
+    """KRX 전체 종목의 섹터 정보와 시가총액을 동적으로 불러옵니다."""
+    df_krx = fdr.StockListing('KRX')
+    df_desc = fdr.StockListing('KRX-DESC')
+    
+    # 종목코드 기준으로 시가총액과 섹터 데이터 병합
+    df = pd.merge(df_krx[['Code', 'Name', 'Marcap']], df_desc[['Symbol', 'Sector']], left_on='Code', right_on='Symbol', how='inner')
+    df = df.dropna(subset=['Sector'])
+    df = df[df['Sector'] != '']
+    
+    # 섹터별로 시가총액 내림차순 정렬
+    df = df.sort_values(by=['Sector', 'Marcap'], ascending=[True, False])
+    return df, sorted(df['Sector'].unique().tolist())
 
 @st.cache_data(ttl=3600)
 def get_historical_financials(corp_code, start_year, end_year):
-    """DART에서 과거 자본총계 및 당기순이익 추출"""
+    """DART에서 과거 자본총계 및 당기순이익 추출 (계정과목 정규식 및 미래참조 차단 적용)"""
     fs_data = []
     for year in range(start_year, end_year + 1):
         try:
             report = dart.finstate(corp_code, year, reprt_code='11011')
             if report is None or report.empty: continue
                 
-            equity_row = report.loc[(report['account_nm'] == '자본총계') & (report['fs_div'] == 'CFS')]
-            if equity_row.empty: equity_row = report.loc[(report['account_nm'] == '자본총계') & (report['fs_div'] == 'OFS')]
+            # 계정과목 파편화 해결: 금융주 및 지주사의 다양한 명칭을 정규식으로 포괄 검색
+            eq_cond = report['account_nm'].str.contains('자본총계|지배.*자본|지배.*지분', regex=True)
+            ni_cond = report['account_nm'].str.contains('당기순이익|지배.*순이익', regex=True)
+            
+            equity_row = report.loc[eq_cond & (report['fs_div'] == 'CFS')]
+            if equity_row.empty: equity_row = report.loc[eq_cond & (report['fs_div'] == 'OFS')]
                 
-            net_income_row = report.loc[(report['account_nm'] == '당기순이익') & (report['fs_div'] == 'CFS')]
-            if net_income_row.empty: net_income_row = report.loc[(report['account_nm'] == '당기순이익') & (report['fs_div'] == 'OFS')]
+            net_income_row = report.loc[ni_cond & (report['fs_div'] == 'CFS')]
+            if net_income_row.empty: net_income_row = report.loc[ni_cond & (report['fs_div'] == 'OFS')]
 
             if not equity_row.empty and not net_income_row.empty:
                 equity = float(equity_row.iloc[0]['thstrm_amount'].replace(',', ''))
                 net_income = float(net_income_row.iloc[0]['thstrm_amount'].replace(',', ''))
                 
-                # 공시 반영 시점(이듬해 3월 말) 기준으로 데이터 매핑
-                fs_data.append({'report_date': f"{year+1}-03-31", 'equity': equity, 'net_income': net_income})
+                # 미래참조 편향 제거: 사업보고서 제출 지연까지 고려하여 익년 4월 30일로 적용
+                fs_data.append({'report_date': f"{year+1}-04-30", 'equity': equity, 'net_income': net_income})
             time.sleep(0.4) 
         except Exception:
             pass
@@ -73,12 +84,12 @@ def process_single_stock_data(ticker, start_year, end_year):
         
     if df_price.empty: return None
 
-    # KRX 상장주식수 조회하여 시가총액 계산 (과거 액면분할 등에 대한 완벽한 추적은 어려우나 PBR 계산을 위한 프록시로 사용)
+    # KRX 상장주식수 조회하여 시가총액 계산
     try:
         krx_list = fdr.StockListing('KRX')
         shares = krx_list.loc[krx_list['Code'] == ticker, 'Stocks'].values[0]
     except Exception:
-        shares = 100000000 # 방어 코드
+        shares = 100000000
 
     df_price['MarketCap'] = df_price['Close'] * shares
     df_market = df_price[['Close', 'MarketCap']].copy()
@@ -102,13 +113,40 @@ def process_single_stock_data(ticker, start_year, end_year):
 
 # UI 구성 및 실행
 st.sidebar.header("⚙️ 백테스트 조건 설정")
-selected_sector = st.sidebar.selectbox("분석 대상 섹터 선택", list(SECTOR_PRESETS.keys()))
-target_stocks = SECTOR_PRESETS[selected_sector]
+
+# 동적 섹터 데이터 로드
+df_sectors, sector_list = get_dynamic_sectors()
+selected_sector = st.sidebar.selectbox("분석 대상 섹터 (한국표준산업분류)", sector_list)
+
+# 샘플링 방식 및 종목 수 설정
+sampling_method = st.sidebar.radio("종목 추출 방식", ["대형주 집중 (시총 상위순)", "분산 추출 (시총 상/중/하위 균등)"], help="섹터 전반의 왜곡 없는 파라미터를 얻으려면 '분산 추출'을 권장합니다.")
+top_n = st.sidebar.slider("분석할 종목 수", 3, 50, 15, help="종목 수가 많을수록 결과가 정확해지지만 DART 통신으로 인해 분석 시간이 증가합니다.")
+
+sector_stocks_all = df_sectors[df_sectors['Sector'] == selected_sector]
+
+# 추출 로직
+if sampling_method == "대형주 집중 (시총 상위순)":
+    sector_stocks = sector_stocks_all.head(top_n)
+else:
+    # 균등 추출 (Stratified Sampling)
+    total_in_sector = len(sector_stocks_all)
+    if total_in_sector <= top_n:
+        sector_stocks = sector_stocks_all
+    else:
+        # np.linspace를 사용하여 시가총액 분포에서 고르게 인덱스 추출
+        indices = np.linspace(0, total_in_sector - 1, top_n, dtype=int)
+        sector_stocks = sector_stocks_all.iloc[indices]
+
+target_stocks = [{"ticker": row['Code'], "name": row['Name']} for _, row in sector_stocks.iterrows()]
+
+with st.sidebar.expander(f"추출된 분석 대상 종목 ({len(target_stocks)}개)"):
+    st.markdown(", ".join([s['name'] for s in target_stocks]))
+
 start_year = st.sidebar.slider("백테스트 시작 연도", 2018, 2023, 2020)
 end_year = 2023
 
 if st.sidebar.button("🚀 백테스트 실행 및 DB 업데이트", type="primary", use_container_width=True):
-    st.subheader(f"📊 [{selected_sector}] 최적화 분석 진행 중")
+    st.subheader(f"📊 [{selected_sector}] 최적화 분석 진행 중 (총 {len(target_stocks)}종목)")
     progress_bar = st.progress(0)
     
     sector_results = []
