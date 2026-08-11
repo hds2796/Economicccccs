@@ -25,27 +25,43 @@ def get_dynamic_sectors():
     df_krx = fdr.StockListing('KRX')
     df_desc = fdr.StockListing('KRX-DESC')
     
-    # 1. 인덱스 초기화 (종목코드가 인덱스로 묶여서 안 보이는 현상 원천 차단)
-    df_krx = df_krx.reset_index()
-    df_desc = df_desc.reset_index()
+    # 1. 인덱스가 종목코드 성격일 경우에만 컬럼으로 추출 (무조건 reset_index 시 'index' 중복 생성 방지)
+    if df_krx.index.name in ['Code', 'Symbol', '종목코드']:
+        df_krx = df_krx.reset_index()
+    if df_desc.index.name in ['Code', 'Symbol', '종목코드']:
+        df_desc = df_desc.reset_index()
+        
+    # 2. 중복 이름 생성을 방지하는 안전한 컬럼명 표준화 함수
+    def standardize_df(df, target_mappings):
+        for target_col, alt_names in target_mappings.items():
+            if target_col not in df.columns:
+                for alt in alt_names:
+                    if alt in df.columns:
+                        df = df.rename(columns={alt: target_col})
+                        break # 첫 번째 일치 항목만 변경 후 종료하여 중복 방지
+        return df
+        
+    df_krx = standardize_df(df_krx, {
+        'Code': ['종목코드', 'Symbol', 'code'],
+        'Name': ['종목명', 'name'],
+        'Marcap': ['시가총액', 'marcap']
+    })
     
-    # 2. 모든 가능한 컬럼명 경우의 수를 표준명(Code, Name, Marcap, Sector)으로 강제 매핑
-    col_mapping = {
-        '종목코드': 'Code', 'Symbol': 'Code', 'code': 'Code', 'index': 'Code', 'level_0': 'Code',
-        '종목명': 'Name', 'name': 'Name',
-        '시가총액': 'Marcap', 'marcap': 'Marcap',
-        '업종': 'Sector', '업종명': 'Sector', 'Industry': 'Sector', 'sector': 'Sector'
-    }
+    df_desc = standardize_df(df_desc, {
+        'Code': ['종목코드', 'Symbol', 'code'],
+        'Sector': ['업종', '업종명', 'Industry', 'sector']
+    })
     
-    df_krx = df_krx.rename(columns=col_mapping)
-    df_desc = df_desc.rename(columns=col_mapping)
+    # 3. 만약의 경우를 대비한 중복 컬럼 물리적 제거
+    df_krx = df_krx.loc[:, ~df_krx.columns.duplicated()]
+    df_desc = df_desc.loc[:, ~df_desc.columns.duplicated()]
     
-    # 3. 필수 컬럼 존재 여부 최종 검증
+    # 4. 필수 컬럼 존재 여부 최종 검증
     if 'Code' not in df_krx.columns or 'Code' not in df_desc.columns or 'Sector' not in df_desc.columns:
         st.error("오류: KRX 서버의 데이터 제공 구조가 완전히 파괴되었습니다. FinanceDataReader 라이브러리 업데이트가 필요합니다.")
         st.stop()
         
-    # 4. 타입 강제 통일 후 병합 (문자열 통일로 형변환 에러 방지)
+    # 5. 타입 강제 통일 후 병합
     df_krx['Code'] = df_krx['Code'].astype(str)
     df_desc['Code'] = df_desc['Code'].astype(str)
     
@@ -53,7 +69,7 @@ def get_dynamic_sectors():
     df = df.dropna(subset=['Sector'])
     df = df[df['Sector'] != '']
     
-    # 5. 정렬 및 반환
+    # 6. 정렬 및 반환
     df = df.sort_values(by=['Sector', 'Marcap'], ascending=[True, False])
     return df, sorted(df['Sector'].unique().tolist())
 
