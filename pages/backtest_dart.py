@@ -1,13 +1,28 @@
+# -------------------------------------------------------------
+# 🔥 Python 3.14 호환성을 위한 pykrx pkg_resources 모듈 에러 우회 패치 (V2)
 import sys
+import os
+import importlib.util
 from types import ModuleType
 
 if 'pkg_resources' not in sys.modules:
     mock_pkg = ModuleType('pkg_resources')
+    
     class MockDistribution:
         version = "1.0.47"
+        
     def get_distribution(name):
         return MockDistribution()
+        
+    def resource_filename(package_or_requirement, resource_name):
+        # pykrx가 내부 달력 파일(csv)을 찾을 때 실제 설치된 경로를 계산해서 던져줌
+        spec = importlib.util.find_spec(package_or_requirement)
+        if spec and spec.origin:
+            return os.path.join(os.path.dirname(spec.origin), resource_name)
+        return resource_name
+        
     mock_pkg.get_distribution = get_distribution
+    mock_pkg.resource_filename = resource_filename
     sys.modules['pkg_resources'] = mock_pkg
 # -------------------------------------------------------------
 
@@ -18,6 +33,8 @@ import pandas as pd
 import numpy as np
 import time
 import sqlite3
+
+# ... (이하 기존 백테스트 코드 유지)
 import streamlit as st
 import OpenDartReader
 from pykrx import stock
